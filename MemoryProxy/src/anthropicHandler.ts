@@ -59,15 +59,7 @@ import {
   isRateLimitExceededError,
   recordInputTokenUsage,
 } from "./rate-limit/guard.js";
-
-const SKIP_REQUEST_HEADERS = new Set([
-  "host",
-  "content-length",
-  "transfer-encoding",
-  "connection",
-  // 内部身份头只给 proxy/session-init 使用，不能透传给上游模型服务。
-  "x-tdai-user-key",
-]);
+import { buildSafeUpstreamHeaders } from "./upstream-headers.js";
 
 const SKIP_RESPONSE_HEADERS = new Set([
   "content-encoding",
@@ -333,41 +325,14 @@ function buildUpstreamBody(
  */
 function buildUpstreamHeaders(
   c: Context,
-  _config: ProxyConfig,
   target: ForwardTarget,
-  sessionKey?: string,
   effectiveApiKey?: string,
 ): Record<string, string> {
-  const headers: Record<string, string> = {};
-  for (const [k, v] of c.req.raw.headers.entries()) {
-    if (!SKIP_REQUEST_HEADERS.has(k.toLowerCase())) {
-      headers[k] = v;
-    }
-  }
-  headers["content-type"] = "application/json";
-
-  // `effectiveApiKey` is pre-resolved by the caller according to the
-  // per-agent fallback rule (see the resolveEffectiveApiKey call site).
-  //   - non-empty string → inject as server-side key, drop client's own
-  //   - empty/undefined  → passthrough: keep whatever the client sent
-  // The cost-guard extension can still fully override via target.authHeaders.
-  if (effectiveApiKey && !target.authHeaders) {
-    headers["x-api-key"] = effectiveApiKey;
-    delete headers["authorization"];
-  }
-
-  if (target.authHeaders) {
-    for (const [k, v] of Object.entries(target.authHeaders)) {
-      headers[k] = v;
-      if (k === "x-api-key") delete headers["authorization"];
-      if (k === "authorization") delete headers["x-api-key"];
-    }
-  }
-
-  if (sessionKey) {
-    headers["x-vertex-ai-session-id"] = sessionKey;
-  }
-  return headers;
+  return buildSafeUpstreamHeaders(c.req.raw.headers, {
+    protocol: "anthropic",
+    apiKey: effectiveApiKey,
+    authHeaders: target.authHeaders,
+  });
 }
 
 /**
@@ -378,10 +343,8 @@ async function forwardWithRetry(
   upstreamHeaders: Record<string, string>,
   upstreamBody: Record<string, unknown>,
   originalBody: Record<string, unknown>,
-  originalHeaders: Record<string, string>,
   pipe: ReturnType<typeof createPipeline>,
   forwardTimeoutMs: number,
-  sessionKeyForDebug?: string,
   rateLimitContext?: { config: ProxyConfig; instanceId?: string },
 ): Promise<{ resp: Response; retried: boolean }> {
   let upstreamResp: Response | undefined;
@@ -474,11 +437,7 @@ async function forwardWithRetry(
     const reason = forwardFailed ? "timeout/error" : `${upstreamResp!.status}`;
     pipe.info("RETRY", `Routed model failed (${reason}), retrying with ${target.retryTarget.model}`);
 
-    const retryHeaders: Record<string, string> = { ...originalHeaders };
-    retryHeaders["content-type"] = "application/json";
-    if (sessionKeyForDebug) {
-      retryHeaders["x-vertex-ai-session-id"] = sessionKeyForDebug;
-    }
+    const retryHeaders: Record<string, string> = { ...upstreamHeaders };
 
     try {
       if (rateLimitContext) {
@@ -1157,33 +1116,13 @@ export async function handleAnthropicMessages(
   const effectiveApiKey = agentUpstreamEntry
     ? (agentUpstreamEntry.apiKey ?? "")
     : config.upstream.apiKey;
-  const upstreamHeaders = buildUpstreamHeaders(c, config, target, sessionKey, effectiveApiKey);
+  const upstreamHeaders = buildUpstreamHeaders(c, target, effectiveApiKey);
   const { body: upstreamBody, sanitizedCount } = buildUpstreamBody(body, target);
   if (sanitizedCount > 0) {
     pipe.info(
       "FORWARD",
       `stripped ${sanitizedCount} invalid thinking block(s) from history`,
     );
-  }
-
-  // Retry headers: preserve original client headers (x-request-id, user-agent,
-  // etc.), then force the primary upstream's auth — retry always goes to the
-  // default upstream (never the alternate route), so its apiKey must be applied
-  // just like the first-attempt path. Without this, retry sends the
-  // client's raw auth to tokenhub and gets 401.
-  const originalHeaders: Record<string, string> = {};
-  for (const [k, v] of c.req.raw.headers.entries()) {
-    if (!SKIP_REQUEST_HEADERS.has(k.toLowerCase())) {
-      originalHeaders[k] = v;
-    }
-  }
-  // Retry uses the same effective key as the primary path — same three
-  // cases as above. When it resolves to "" (agent entry present but no
-  // apiKey), retry also runs on the client's own key: preserves the
-  // "passthrough on this agent" intent even across retries.
-  if (effectiveApiKey) {
-    originalHeaders["x-api-key"] = effectiveApiKey;
-    delete originalHeaders["authorization"];
   }
 
   const retryBody = sanitizeThinkingBlocks(body).body;
@@ -1197,9 +1136,8 @@ export async function handleAnthropicMessages(
   try {
     const result = await forwardWithRetry(
       target, upstreamHeaders, upstreamBody,
-      retryBody, originalHeaders,
+      retryBody,
       pipe, forwardTimeoutMs,
-      sessionKey,
       { config, instanceId: spaceId || undefined },
     );
     upstreamResp = result.resp;

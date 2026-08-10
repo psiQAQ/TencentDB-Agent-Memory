@@ -49,10 +49,12 @@ function messagesRequest(sessionId?: string): RequestInit {
 
 describe("native Anthropic platform routes", () => {
   let calls: string[];
+  let upstreamHeaders: Headers[];
 
   beforeEach(() => {
     calls = [];
-    vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request) => {
+    upstreamHeaders = [];
+    vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
       const url = input instanceof Request ? input.url : String(input);
       calls.push(url);
       if (url.endsWith("/v3/meta/auth/verify")) {
@@ -61,6 +63,7 @@ describe("native Anthropic platform routes", () => {
           data: { valid: true, user: { user_id: "user-1" } },
         }), { status: 200, headers: { "content-type": "application/json" } });
       }
+      upstreamHeaders.push(new Headers(init?.headers));
       return new Response(JSON.stringify({
         id: "msg-test",
         type: "message",
@@ -98,6 +101,62 @@ describe("native Anthropic platform routes", () => {
       `https://${source}.upstream.invalid/anthropic/v1/messages`,
     ]);
     expect(resolveAgentAdapter(source).agentKind).toBe(source);
+  });
+
+  it.each(SOURCES)("does not forward private headers on the %s main route", async (source) => {
+    const config = configWithAuth();
+    initAuth(config.auth);
+    const app = createApp(config);
+
+    const response = await app.request(`http://proxy/${source}/space-1/v1/messages`, {
+      ...messagesRequest("private-session-value"),
+      headers: {
+        "content-type": "application/json",
+        accept: "application/json",
+        "anthropic-version": "2023-06-01",
+        "anthropic-beta": "safe-feature",
+        authorization: "Bearer private-caller-credential",
+        "x-api-key": "private-memory-credential",
+        "x-team-id": "private-team-value",
+        "x-agent-id": "private-agent-value",
+        "x-task-id": "private-task-value",
+        "x-conversation-id": "private-conversation-value",
+        "x-session-id": "private-session-value",
+        "x-claude-code-session-id": "private-claude-session-value",
+        "x-vertex-ai-session-id": "private-vertex-session-value",
+        "x-tdai-service-id": "private-service-value",
+        "x-tdai-user-key": "private-user-key-value",
+        "x-tdai-user-id": "private-user-value",
+        "x-tdai-extra": "private-extra-value",
+      },
+    });
+
+    const headers = upstreamHeaders[0];
+    const forbiddenNames = [
+      "authorization",
+      "x-team-id",
+      "x-agent-id",
+      "x-task-id",
+      "x-conversation-id",
+      "x-session-id",
+      "x-claude-code-session-id",
+      "x-vertex-ai-session-id",
+      "x-tdai-service-id",
+      "x-tdai-user-key",
+      "x-tdai-user-id",
+      "x-tdai-extra",
+    ];
+    const hasPrivateHeader = forbiddenNames.some((name) => headers?.has(name));
+    const hasPrivateValue = [...(headers?.values() ?? [])]
+      .some((value) => value.startsWith("private-"));
+
+    expect(response.status).toBe(200);
+    expect(hasPrivateHeader).toBe(false);
+    expect(hasPrivateValue).toBe(false);
+    expect(headers?.get("x-api-key")).toBe("server-key");
+    expect(headers?.get("anthropic-version")).toBe("2023-06-01");
+    expect(headers?.get("anthropic-beta")).toBe("safe-feature");
+    expect(headers?.get("accept")).toBe("application/json");
   });
 
   it("rejects an unknown Anthropic-style prefix before auth or upstream", async () => {

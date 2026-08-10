@@ -34,14 +34,7 @@ import {
   getAnthropicSourceBindingError,
   type AnthropicMessageSource,
 } from "./agent-adapters/anthropic-platform.js";
-
-/** Hop-by-hop headers 与 host header：不能透传到 upstream。 */
-const SKIP_REQUEST_HEADERS = new Set([
-  "host",
-  "content-length",
-  "transfer-encoding",
-  "connection",
-]);
+import { buildSafeUpstreamHeaders } from "./upstream-headers.js";
 
 /** 响应头中不应回传给客户端的头（避免 stream 长度不一致等问题）。 */
 const SKIP_RESPONSE_HEADERS = new Set([
@@ -64,24 +57,10 @@ function buildAuxUpstreamHeaders(
   upstreamApiKey: string,
   entry: WhitelistEndpoint,
 ): Record<string, string> {
-  const headers: Record<string, string> = {};
-  for (const [k, v] of c.req.raw.headers.entries()) {
-    if (!SKIP_REQUEST_HEADERS.has(k.toLowerCase())) {
-      headers[k] = v;
-    }
-  }
-  headers["content-type"] = headers["content-type"] ?? "application/json";
-
-  if (upstreamApiKey) {
-    if (entry.protocol === "anthropic") {
-      headers["x-api-key"] = upstreamApiKey;
-      delete headers["authorization"];
-    } else {
-      headers["authorization"] = `Bearer ${upstreamApiKey}`;
-      delete headers["x-api-key"];
-    }
-  }
-  return headers;
+  return buildSafeUpstreamHeaders(c.req.raw.headers, {
+    protocol: entry.protocol,
+    apiKey: upstreamApiKey,
+  });
 }
 
 /** 过滤响应头（剥离长度/编码相关字段），返回可直接下发的 Headers 对象。 */

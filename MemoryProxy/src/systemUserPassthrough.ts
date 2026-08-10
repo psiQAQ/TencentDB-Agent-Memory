@@ -65,14 +65,7 @@ import {
   isRateLimitExceededError,
   recordInputTokenUsage,
 } from "./rate-limit/guard.js";
-
-/** Hop-by-hop headers we must strip before forwarding to upstream. */
-const SKIP_REQUEST_HEADERS = new Set([
-  "host",
-  "content-length",
-  "transfer-encoding",
-  "connection",
-]);
+import { buildSafeUpstreamHeaders } from "./upstream-headers.js";
 
 /** Response headers that would confuse the client if forwarded verbatim. */
 const SKIP_RESPONSE_HEADERS = new Set([
@@ -83,30 +76,22 @@ const SKIP_RESPONSE_HEADERS = new Set([
 ]);
 
 /**
- * Build upstream headers by cloning inbound headers minus hop-by-hop entries.
+ * Build upstream headers from the same protocol allowlist as normal requests.
  *
  * The caller's inbound key (`Authorization` / `x-api-key`) is a proxy-layer
  * auth credential — the sk-mem-xxx that `verifyUserKey` resolves against the
  * auth service. It is NOT a credential TokenHub (`config.upstream.url`) would
- * accept. So, exactly like the standard handler paths do, we replace it with
- * `config.upstream.apiKey` before forwarding. `x-api-key` is dropped to avoid
- * shipping two conflicting auth headers upstream.
+ * accept. It is dropped with every internal identity/session header, then the
+ * configured upstream key is added in the selected protocol's auth format.
  */
 function buildPassthroughHeaders(c: Context, config: ProxyConfig): Record<string, string> {
-  const headers: Record<string, string> = {};
-  for (const [k, v] of c.req.raw.headers.entries()) {
-    if (!SKIP_REQUEST_HEADERS.has(k.toLowerCase())) {
-      headers[k] = v;
-    }
-  }
-  if (config.upstream.apiKey) {
-    for (const k of Object.keys(headers)) {
-      const lower = k.toLowerCase();
-      if (lower === "authorization" || lower === "x-api-key") delete headers[k];
-    }
-    headers["authorization"] = `Bearer ${config.upstream.apiKey}`;
-  }
-  return headers;
+  const protocol = /\/v1\/messages(?:\/count_tokens)?$/.test(c.req.path)
+    ? "anthropic"
+    : "openai";
+  return buildSafeUpstreamHeaders(c.req.raw.headers, {
+    protocol,
+    apiKey: config.upstream.apiKey,
+  });
 }
 
 /** Copy upstream response headers minus length/encoding fields. */

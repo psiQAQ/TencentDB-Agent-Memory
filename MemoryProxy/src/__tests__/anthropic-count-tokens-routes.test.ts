@@ -75,6 +75,65 @@ describe("route-bound Anthropic count_tokens", () => {
     expect(calls[1].headers.has("authorization")).toBe(false);
   });
 
+  it.each(SOURCES)("does not forward private headers on the %s count_tokens route", async (source) => {
+    const config = configWithAuth();
+    initAuth(config.auth);
+    const app = createApp(config);
+
+    const response = await app.request(
+      `http://proxy/${source}/space-1/v1/messages/count_tokens`,
+      {
+        ...request(),
+        headers: {
+          "content-type": "application/json",
+          accept: "application/json",
+          "anthropic-version": "2023-06-01",
+          "anthropic-beta": "safe-feature",
+          authorization: "Bearer private-caller-credential",
+          "x-api-key": "private-memory-credential",
+          "x-team-id": "private-team-value",
+          "x-agent-id": "private-agent-value",
+          "x-task-id": "private-task-value",
+          "x-conversation-id": "private-conversation-value",
+          "x-session-id": "private-session-value",
+          "x-claude-code-session-id": "private-claude-session-value",
+          "x-vertex-ai-session-id": "private-vertex-session-value",
+          "x-tdai-service-id": "private-service-value",
+          "x-tdai-user-key": "private-user-key-value",
+          "x-tdai-user-id": "private-user-value",
+          "x-tdai-extra": "private-extra-value",
+        },
+      },
+    );
+
+    const headers = calls[1].headers;
+    const forbiddenNames = [
+      "authorization",
+      "x-team-id",
+      "x-agent-id",
+      "x-task-id",
+      "x-conversation-id",
+      "x-session-id",
+      "x-claude-code-session-id",
+      "x-vertex-ai-session-id",
+      "x-tdai-service-id",
+      "x-tdai-user-key",
+      "x-tdai-user-id",
+      "x-tdai-extra",
+    ];
+    const hasPrivateHeader = forbiddenNames.some((name) => headers.has(name));
+    const hasPrivateValue = [...headers.values()]
+      .some((value) => value.startsWith("private-"));
+
+    expect(response.status).toBe(200);
+    expect(hasPrivateHeader).toBe(false);
+    expect(hasPrivateValue).toBe(false);
+    expect(headers.get("x-api-key")).toBe(`${source}-key`);
+    expect(headers.get("anthropic-version")).toBe("2023-06-01");
+    expect(headers.get("anthropic-beta")).toBe("safe-feature");
+    expect(headers.get("accept")).toBe("application/json");
+  });
+
   it("rejects an unknown source before auth, body, upstream, or credit", async () => {
     const config = configWithAuth();
     initAuth(config.auth);
