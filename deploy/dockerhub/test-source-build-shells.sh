@@ -15,6 +15,13 @@ tracked_shells() {
   fi
 }
 
+tracked_shell_manifest="$(mktemp)"
+trap 'rm -f "$tracked_shell_manifest"' EXIT
+if ! tracked_shells >"$tracked_shell_manifest" 2>/dev/null; then
+  echo "tracked shell enumeration failed" >&2
+  exit 1
+fi
+
 tracked=0
 crlf_failures=0
 syntax_failures=0
@@ -29,7 +36,7 @@ while IFS= read -r -d '' relative_path; do
     echo "Bash syntax check failed: $script" >&2
     syntax_failures=$((syntax_failures + 1))
   fi
-done < <(tracked_shells)
+done <"$tracked_shell_manifest"
 
 if [[ "$tracked" -eq 0 ]]; then
   echo "no tracked shell scripts found" >&2
