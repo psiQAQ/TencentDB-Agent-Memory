@@ -248,7 +248,8 @@ export function createMemoryBridgeHandler(
       return envelope(40301, `${TAG} subpath not allowed via bridge`, 403);
     }
     if (c.req.method !== "POST") {
-      return envelope(40501, `${TAG} method ${c.req.method} not allowed`, 405);
+      console.warn(`${TAG} request rejected reason=method_not_allowed`);
+      return envelope(40501, "Method not allowed", 405);
     }
 
     const ct = c.req.header("content-type") ?? "";

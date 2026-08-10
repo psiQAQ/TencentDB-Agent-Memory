@@ -20,6 +20,7 @@ import { handleSystemUserPassthrough } from "../systemUserPassthrough.js";
 
 const PRIVATE_VALUE = "private-active-diagnostics-value";
 const PRIVATE_BODY_VALUE = "rawjsonx";
+const PRIVATE_METHOD_VALUE = "rawmethodx";
 const PRIVATE_REQUEST_ID = "reqpriv8";
 const TEST_USER_KEY = "abc";
 const TEST_USER_KEY_FINGERPRINT = "ba7816bf";
@@ -28,6 +29,7 @@ function containsPrivateValue(value: unknown): boolean {
   const needles = [
     PRIVATE_VALUE,
     PRIVATE_BODY_VALUE,
+    PRIVATE_METHOD_VALUE,
     PRIVATE_REQUEST_ID,
     TEST_USER_KEY_FINGERPRINT,
   ];
@@ -35,10 +37,14 @@ function containsPrivateValue(value: unknown): boolean {
 
   const visit = (item: unknown): boolean => {
     if (typeof item === "string") {
-      return needles.some((needle) => item.includes(needle));
+      const normalized = item.toLowerCase();
+      return needles.some((needle) => normalized.includes(needle.toLowerCase()));
+    }
+    if (item instanceof AggregateError) {
+      return visit(item.message) || visit(item.stack) || visit(item.cause) || visit(item.errors);
     }
     if (item instanceof Error) {
-      return visit(item.message) || visit(item.stack);
+      return visit(item.message) || visit(item.stack) || visit(item.cause);
     }
     if (!item || typeof item !== "object" || seen.has(item)) return false;
     seen.add(item);
@@ -61,6 +67,11 @@ afterEach(() => {
 });
 
 describe("active diagnostics privacy", () => {
+  it("detects private values nested in error causes", () => {
+    const nested = new Error("safe", { cause: PRIVATE_VALUE });
+    expect(containsPrivateValue(new AggregateError([nested], "safe"))).toBe(true);
+  });
+
   it("keeps private pipeline fields out of stderr and structured logs", () => {
     const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
     const debug = vi.spyOn(log, "debug").mockImplementation(() => {});
@@ -206,19 +217,40 @@ describe("active diagnostics privacy", () => {
         body: PRIVATE_BODY_VALUE,
       },
     );
+    const invalidMethod = await app.request(
+      "http://proxy/memory-bridge/v3/scenario/read",
+      {
+        method: PRIVATE_METHOD_VALUE,
+        headers: { "content-type": "application/json" },
+        body: "{}",
+      },
+    );
     const responseBodies = await Promise.all([
       unknownPath.json(),
       forbiddenSubpath.json(),
       invalidJson.json(),
+      invalidMethod.json(),
     ]);
 
-    expect([unknownPath.status, forbiddenSubpath.status, invalidJson.status]).toEqual([404, 403, 400]);
+    expect([
+      unknownPath.status,
+      forbiddenSubpath.status,
+      invalidJson.status,
+      invalidMethod.status,
+    ]).toEqual([404, 403, 400, 405]);
     expect(containsPrivateValue(responseBodies)).toBe(false);
     expect(containsPrivateValue(consoleWarn.mock.calls)).toBe(false);
+    expect(responseBodies.map(({ code, message }) => ({ code, message }))).toEqual([
+      { code: 40401, message: "[memory-bridge] unknown path" },
+      { code: 40301, message: "[memory-bridge] subpath not allowed via bridge" },
+      { code: 40001, message: "[memory-bridge] invalid JSON body" },
+      { code: 40501, message: "Method not allowed" },
+    ]);
     expect(consoleWarn.mock.calls.map(([event]) => event)).toEqual([
       "[memory-bridge] request rejected reason=unknown_path",
       "[memory-bridge] request rejected reason=subpath_not_allowed",
       "[memory-bridge] request rejected reason=invalid_json",
+      "[memory-bridge] request rejected reason=method_not_allowed",
     ]);
   });
 
