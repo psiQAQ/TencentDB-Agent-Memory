@@ -61,6 +61,7 @@ import {
 import {
   buildSafeUpstreamHeaders,
   MissingUpstreamCredentialError,
+  sameOrigin,
 } from "./upstream-headers.js";
 
 const SKIP_RESPONSE_HEADERS = new Set([
@@ -338,14 +339,6 @@ function buildUpstreamHeaders(
     apiKey: originBoundApiKey,
     authHeaders: target.authHeaders,
   });
-}
-
-function sameOrigin(left: string, right: string): boolean {
-  try {
-    return new URL(left).origin === new URL(right).origin;
-  } catch {
-    return false;
-  }
 }
 
 function buildRetryUpstreamHeaders(

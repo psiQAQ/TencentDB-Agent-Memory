@@ -25,6 +25,15 @@ function safeProtocolValue(name: string, value: string): boolean {
   return value.length <= 512 && /^[A-Za-z0-9._=, -]+$/.test(value);
 }
 
+/** Compare only canonical URL origins; malformed URLs never share credentials. */
+export function sameOrigin(left: string, right: string): boolean {
+  try {
+    return new URL(left).origin === new URL(right).origin;
+  } catch {
+    return false;
+  }
+}
+
 /** Build a fail-closed upstream header set from an explicit protocol allowlist. */
 export function buildSafeUpstreamHeaders(
   inbound: Headers,

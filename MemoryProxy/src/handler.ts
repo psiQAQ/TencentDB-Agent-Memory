@@ -49,6 +49,11 @@ import {
   isRateLimitExceededError,
   recordInputTokenUsage,
 } from "./rate-limit/guard.js";
+import {
+  buildSafeUpstreamHeaders,
+  MissingUpstreamCredentialError,
+  sameOrigin,
+} from "./upstream-headers.js";
 
 /**
  * Build a per-request TdaiClient. `spaceId` (extracted from the request path
@@ -194,13 +199,6 @@ function flattenMessagesForOpik(messages: unknown[]): unknown[] {
   return result;
 }
 
-const SKIP_REQUEST_HEADERS = new Set([
-  "host",
-  "content-length",
-  "transfer-encoding",
-  "connection",
-]);
-
 const SKIP_RESPONSE_HEADERS = new Set([
   "content-encoding",
   "transfer-encoding",
@@ -247,43 +245,41 @@ function buildUpstreamBody(
 }
 
 /**
- * Build upstream headers from request headers + routing auth overrides.
- * If config.upstream.apiKey is set, it overrides the request's Authorization header
- * only for the default route (not alternate model route).
+ * Build upstream headers without letting an extension redirect configured credentials.
  */
 function buildUpstreamHeaders(
   c: Context,
-  _config: ProxyConfig,
   target: ForwardTarget,
-  sessionKey?: string,
+  credentialOrigin: string,
   effectiveApiKey?: string,
 ): Record<string, string> {
-  const headers: Record<string, string> = {};
-  for (const [k, v] of c.req.raw.headers.entries()) {
-    if (!SKIP_REQUEST_HEADERS.has(k.toLowerCase())) {
-      headers[k] = v;
-    }
-  }
-  headers["content-type"] = "application/json";
+  const originBoundApiKey = target.authHeaders === null
+    && sameOrigin(target.url, credentialOrigin)
+    ? effectiveApiKey
+    : undefined;
+  return buildSafeUpstreamHeaders(c.req.raw.headers, {
+    protocol: "openai",
+    apiKey: originBoundApiKey,
+    authHeaders: target.authHeaders,
+  });
+}
 
-  // `effectiveApiKey` is pre-resolved by the caller — see the resolveEffective
-  // block near the call site. Non-empty → inject as server-side Bearer;
-  // empty/undefined → passthrough (client's own Authorization survives).
-  // cost-guard's `target.authHeaders` still gets to override everything.
-  if (effectiveApiKey && !target.authHeaders) {
-    headers["authorization"] = `Bearer ${effectiveApiKey}`;
+function buildRetryUpstreamHeaders(
+  c: Context,
+  target: ForwardTarget,
+  primaryHeaders: Record<string, string>,
+): Record<string, string> | null {
+  if (!target.retryTarget) return null;
+  if (target.retryTarget.authHeaders !== null) {
+    return buildSafeUpstreamHeaders(c.req.raw.headers, {
+      protocol: "openai",
+      authHeaders: target.retryTarget.authHeaders,
+    });
   }
-
-  if (target.authHeaders) {
-    for (const [k, v] of Object.entries(target.authHeaders)) {
-      headers[k] = v;
-    }
+  if (sameOrigin(target.url, target.retryTarget.url)) {
+    return { ...primaryHeaders };
   }
-
-  if (sessionKey) {
-    headers["x-vertex-ai-session-id"] = sessionKey;
-  }
-  return headers;
+  throw new MissingUpstreamCredentialError();
 }
 
 /**
@@ -292,12 +288,11 @@ function buildUpstreamHeaders(
 async function forwardWithRetry(
   target: ForwardTarget,
   upstreamHeaders: Record<string, string>,
+  retryHeaders: Record<string, string> | null,
   upstreamBody: Record<string, unknown>,
   originalBody: Record<string, unknown>,
-  originalHeaders: Record<string, string>,
   pipe: ReturnType<typeof createPipeline>,
   forwardTimeoutMs: number,
-  sessionKeyForDebug?: string,
   rateLimitContext?: { config: ProxyConfig; instanceId?: string },
 ): Promise<{ resp: Response; retried: boolean }> {
   let upstreamResp: Response | undefined;
@@ -370,11 +365,7 @@ async function forwardWithRetry(
     pipe.info("RETRY", `Routed model failed (${reason}), retryUrl=${target.retryTarget.url} model=${target.retryTarget.model}`);
 
     const retryBody = { ...originalBody, model: target.retryTarget.model };
-    const retryHeaders: Record<string, string> = { ...originalHeaders };
-    retryHeaders["content-type"] = "application/json";
-    if (sessionKeyForDebug) {
-      retryHeaders["x-vertex-ai-session-id"] = sessionKeyForDebug;
-    }
+    if (!retryHeaders) throw new MissingUpstreamCredentialError();
 
     try {
       if (rateLimitContext) {
@@ -901,15 +892,10 @@ export async function handleChatCompletions(
   // as anthropicHandler. Empty / missing entry → fall back to upstream.url,
   // preserving legacy behavior for configs that don't declare `agents:` at all.
   const agentUpstreamEntry = agentFromPath ? config.upstream.agents?.[agentFromPath] : undefined;
-  // Per-agent apiKey resolution — three cases:
-  //   (a) no entry in agents map           → global upstream.apiKey (兜底)
-  //   (b) entry present, apiKey empty      → "" (passthrough, keep client key)
-  //   (c) entry present, apiKey non-empty  → agent.apiKey (server-side key)
-  // Presence of an entry (case b/c) cuts the global fallback — that's what
-  // lets one proxy serve mixed server-key / client-key agents at once.
-  const effectiveApiKey = agentUpstreamEntry
-    ? (agentUpstreamEntry.apiKey ?? "")
-    : config.upstream.apiKey;
+  // Caller credentials terminate at MemoryProxy. URL-only agent entries use
+  // the global server key; if no server key exists, forwarding fails closed.
+  const credentialOrigin = agentUpstreamEntry?.url ?? config.upstream.url;
+  const effectiveApiKey = agentUpstreamEntry?.apiKey?.trim() || config.upstream.apiKey.trim();
   // Normalize the request path to the canonical upstream endpoint so the
   // extension's URL joining matches the host whitelist behavior.
   const forwardEndpoint = matchWhitelistEndpoint(c.req.path)?.upstreamEndpoint ?? "/chat/completions";
@@ -1002,24 +988,17 @@ export async function handleChatCompletions(
   writeRequestLog(config, body);
 
   // ── Build upstream request ───────────────────────────────────────────────
-  const upstreamHeaders = buildUpstreamHeaders(c, config, target, sessionKey, effectiveApiKey);
   const upstreamBody = buildUpstreamBody(body, target);
-  // Retry headers: preserve original client headers (x-request-id, user-agent,
-  // etc.), then force the primary upstream's auth — retry always goes to the
-  // default upstream (never the alternate route), so its apiKey must be applied
-  // just like the first-attempt path. Without this, retry sends the
-  // client's raw auth to tokenhub and gets 401.
-  const originalHeaders: Record<string, string> = {};
-  for (const [k, v] of c.req.raw.headers.entries()) {
-    if (!SKIP_REQUEST_HEADERS.has(k.toLowerCase())) {
-      originalHeaders[k] = v;
+  let upstreamHeaders: Record<string, string>;
+  let retryHeaders: Record<string, string> | null;
+  try {
+    upstreamHeaders = buildUpstreamHeaders(c, target, credentialOrigin, effectiveApiKey);
+    retryHeaders = buildRetryUpstreamHeaders(c, target, upstreamHeaders);
+  } catch (err: unknown) {
+    if (err instanceof MissingUpstreamCredentialError) {
+      return c.json({ error: err.message }, 503);
     }
-  }
-  // Retry uses the same effective key as the primary path — when it
-  // resolves to "" (agent entry present but no apiKey), retry also runs
-  // on the client's own key, preserving the passthrough intent.
-  if (effectiveApiKey) {
-    originalHeaders["authorization"] = `Bearer ${effectiveApiKey}`;
+    throw err;
   }
 
   // Inject stream_options.include_usage for OpenAI compat
@@ -1040,10 +1019,9 @@ export async function handleChatCompletions(
 
   try {
     const result = await forwardWithRetry(
-      target, upstreamHeaders, upstreamBody,
-      body, originalHeaders,
+      target, upstreamHeaders, retryHeaders, upstreamBody,
+      body,
       pipe, forwardTimeoutMs,
-      sessionKey,
       { config, instanceId: spaceId || undefined },
     );
     upstreamResp = result.resp;
