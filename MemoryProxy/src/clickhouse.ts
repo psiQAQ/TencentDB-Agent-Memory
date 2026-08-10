@@ -21,6 +21,7 @@ import { hostname } from "node:os";
 import { computeCreditDelta } from "./credit-reporter.js";
 import { getModelPricing, resolveModelName } from "./pricing.js";
 import type { CreditPricingConfig, CreditPricingEntry } from "./types.js";
+import { privacySafeSessionId, privacySafeText } from "./telemetry-privacy.js";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -532,9 +533,9 @@ export function buildClickHouseRow(entry: ClickHouseWriteEntry): ClickHouseRow |
   return {
     timestamp: toChTimestamp(entry.timestamp),
     event: entry.event,
-    session_key: entry.sessionKey ?? "",
+    session_key: privacySafeSessionId(entry.sessionKey),
     turn_seq: entry.turnSeq ?? 0,
-    user_input: entry.userInput ?? "",
+    user_input: privacySafeText(entry.userInput),
     model_id: entry.modelId,
     model_name: resolveModelName(entry.pricingConfig, entry.modelId),
     user_id: entry.keyId,
@@ -619,9 +620,9 @@ export function buildRawUsageRow(
     model_name: resolveModelName(entry.pricingConfig, entry.modelId),
     key_id: entry.keyId,          // 老列兼容（老 usage_raw 表仍以 key_id 作为主键的一部分）
     user_id: entry.keyId,          // 新列（与主表统一）；双写靠 JSONEachRow 容错
-    session_key: entry.sessionKey ?? "",
+    session_key: privacySafeSessionId(entry.sessionKey),
     turn_seq: entry.turnSeq ?? 0,
-    user_input: entry.userInput ?? "",
+    user_input: privacySafeText(entry.userInput),
     upstream_url: entry.upstreamUrl,
     stream: entry.stream ? 1 : 0,
     usage: JSON.stringify(entry.usage ?? {}),
@@ -659,9 +660,9 @@ export function buildFailedReportRawRow(
     model_name: resolveModelName(entry.pricingConfig, entry.modelId),
     key_id: entry.keyId,
     user_id: entry.keyId,
-    session_key: entry.sessionKey ?? "",
+    session_key: privacySafeSessionId(entry.sessionKey),
     turn_seq: entry.turnSeq ?? 0,
-    user_input: entry.userInput ?? "",
+    user_input: privacySafeText(entry.userInput),
     upstream_url: entry.upstreamUrl,
     stream: entry.stream ? 1 : 0,
     usage: JSON.stringify(usageWithError),

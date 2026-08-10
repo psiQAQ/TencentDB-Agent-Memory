@@ -10,6 +10,11 @@
 import { createHash, randomBytes } from "node:crypto";
 import type { ProxyConfig } from "./types.js";
 import { log } from "./report/log.js";
+import {
+  privacySafeMetadata,
+  privacySafeTags,
+  summarizeTelemetryValue,
+} from "./telemetry-privacy.js";
 
 /**
  * Generate a UUID v7 (time-ordered), required by Opik API.
@@ -74,7 +79,7 @@ interface OpikLlmSpan {
   name: string;
   startTime: string;
   endTime: string;
-  inputMessages: unknown[];   // full messages array sent to LLM
+  inputMessages: unknown[];   // summarized before telemetry export
   outputMessage: Record<string, unknown> | null;
   model: string;
   usage: Record<string, unknown>;
@@ -128,10 +133,10 @@ export function opikCreateTrace(
     project_name: input.projectName,
     name: input.name,
     start_time: input.startTime,
-    input: input.input,
+    input: summarizeTelemetryValue(input.input),
   };
   if (input.tags && input.tags.length > 0) {
-    traceBody.tags = input.tags;
+    traceBody.tags = privacySafeTags(input.tags);
   }
 
   fireCreateTrace(url, headers, traceBody);
@@ -145,7 +150,7 @@ export function opikCreateTrace(
       ...traceBody,
       id: forkTraceId,
       project_name: input.forkProjectName,
-      input: config.opik.stripRequestLogContent ? { messages: "[stripped]" } : input.input,
+      input: summarizeTelemetryValue(input.input),
       // tags: only keyId and modelId, strip routing / stream / anthropic etc.
       tags: [
         `keyId:${forkMeta.keyId || "unknown"}`,
@@ -153,7 +158,7 @@ export function opikCreateTrace(
       ],
     };
     if (input.forkMetadata) {
-      forkBody.metadata = { ...input.forkMetadata, forkTraceId };
+      forkBody.metadata = privacySafeMetadata({ ...input.forkMetadata, forkTraceId });
     } else {
       forkBody.metadata = { forkTraceId };
     }
@@ -181,7 +186,7 @@ export function opikUpdateTrace(
       project_name: update.projectName,
       workspace_name: "default",
       end_time: update.endTime,
-      output: update.output,
+      output: summarizeTelemetryValue(update.output),
       usage: update.usage, // raw, unmodified
     }),
   }).then(async (res) => {
@@ -253,18 +258,18 @@ export function opikCreateLlmSpan(
     type: "llm",
     start_time: span.startTime,
     end_time: span.endTime,
-    input: span.inputMessages,    // 直接传 messages 数组
-    output: outputMessages,       // 直接传 messages 数组
+    input: summarizeTelemetryValue(span.inputMessages),
+    output: summarizeTelemetryValue(outputMessages),
     model: span.model,
     usage: flatUsage,
   };
   if (span.tags && span.tags.length > 0) {
-    body.tags = span.tags;
+    body.tags = privacySafeTags(span.tags);
   }
 
   fireCreateLlmSpan(url, headers, body);
 
-  // Fork to a second project if requested — strip message content, keep only usage + metadata.
+  // Fork to a second project if requested — retain only usage + privacy-safe summaries.
   // Uses forkTraceId (different from main traceId) because Opik rejects cross-project trace reuse.
   if (span.forkProjectName && span.forkTraceId) {
     const forkMeta = span.forkMetadata || {};
@@ -285,11 +290,11 @@ export function opikCreateLlmSpan(
       end_time: span.endTime,
       model: span.model,
       usage: flatUsage,
-      metadata: forkMetadataFull,
+      metadata: privacySafeMetadata(forkMetadataFull),
     };
     if (!config.opik.stripRequestLogContent) {
-      forkBody.input = span.inputMessages;
-      forkBody.output = outputMessages;
+      forkBody.input = summarizeTelemetryValue(span.inputMessages);
+      forkBody.output = summarizeTelemetryValue(outputMessages);
     }
     // request_log tags: only keyId and modelId, nothing else
     forkBody.tags = [

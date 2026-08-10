@@ -16,6 +16,7 @@ import { resolve, dirname } from "node:path";
 import type { LogEntry, ProxyConfig } from "./types.js";
 import { log } from "./report/log.js";
 import { writeClickHouse } from "./clickhouse.js";
+import { privacySafeSessionId, privacySafeText } from "./telemetry-privacy.js";
 
 // ── JSONL file logger (usage events only) ─────────────────────────────────────
 
@@ -38,23 +39,31 @@ async function ensureDir(dir: string): Promise<void> {
 
 /** Append a single usage log entry as a JSON line. Fire-and-forget (no await needed). */
 export function writeLog(config: ProxyConfig, entry: LogEntry): void {
+  const safeEntry = {
+    ...entry,
+    ...(entry.sessionKey ? { sessionKey: privacySafeSessionId(entry.sessionKey) } : {}),
+    ...("userInput" in entry && entry.userInput
+      ? { userInput: privacySafeText(entry.userInput) }
+      : {}),
+  } as LogEntry;
+
   // ── ClickHouse async write (if enabled) ──────────────────────────────────
-    if (config.clickhouse.enabled && (entry.event === "usage" || entry.event === "analyzer_usage")) {
+  if (config.clickhouse.enabled && (safeEntry.event === "usage" || safeEntry.event === "analyzer_usage")) {
     writeClickHouse({
-      timestamp: entry.timestamp,
-      event: entry.event,
-      modelId: entry.modelId,
-      keyId: entry.keyId,
-      sessionKey: entry.sessionKey,
-      turnSeq: "turnSeq" in entry ? entry.turnSeq : undefined,
-      userInput: "userInput" in entry ? entry.userInput : undefined,
-      upstreamUrl: entry.upstreamUrl,
-      stream: entry.stream,
-      usage: entry.usage,
-      routedFrom: "routedFrom" in entry ? entry.routedFrom : undefined,
-      spaceId: "spaceId" in entry ? entry.spaceId : undefined,
+      timestamp: safeEntry.timestamp,
+      event: safeEntry.event,
+      modelId: safeEntry.modelId,
+      keyId: safeEntry.keyId,
+      sessionKey: safeEntry.sessionKey,
+      turnSeq: "turnSeq" in safeEntry ? safeEntry.turnSeq : undefined,
+      userInput: "userInput" in safeEntry ? safeEntry.userInput : undefined,
+      upstreamUrl: safeEntry.upstreamUrl,
+      stream: safeEntry.stream,
+      usage: safeEntry.usage,
+      routedFrom: "routedFrom" in safeEntry ? safeEntry.routedFrom : undefined,
+      spaceId: "spaceId" in safeEntry ? safeEntry.spaceId : undefined,
       upstreamRequestId:
-        "upstreamRequestId" in entry ? entry.upstreamRequestId : undefined,
+        "upstreamRequestId" in safeEntry ? safeEntry.upstreamRequestId : undefined,
       pricingConfig: config.creditPricing,
     });
   }
@@ -65,7 +74,7 @@ export function writeLog(config: ProxyConfig, entry: LogEntry): void {
   const logPath = getDailyLogPath(config.log.file);
   const dir = dirname(logPath);
 
-  const line = JSON.stringify(entry) + "\n";
+  const line = JSON.stringify(safeEntry) + "\n";
   ensureDir(dir)
     .then(() => appendFile(logPath, line, "utf-8"))
     .catch((err: unknown) => {

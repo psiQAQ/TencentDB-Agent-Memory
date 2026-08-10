@@ -83,15 +83,55 @@ export interface RequestInspection {
 const MAX_INSPECTIONS = 20;
 const recentInspections: RequestInspection[] = [];
 
+function present(value: string | null): string | null {
+  return value ? "present" : null;
+}
+
+function privacySafeIdentity(identity: ClientIdentity): ClientIdentity {
+  return {
+    ...identity,
+    userId: present(identity.userId),
+    keyId: identity.keyId === "unknown" ? "unknown" : "present",
+    apiKeyPrefix: null,
+    sessionId: present(identity.sessionId),
+    wechatWorkId: present(identity.wechatWorkId),
+    requestId: present(identity.requestId),
+    userAgent: present(identity.userAgent),
+    customHeaders: Object.fromEntries(
+      Object.keys(identity.customHeaders).map((name) => [name, "present"]),
+    ),
+    userInfo: identity.userInfo
+      ? Object.fromEntries(
+          Object.keys(identity.userInfo).map((name) => [
+            name,
+            identity.userInfo?.[name as keyof UserInfoFromPrompt] ? "present" : null,
+          ]),
+        ) as unknown as UserInfoFromPrompt
+      : null,
+    proxyToken: present(identity.proxyToken),
+  };
+}
+
 export function recordInspection(inspection: RequestInspection): void {
-  recentInspections.push(inspection);
+  recentInspections.push({
+    ...inspection,
+    identity: privacySafeIdentity(inspection.identity),
+    allHeaders: Object.fromEntries(
+      Object.keys(inspection.allHeaders).map((name) => [name, "present"]),
+    ),
+    bodyMeta: {
+      ...inspection.bodyMeta,
+      systemPromptPreview: undefined,
+      systemPromptTail: undefined,
+    },
+  });
   if (recentInspections.length > MAX_INSPECTIONS) {
     recentInspections.shift();
   }
 }
 
 export function getRecentInspections(): RequestInspection[] {
-  return [...recentInspections];
+  return structuredClone(recentInspections);
 }
 
 // ── Identity extraction from headers ───────────────────────────────────────────

@@ -24,10 +24,6 @@ import { findLastCacheControlIndex } from "./cc-request-classifier.js";
 // ─── 白名单与截断上限 ────────────────────────────────────────────────────────
 // 请求头前缀：跟 identity.ts:172 一致，避免各处对 CB header 认知漂移。
 const HEADER_PREFIX_WHITELIST = ["x-", "cb-", "codebuddy-"];
-// 单个 tool description / string 字段最多截断到多少字符（防 langfuse 单条上报膨胀）。
-const STRING_TRUNC = 200;
-// tools 最多抓多少条（前 N 个足够识别客户端指纹了）。
-const TOOLS_MAX = 8;
 
 /**
  * OpenAI 协议 messages 的 langfuse input builder。
@@ -133,24 +129,20 @@ export function buildRequestDebugMetadata(
     const msgs = Array.isArray(b.messages) ? (b.messages as unknown[]) : [];
     out.messages_len = msgs.length;
 
-    // Tools 数组 —— 前 N 个的 name + desc（截断），足够指纹
+    // Tools only contribute counts; names/descriptions can contain private text.
     if (Array.isArray(b.tools)) {
       const tools = b.tools as unknown[];
       out.tools_len = tools.length;
-      const summary: Array<{ name?: string; desc?: string }> = [];
-      for (let i = 0; i < Math.min(tools.length, TOOLS_MAX); i++) {
-        const t = tools[i] as Record<string, unknown> | undefined;
-        if (!t) continue;
-        // Anthropic: {name, description}；OpenAI: {function: {name, description}}
-        const fn = (t.function as Record<string, unknown> | undefined) ?? t;
-        const name = typeof fn.name === "string" ? fn.name : undefined;
-        const descRaw = typeof fn.description === "string" ? fn.description : undefined;
-        const entry: { name?: string; desc?: string } = {};
-        if (name) entry.name = truncate(name, STRING_TRUNC);
-        if (descRaw) entry.desc = truncate(descRaw, STRING_TRUNC);
-        if (entry.name || entry.desc) summary.push(entry);
-      }
-      if (summary.length) out.tools_summary = summary;
+      out.tools_named_count = tools.filter((tool) => {
+        const t = tool as Record<string, unknown> | undefined;
+        const fn = (t?.function as Record<string, unknown> | undefined) ?? t;
+        return typeof fn?.name === "string";
+      }).length;
+      out.tools_described_count = tools.filter((tool) => {
+        const t = tool as Record<string, unknown> | undefined;
+        const fn = (t?.function as Record<string, unknown> | undefined) ?? t;
+        return typeof fn?.description === "string";
+      }).length;
     }
 
     // Cache control marker 位置 —— CC 请求分类的核心信号
@@ -159,9 +151,9 @@ export function buildRequestDebugMetadata(
       if (idx >= 0) out.cache_control_marker_idx = idx;
     }
 
-    // Anthropic body.metadata（可能含 user_id / session_id 之类客户端上下文）
+    // Metadata values may contain identities; retain names only.
     if (b.metadata && typeof b.metadata === "object" && !Array.isArray(b.metadata)) {
-      out.body_metadata = b.metadata as Record<string, unknown>;
+      out.body_metadata_keys = Object.keys(b.metadata as Record<string, unknown>);
     }
 
     // body 顶层非标准字段（客户端私塞的 extension keys —— 识别客户端指纹）
@@ -178,27 +170,20 @@ export function buildRequestDebugMetadata(
     // ── 路由上下文 ──
     if (opts.agentSource) out.agent_source = opts.agentSource;
     if (opts.requestKind) out.request_kind = opts.requestKind;
-    if (opts.spaceId) out.space_id = opts.spaceId;
+    if (opts.spaceId) out.space_id_present = true;
     if (typeof opts.turnSeq === "number") out.turn_seq = opts.turnSeq;
-    if (opts.requestPath) out.request_path = opts.requestPath;
+    if (opts.requestPath) out.request_path_segments = opts.requestPath.split("/").filter(Boolean).length;
     if (opts.protocol) out.protocol = opts.protocol;
 
     // ── 请求头（白名单前缀）──
     if (opts.headers) {
-      for (const [rawK, v] of Object.entries(opts.headers)) {
-        const k = rawK.toLowerCase();
-        // 跳过含敏感信息的 header
-        if (k === "authorization" || k === "x-api-key" || k === "cookie") continue;
-        if (!HEADER_PREFIX_WHITELIST.some((p) => k.startsWith(p))) continue;
-        out[`header_${k}`] = truncate(String(v), STRING_TRUNC);
-      }
+      out.header_names = Object.keys(opts.headers)
+        .map((name) => name.toLowerCase())
+        .filter((name) => name !== "authorization" && name !== "x-api-key" && name !== "cookie")
+        .filter((name) => HEADER_PREFIX_WHITELIST.some((prefix) => name.startsWith(prefix)));
     }
   } catch {
     // debug metadata 只是辅助，绝不影响业务；抛异常就返回已经填的部分
   }
   return out;
-}
-
-function truncate(s: string, max: number): string {
-  return s.length <= max ? s : `${s.slice(0, max)}…`;
 }

@@ -27,6 +27,12 @@ import { TraceFlags } from "@opentelemetry/api";
 import { startObservation, LangfuseOtelSpanAttributes } from "@langfuse/tracing";
 import type { ProxyConfig } from "./types.js";
 import { log } from "./report/log.js";
+import {
+  privacySafeMetadata,
+  privacySafeSessionId,
+  privacySafeTags,
+  summarizeTelemetryValue,
+} from "./telemetry-privacy.js";
 
 // ============================
 // 生命周期
@@ -128,7 +134,7 @@ export interface LangfuseTurnContext {
   traceName: string;
   /** trace userId（一般为 keyId）。 */
   userId: string;
-  /** trace sessionId（会话隔离键；可据此聚合多个 turn）。 */
+  /** trace sessionId（导出前转换为稳定的不可逆标识）。 */
   sessionId: string;
   /**
    * trace 级标签 —— 只放该 turn 内稳定的维度（protocol / stream / session），
@@ -142,7 +148,7 @@ export interface LangfuseTurnContext {
   routeTags: string[];
   /**
    * 去噪后的最新用户问题 —— 仅在该 turn 首次人类输入请求非空，工具循环延续时为 ""。
-   * 用作 trace 级 input。
+   * 用于生成 trace 级 input 摘要，不导出原文。
    */
   userQuery: string;
 }
@@ -159,9 +165,9 @@ export interface LangfuseGenerationReport {
   startTime: string;
   /** ISO 8601 结束时间。 */
   endTime: string;
-  /** generation 输入（messages 数组或字符串）。 */
+  /** generation 输入（导出前只保留类型和计数摘要）。 */
   input?: unknown;
-  /** generation 输出（assistant message 或字符串）。 */
+  /** generation 输出（导出前只保留类型和计数摘要）。 */
   output?: unknown;
   /** 原始 usage 对象（会被归一化为 Langfuse usageDetails）。 */
   usage?: Record<string, unknown>;
@@ -174,12 +180,12 @@ export interface LangfuseGenerationReport {
   traceName: string;
   /** trace userId（一般为 keyId）。 */
   userId: string;
-  /** trace sessionId（会话隔离键；Langfuse 上可据此聚合多个 turn）。 */
+  /** trace sessionId（导出前转换为稳定的不可逆标识）。 */
   sessionId: string;
   /** trace 标签。 */
   tags?: string[];
   /**
-   * trace 级 input —— 仅在该 turn 的"首次人类输入"请求传入（传 turn 最初的用户问题）。
+   * trace 级 input 来源 —— 仅在该 turn 的"首次人类输入"请求传入。导出时只保留摘要。
    * 工具循环延续请求应留空，避免把带 tool_result 的请求体覆盖成 trace input。
    * 内部路由等子步骤也应留空，避免污染 trace 级输入。
    */
@@ -281,12 +287,12 @@ export function langfuseReportGeneration(report: LangfuseGenerationReport): void
       report.name,
       {
         model: report.model,
-        input: report.input,
-        output: report.output,
+        input: summarizeTelemetryValue(report.input),
+        output: summarizeTelemetryValue(report.output),
         usageDetails: report.usage ? normalizeUsageDetails(report.usage) : undefined,
-        metadata: report.observationMetadata,
+        metadata: privacySafeMetadata(report.observationMetadata),
         level: report.level,
-        statusMessage: report.statusMessage,
+        statusMessage: report.statusMessage ? "[redacted]" : undefined,
       },
       {
         asType: "generation",
@@ -304,22 +310,34 @@ export function langfuseReportGeneration(report: LangfuseGenerationReport): void
     const span = generation.otelSpan;
     span.setAttribute(LangfuseOtelSpanAttributes.TRACE_NAME, report.traceName);
     span.setAttribute(LangfuseOtelSpanAttributes.TRACE_USER_ID, report.userId);
-    span.setAttribute(LangfuseOtelSpanAttributes.TRACE_SESSION_ID, report.sessionId);
+    span.setAttribute(
+      LangfuseOtelSpanAttributes.TRACE_SESSION_ID,
+      privacySafeSessionId(report.sessionId),
+    );
     if (report.tags && report.tags.length > 0) {
-      span.setAttribute(LangfuseOtelSpanAttributes.TRACE_TAGS, JSON.stringify(report.tags));
+      span.setAttribute(
+        LangfuseOtelSpanAttributes.TRACE_TAGS,
+        JSON.stringify(privacySafeTags(report.tags)),
+      );
     }
     // trace 级 input/output 与 observation 级解耦：仅在显式传入时写。
     // 首次人类输入请求传 traceInput（turn 最初的问题）；收尾请求传 traceOutput。
     if (report.traceInput !== undefined) {
-      span.setAttribute(LangfuseOtelSpanAttributes.TRACE_INPUT, asAttrString(report.traceInput));
+      span.setAttribute(
+        LangfuseOtelSpanAttributes.TRACE_INPUT,
+        asAttrString(summarizeTelemetryValue(report.traceInput)),
+      );
     }
     if (report.traceOutput !== undefined) {
-      span.setAttribute(LangfuseOtelSpanAttributes.TRACE_OUTPUT, asAttrString(report.traceOutput));
+      span.setAttribute(
+        LangfuseOtelSpanAttributes.TRACE_OUTPUT,
+        asAttrString(summarizeTelemetryValue(report.traceOutput)),
+      );
     }
     if (report.traceMetadata) {
       span.setAttribute(
         LangfuseOtelSpanAttributes.TRACE_METADATA,
-        JSON.stringify(report.traceMetadata),
+        JSON.stringify(privacySafeMetadata(report.traceMetadata)),
       );
     }
 
@@ -339,7 +357,7 @@ export interface LangfuseFailureReport {
   startTime: string;
   /** ISO 8601 结束时间。 */
   endTime: string;
-  /** 该请求的输入 messages（用于排查）。 */
+  /** 该请求的输入 messages（导出时只保留摘要）。 */
   input?: unknown;
   /** HTTP 状态码（转发异常时可缺省）。 */
   status?: number;
@@ -375,7 +393,7 @@ export function langfuseReportFailure(report: LangfuseFailureReport): void {
     userId: lf.userId,
     sessionId: lf.sessionId,
     tags: report.extraTags && report.extraTags.length > 0 ? [...lf.tags, ...report.extraTags] : lf.tags,
-    // trace 级 input 仍记录用户问题（便于在失败 trace 上看到原始诉求）；不写 output。
+    // 失败 trace 只记录用户输入摘要，不导出原文或写 trace output。
     traceInput: lf.userQuery || undefined,
     observationMetadata: {
       ...report.observationMetadata,
