@@ -225,6 +225,23 @@ describe("native Anthropic platform routes", () => {
     expect(headers?.has("x-team-id")).toBe(false);
   });
 
+  it("rejects a system-user request when no server key is configured", async () => {
+    const config = configWithAuth();
+    config.upstream.apiKey = "";
+    initAuth(config.auth);
+    initSystemUsers([{ name: "memory", userId: "user-1", displayName: "Memory" }]);
+    const app = createApp(config);
+
+    const response = await app.request(
+      "http://proxy/claude-code/space-1/v1/messages",
+      messagesRequest("system_user_missing_key"),
+    );
+
+    expect(response.status).toBe(503);
+    expect(calls).toEqual(["https://memory-core.invalid/v3/meta/auth/verify"]);
+    expect(upstreamHeaders).toHaveLength(0);
+  });
+
   it.each([
     ["stream", { stream: true }],
     ["tool", { tools: [{ name: "safe-tool", description: "safe description" }] }],

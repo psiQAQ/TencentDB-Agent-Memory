@@ -21,6 +21,7 @@ vi.mock("../guard-adapter.js", async (importOriginal) => {
 
 import { initAuth } from "../auth.js";
 import { DEFAULT_CONFIG } from "../config.js";
+import { resolveForwardTarget } from "../guard-adapter.js";
 import { createApp } from "../server.js";
 
 describe("Anthropic retry header privacy", () => {
@@ -108,5 +109,93 @@ describe("Anthropic retry header privacy", () => {
     expect(retryHeaders?.get("anthropic-version")).toBe("2023-06-01");
     expect(retryHeaders?.get("anthropic-beta")).toBe("safe-feature");
     expect(retryHeaders?.get("accept")).toBe("application/json");
+  });
+
+  it("rejects a cross-origin retry without an explicit server credential", async () => {
+    vi.mocked(resolveForwardTarget).mockResolvedValueOnce({
+      url: "https://primary.invalid/messages",
+      model: "primary-model",
+      authHeaders: { "x-api-key": "server-primary-key" },
+      bodyOverrides: null,
+      retryTarget: {
+        url: "https://other-origin.invalid/messages",
+        model: "retry-model",
+        authHeaders: null,
+      },
+      turnSeq: 0,
+    });
+
+    const config = structuredClone(DEFAULT_CONFIG);
+    config.auth = { enabled: true, url: "https://auth.invalid", timeoutMs: 1_000 };
+    config.upstream.apiKey = "server-primary-key";
+    config.rateLimit = { tpm: 0, qpm: 0 };
+    config.extraction = { enabled: false, extractors: [] };
+    config.log.backend = "noop";
+    initAuth(config.auth);
+    const app = createApp(config);
+
+    const response = await app.request("http://proxy/claude-code/space-1/v1/messages", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "anthropic-version": "2023-06-01",
+        "x-api-key": "private-memory-credential",
+        "x-session-id": "private-session-value",
+      },
+      body: JSON.stringify({
+        model: "test-model",
+        max_tokens: 32,
+        messages: [{ role: "user", content: "hello" }],
+      }),
+    });
+
+    expect(response.status).toBe(503);
+    expect(upstreamUrls).toEqual([]);
+    expect(upstreamHeaders).toEqual([]);
+  });
+
+  it("may reuse the primary server credential for a same-origin retry", async () => {
+    vi.mocked(resolveForwardTarget).mockResolvedValueOnce({
+      url: "https://primary.invalid/messages",
+      model: "primary-model",
+      authHeaders: { "x-api-key": "server-primary-key" },
+      bodyOverrides: null,
+      retryTarget: {
+        url: "https://primary.invalid/retry/messages",
+        model: "retry-model",
+        authHeaders: null,
+      },
+      turnSeq: 0,
+    });
+
+    const config = structuredClone(DEFAULT_CONFIG);
+    config.auth = { enabled: true, url: "https://auth.invalid", timeoutMs: 1_000 };
+    config.rateLimit = { tpm: 0, qpm: 0 };
+    config.extraction = { enabled: false, extractors: [] };
+    config.log.backend = "noop";
+    initAuth(config.auth);
+    const app = createApp(config);
+
+    const response = await app.request("http://proxy/claude-code/space-1/v1/messages", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "anthropic-version": "2023-06-01",
+        "x-api-key": "private-memory-credential",
+        "x-session-id": "private-session-value",
+      },
+      body: JSON.stringify({
+        model: "test-model",
+        max_tokens: 32,
+        messages: [{ role: "user", content: "hello" }],
+      }),
+    });
+
+    expect(response.status).toBe(200);
+    expect(upstreamUrls).toEqual([
+      "https://primary.invalid/messages",
+      "https://primary.invalid/retry/messages",
+    ]);
+    expect(upstreamHeaders[1]?.get("x-api-key")).toBe("server-primary-key");
   });
 });

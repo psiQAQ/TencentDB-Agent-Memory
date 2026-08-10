@@ -338,6 +338,32 @@ function buildUpstreamHeaders(
   });
 }
 
+function sameOrigin(left: string, right: string): boolean {
+  try {
+    return new URL(left).origin === new URL(right).origin;
+  } catch {
+    return false;
+  }
+}
+
+function buildRetryUpstreamHeaders(
+  c: Context,
+  target: ForwardTarget,
+  primaryHeaders: Record<string, string>,
+): Record<string, string> | null {
+  if (!target.retryTarget) return null;
+  if (target.retryTarget.authHeaders !== null) {
+    return buildSafeUpstreamHeaders(c.req.raw.headers, {
+      protocol: "anthropic",
+      authHeaders: target.retryTarget.authHeaders,
+    });
+  }
+  if (sameOrigin(target.url, target.retryTarget.url)) {
+    return { ...primaryHeaders };
+  }
+  throw new MissingUpstreamCredentialError();
+}
+
 /**
  * Forward request to upstream and handle retry if retryTarget is set.
  */
@@ -1116,13 +1142,7 @@ export async function handleAnthropicMessages(
   let retryHeaders: Record<string, string> | null;
   try {
     upstreamHeaders = buildUpstreamHeaders(c, target, effectiveApiKey);
-    retryHeaders = target.retryTarget
-      ? buildSafeUpstreamHeaders(c.req.raw.headers, {
-          protocol: "anthropic",
-          apiKey: effectiveApiKey,
-          authHeaders: target.retryTarget.authHeaders,
-        })
-      : null;
+    retryHeaders = buildRetryUpstreamHeaders(c, target, upstreamHeaders);
   } catch (err: unknown) {
     if (err instanceof MissingUpstreamCredentialError) {
       return c.json(
