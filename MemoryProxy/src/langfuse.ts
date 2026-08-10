@@ -94,7 +94,7 @@ export async function shutdownLangfuse(): Promise<void> {
 }
 
 // ============================
-// 不可关联的 turn traceId
+// 不可跨请求关联的 request traceId
 // ============================
 
 /**
@@ -112,8 +112,8 @@ export function langfuseTurnTraceId(requestTraceId: string): string {
 // ============================
 
 /**
- * Langfuse turn-trace 上下文 —— 同属一个 turn（一个 Langfuse trace）的所有
- * generation 共享的 trace 级属性。由 handler 构造后传给各上报函数。
+ * Langfuse 请求 trace 上下文。类型名保留 `Turn` 以避免破坏现有 API，
+ * 但每个实例仅对应一次 HTTP 请求，不在工具循环或 session 之间稳定关联。
  */
 export interface LangfuseTurnContext {
   /** 本次请求的随机 traceId（langfuseTurnTraceId 生成）。 */
@@ -137,13 +137,13 @@ export interface LangfuseTurnContext {
    */
   routeTags: string[];
   /**
-   * 去噪后的最新用户问题 —— 仅在该 turn 首次人类输入请求非空，工具循环延续时为 ""。
-   * 用于生成 trace 级 input 摘要，不导出原文。
+   * 去噪后的最新用户问题；工具循环延续请求为 ""。
+   * 用于生成当前请求 trace 的 input 摘要，不导出原文。
    */
   userQuery: string;
 }
 
-/** 一次 LLM 调用的上报参数（挂到指定 turn trace 下的 generation）。 */
+/** 一次 LLM 调用的上报参数（挂到当前请求 trace 下的 generation）。 */
 export interface LangfuseGenerationReport {
   /** 所属请求的随机 traceId（langfuseTurnTraceId 生成）。 */
   traceId: string;
@@ -175,14 +175,13 @@ export interface LangfuseGenerationReport {
   /** trace 标签。 */
   tags?: string[];
   /**
-   * trace 级 input 来源 —— 仅在该 turn 的"首次人类输入"请求传入。导出时只保留摘要。
-   * 工具循环延续请求应留空，避免把带 tool_result 的请求体覆盖成 trace input。
+   * trace 级 input 来源。新人类输入请求可传入，导出时只保留摘要。
+   * 工具循环延续请求应留空，避免把 tool_result 作为请求输入摘要。
    * 内部路由等子步骤也应留空，避免污染 trace 级输入。
    */
   traceInput?: unknown;
   /**
-   * trace 级 output —— 传该 turn 的最终回答。同一 turn 多次调用 last-write-wins，
-   * 因此最后一次（turn 收尾）的输出会成为 trace output。
+   * trace 级 output —— 传当前请求的输出摘要。
    */
   traceOutput?: unknown;
   /** trace 级 metadata。 */
@@ -264,7 +263,7 @@ function asAttrString(v: unknown): string {
 }
 
 /**
- * 上报一次 LLM 调用：在指定 turn trace 下创建一个 generation observation，
+ * 上报一次 LLM 调用：在指定请求 trace 下创建一个 generation observation，
  * 并把 trace 级属性写到该 span 上（SDK 会据此设置所属 trace 的字段）。
  *
  * 失败静默（仅 debug 日志），绝不影响业务请求。
@@ -319,7 +318,7 @@ export function langfuseReportGeneration(report: LangfuseGenerationReport): void
       );
     }
     // trace 级 input/output 与 observation 级解耦：仅在显式传入时写。
-    // 首次人类输入请求传 traceInput（turn 最初的问题）；收尾请求传 traceOutput。
+    // 当前请求可分别传入 traceInput / traceOutput 摘要。
     if (report.traceInput !== undefined) {
       span.setAttribute(
         LangfuseOtelSpanAttributes.TRACE_INPUT,
@@ -349,7 +348,7 @@ export function langfuseReportGeneration(report: LangfuseGenerationReport): void
 
 /** 一次失败请求的上报参数（上游错误 / 转发失败）。 */
 export interface LangfuseFailureReport {
-  /** turn 上下文。 */
+  /** 当前请求 trace 上下文。 */
   lf: LangfuseTurnContext;
   /** observation 名称（一般为模型名）。 */
   model: string;
@@ -370,8 +369,8 @@ export interface LangfuseFailureReport {
 }
 
 /**
- * 上报一次失败请求：在所属 turn trace 下创建一个 ERROR generation。
- * 不设 trace 级 input/output（失败不代表 turn 的最终结果），仅记录该次失败本身。
+ * 上报一次失败请求：在当前请求 trace 下创建一个 ERROR generation。
+ * 不设 trace 级 input/output，仅记录该次失败的安全类别与状态。
  */
 export function langfuseReportFailure(report: LangfuseFailureReport): void {
   if (!_enabled) return;

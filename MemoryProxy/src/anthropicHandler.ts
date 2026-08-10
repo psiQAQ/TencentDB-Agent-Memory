@@ -382,18 +382,10 @@ async function forwardWithRetry(
   let upstreamResp: Response | undefined;
   let forwardFailed = false;
 
-  // ── Optional outbound body md5 debug log ───────────────────────────────
-  // 用于长稳观测：Anthropic KV cache 命中的必要条件是"从 body 头 → cache_control
-  // anchor 之前所有 bytes 完全一致"。所以要分开算三段 md5：
-  //   1. sysFullMd5    — md5(JSON.stringify(body.system))  全 system 序列化
-  //   2. sysStrMd5     — md5(body.system 拉平成字符串)    仅文本内容（对比用）
-  //   3. msgsPrefixMd5 — 找到 messages 里最后一个带 cache_control 的位置 N，
-  //                      md5(JSON.stringify(messages[0..N]))，即真正的 cache 前缀
-  //   4. msgsAnchorIdx — 上面那个 N（帮助定位命中长度）
-  //
-  // 任何一个 md5 变了都意味着 Anthropic 会 cache miss。
-  //
-  // 开启：PROXY_DEBUG_DUMP_OUTBOUND_MD5=1 node ...
+  // ── Optional outbound shape debug log ───────────────────────────────
+  // Legacy flag name retained for compatibility. Output contains only byte
+  // counts and the cache anchor index; it never emits a content-derived digest.
+  // Enable with PROXY_DEBUG_DUMP_OUTBOUND_MD5=1.
   if (process.env.PROXY_DEBUG_DUMP_OUTBOUND_MD5) {
     try {
       const sys = (upstreamBody as { system?: unknown }).system;
@@ -1400,7 +1392,7 @@ export async function handleAnthropicMessages(
       },
     });
 
-    // Langfuse: report this LLM call as a generation under the turn trace
+    // Langfuse: report this LLM call under the current request trace.
     // debug=true 时 output 用 assistantMessage 原生数组（含 tool_use / thinking /
     // 原生 stop_reason），非 debug 走原有 text 拼接节省存储。
     const langfuseOutput = langfuseDebug && assistantMessage
@@ -1647,7 +1639,7 @@ interface AnthropicTapContext {
   tdaiIdentity: TdaiIdentity | null;
   tdaiUserMessage: TdaiMessage | null;
   assetCapabilities?: import("./injection/types.js").AssetCapabilityFlags;
-  /** Langfuse turn-trace context (trace = one turn). */
+  /** Langfuse request-scoped trace context (historical type name retained). */
   lf: LangfuseTurnContext;
   /** Space/tenant ID from request path. */
   spaceId?: string;
@@ -1743,7 +1735,7 @@ function consumeAnthropicStream(stream: ReadableStream<Uint8Array>, ctx: Anthrop
           pipe.error("OPIK_SPAN", opikErr);
         }
 
-        // Langfuse: report this LLM call as a generation under the turn trace
+        // Langfuse: report this LLM call under the current request trace.
         // 流式无完整原生 assistant content 数组可用（tool_use 块在 SSE 里是分片
         // 增量事件），debug 时把 tool_use_count 与 stop_reason 塞进 metadata 兜底。
         try {

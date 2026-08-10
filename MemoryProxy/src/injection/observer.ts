@@ -230,7 +230,7 @@ function deriveParentSpanId(traceId: string): string {
 }
 
 /**
- * Langfuse 注入观察者 —— 将每个钩子的执行作为 span observation 挂到 Langfuse turn trace 下。
+ * Langfuse 注入观察者 —— 将每个钩子的执行作为 span observation 挂到当前请求 trace 下。
  *
  * 每个 hook 产生一条 span observation：
  *   - name 使用固定类别，不包含 hook/user/session 标识

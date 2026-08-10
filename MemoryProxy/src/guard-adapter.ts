@@ -350,8 +350,8 @@ export function resolveSessionKey(
  *
  * Returns the user's real question (IDE noise / system-reminders stripped) on a
  * fresh human turn, and "" on a tool-loop continuation (last user message is a
- * pure tool_result) or when cost-guard is unavailable. Used as the turn trace's
- * input so it reflects the user's actual ask rather than the raw request body.
+ * pure tool_result) or when cost-guard is unavailable. Used as the current
+ * request trace's input summary rather than exporting the raw request body.
  */
 export function resolveLatestUserQuery(
   config: ProxyConfig,

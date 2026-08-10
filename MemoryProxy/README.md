@@ -32,7 +32,7 @@ Coding agent (Claude Code / CodeBuddy / ...)
 - **Skill Bridge / Memory Bridge**: reverse-proxies MemoryCore's skill / memory HTTP tools, injecting `serviceToken` on forward so credentials never appear in an LLM-visible prompt.
 - **Unified storage abstraction (ProxyStorage)**: session init state, injection cache and Skill state (`inj:*` / `sk:*` / `vpin:*`) support five backends — Redis, COS (kernel-sts), SQLite, FS, Memory. COS is preferred for multi-node deployments.
 - **Input TPM / QPM rate limiting**: 60-second sliding-window limiting on Redis, keyed by `spaceId × final model`, adjustable at runtime via `/v3/admin/rate-limits`.
-- **Observability & usage reporting**: three independent channels — Opik trace, Langfuse (one trace = one turn), ClickHouse (per-turn token detail). Any one failing does not affect the business path.
+- **Observability & usage reporting**: three independent channels — Opik, Langfuse, and ClickHouse. Privacy-safe export uses one random trace per proxy request and retains only aggregate/categorical metrics; it does not provide stable user/session/model grouping. Any one channel failing does not affect the business path.
 - **Credit billing report**: after each upstream response completes, computes CreditDelta from the pricing table and reports it to the billing service; only requests whose path carries `/proxy/<spaceId>/` are counted.
 - **Multi-node deployment**: scales horizontally with an external gateway plus the COS backend; the `/skill-bridge` and `/memory-bridge` prefixes are passed through verbatim from the gateway to proxy instances.
 
@@ -222,7 +222,7 @@ Config sections at a glance:
 | `knowledge` | standalone knowledge gateway (may differ from skill) |
 | `skillRuntime` | whether the main model may write Skills (read-only by default) |
 | `rateLimit` | Input TPM / QPM limiting per memory instance × actual model |
-| `clickhouse` | per-turn usage reporting (billing data source) |
+| `clickhouse` | aggregate/categorical usage reporting (billing totals; no raw identity/model grouping) |
 | `creditReport` / `creditPricing` | Credit billing report and pricing table |
 | `upstream.agents` | override upstream URL + apiKey per agent name (e.g. route `claude-code` through CCR) |
 

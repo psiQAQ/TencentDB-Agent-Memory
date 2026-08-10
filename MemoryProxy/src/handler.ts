@@ -1252,7 +1252,7 @@ export async function handleChatCompletions(
       },
     });
 
-    // Langfuse: report this LLM call as a generation under the turn trace
+    // Langfuse: report this LLM call under the current request trace.
     langfuseReportGeneration({
       traceId: lf.traceId,
       name: effectiveModel,
@@ -1388,7 +1388,7 @@ interface TapContext {
   /** Client type (URL path 第一段) — 透传给 extract trigger 作为三段隔离键之一。 */
   agentSource: string;
   sessionInfo: Record<string, unknown> | null | undefined;
-  /** Langfuse turn-trace context (trace = one turn). */
+  /** Langfuse request-scoped trace context (historical type name retained). */
   lf: LangfuseTurnContext;
   /** Space/tenant ID from request path. */
   spaceId?: string;
@@ -1598,7 +1598,7 @@ function createUsageTapTransform(ctx: TapContext): TransformStream<Uint8Array, U
         pipe.error("OPIK_SPAN", opikErr);
       }
 
-      // Langfuse: report this LLM call as a generation under the turn trace
+      // Langfuse: report this LLM call under the current request trace.
       // 流式路径 inputMessages 保持原样（其它下游流水线也用同一份引用）；
       // debug=true 时把 tool_call 累积计数塞进 metadata 兜底。
       try {
