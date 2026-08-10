@@ -591,7 +591,7 @@ export interface SystemUserEntry {
    * usage/credit reporting. Required.
    */
   userId: string;
-  /** Human-readable display name, for logs / dashboards only. */
+  /** Human-readable configuration label; privacy-safe exports redact it. */
   displayName: string;
   /**
    * Historical sk-mem key the internal service sends in Authorization /
@@ -617,9 +617,10 @@ export interface CreditPricingEntry {
    */
   name: string;
   /**
-   * Human-readable display name for UI/reports (e.g. "Claude Sonnet 4").
-   * Optional. Falls back to `name` when absent or empty.
-   * 写入 usage_logs.model_name / usage_raw.model_name 供前端展示。
+   * Human-readable name used only for in-process matching and pricing.
+   * Optional. Falls back to `name` when absent or empty. Privacy-safe
+   * ClickHouse/telemetry exports redact model identity, so no per-model UI or
+   * report breakdown is available from exported rows.
    */
   modelName?: string;
   /** Standard input tokens (non-cache). */

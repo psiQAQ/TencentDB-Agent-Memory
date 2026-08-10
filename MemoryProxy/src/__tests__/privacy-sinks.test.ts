@@ -71,7 +71,10 @@ import {
   langfuseReportGeneration,
   shutdownLangfuse,
 } from "../langfuse.js";
+import { AnthropicAdapter } from "../injection/adapters/anthropic.js";
 import { LangfuseInjectionObserver } from "../injection/observer.js";
+import { InjectionPipeline } from "../injection/pipeline.js";
+import { HookRegistryImpl } from "../injection/registry.js";
 import { writeLog } from "../logger.js";
 import { opikCreateLlmSpan, opikCreateTrace, opikUpdateTrace } from "../opik.js";
 import { log } from "../report/log.js";
@@ -197,6 +200,14 @@ describe("privacy-safe observability sinks", () => {
       cacheRead: 0,
       cacheWrite5m: 0,
       cacheWrite1h: 0,
+    }, {
+      name: "original-model",
+      modelName: "Original",
+      input: 3,
+      output: 4,
+      cacheRead: 0,
+      cacheWrite5m: 0,
+      cacheWrite1h: 0,
     }];
 
     initClickHouse(config.clickhouse);
@@ -212,7 +223,7 @@ describe("privacy-safe observability sinks", () => {
       upstreamUrl: "https://tokenhub.invalid/v1/messages",
       stream: false,
       usage: { input_tokens: 1_000, output_tokens: 500 },
-      routedFrom: PRIVATE_VALUE,
+      routedFrom: "original-model",
       spaceId: PRIVATE_VALUE,
       upstreamRequestId: PRIVATE_VALUE,
     });
@@ -227,11 +238,53 @@ describe("privacy-safe observability sinks", () => {
     const rawInsert = inserts.find((input) => input.table === "usage_raw");
     const row = usageInsert?.values[0];
     expect(row?.credit).toBe(2);
+    expect(row?.credit_saved).toBe(3);
     expect(row?.prompt_tokens).toBe(1_000);
     expect(row?.completion_tokens).toBe(500);
+    expect(row?.routed_from).toBe("[redacted]");
     expect(rawInsert).toBeUndefined();
     expect(containsPrivateValue(row)).toBe(false);
     expect(row?.model_id === "[redacted]").toBe(true);
+    await shutdownClickHouse();
+  });
+
+  it("does not enqueue a main ClickHouse row for usage errors", async () => {
+    clickhouseCommand.mockClear();
+    clickhouseCreateClient.mockClear();
+    clickhouseInsert.mockClear();
+    const config = structuredClone(DEFAULT_CONFIG);
+    config.log.file = "";
+    config.clickhouse = {
+      enabled: true,
+      url: "https://clickhouse.invalid",
+      database: "privacy_test",
+      table: "usage_logs",
+      rawTable: "usage_raw",
+      user: "default",
+      password: "",
+      flushIntervalMs: 60_000,
+      flushThreshold: 100,
+      ttlDays: 0,
+    };
+
+    initClickHouse(config.clickhouse);
+    await vi.waitFor(() => expect(clickhouseCreateClient).toHaveBeenCalledTimes(2));
+    writeLog(config, {
+      timestamp: "2026-08-10T12:34:56.789Z",
+      event: "usage",
+      modelId: "priced-model",
+      keyId: PRIVATE_VALUE,
+      upstreamUrl: "https://tokenhub.invalid/v1/messages",
+      stream: false,
+      usage: { error: PRIVATE_VALUE, input_tokens: 1_000, output_tokens: 500 },
+    });
+    await flush();
+    await flushRaw();
+
+    const mainInsert = clickhouseInsert.mock.calls.find(
+      ([input]) => (input as { table?: string }).table === "usage_logs",
+    );
+    expect(mainInsert).toBeUndefined();
     await shutdownClickHouse();
   });
 
@@ -380,6 +433,70 @@ describe("privacy-safe observability sinks", () => {
     expect(observationOptions?.parentSpanContext?.traceId === firstTraceId).toBe(true);
     expect(containsPrivateValue(startObservation.mock.calls.at(-1))).toBe(false);
     expect(containsPrivateValue(observation?.otelSpan.setAttribute.mock.calls)).toBe(false);
+  });
+
+  it("keeps concurrent injection observations on their request trace", async () => {
+    const firstTraceId = "019fed2a-0000-7000-8000-000000000011";
+    const secondTraceId = "019fed2a-0000-7000-8000-000000000012";
+    const deferred = () => {
+      let resolve!: () => void;
+      const promise = new Promise<void>((done) => { resolve = done; });
+      return { promise, resolve };
+    };
+    const firstEntered = deferred();
+    const secondEntered = deferred();
+    const releaseFirst = deferred();
+    const releaseSecond = deferred();
+
+    const registry = new HookRegistryImpl();
+    registry.register({
+      id: "concurrent-observer-test",
+      point: "system.prefix",
+      priority: 1,
+      description: "concurrency regression",
+      execute: async (ctx) => {
+        const isFirst = ctx.metadata.traceId === firstTraceId;
+        (isFirst ? firstEntered : secondEntered).resolve();
+        await (isFirst ? releaseFirst : releaseSecond).promise;
+        return [{ type: "text", content: "safe test context" }];
+      },
+    });
+    const pipeline = new InjectionPipeline(
+      registry,
+      new Map([["anthropic", new AnthropicAdapter()]]),
+      {},
+      new LangfuseInjectionObserver(),
+    );
+    const body = {
+      system: "system",
+      messages: [{ role: "user", content: "hello" }],
+    };
+    const metadata = (traceId: string) => ({
+      protocol: "anthropic" as const,
+      traceId,
+      keyId: "key",
+      modelId: "model",
+      stream: false,
+      agentSource: "claude-code",
+    });
+
+    const first = pipeline.process(structuredClone(body), metadata(firstTraceId));
+    await firstEntered.promise;
+    const second = pipeline.process(structuredClone(body), metadata(secondTraceId));
+    await secondEntered.promise;
+    releaseFirst.resolve();
+    await first;
+    releaseSecond.resolve();
+    await second;
+
+    const observedTraceIds = startObservation.mock.calls.map(
+      (call) => call[2]?.parentSpanContext?.traceId,
+    );
+    expect(observedTraceIds).toHaveLength(2);
+    expect(new Set(observedTraceIds)).toEqual(new Set([
+      langfuseTurnTraceId(firstTraceId),
+      langfuseTurnTraceId(secondTraceId),
+    ]));
   });
 
   it("runtime-validates opaque extension log control fields", () => {

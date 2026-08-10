@@ -82,9 +82,10 @@ export class InjectionPipeline {
     metadata: AgentContextMetadata,
   ): Promise<Record<string, unknown>> {
     const pipelineStartMs = Date.now();
+    const observer = this.observer.forRequest?.() ?? this.observer;
 
     // ── Observer: pipeline start ─────────────────────────────────────────
-    safeCall(() => this.observer.onPipelineStart(metadata));
+    safeCall(() => observer.onPipelineStart(metadata));
 
     try {
       // 1. Get the appropriate adapter
@@ -128,20 +129,20 @@ export class InjectionPipeline {
       }
 
       // 3. Execute hooks at each injection point
-      const hookResults: HookResult[] = await this.executeHooks(ctx);
+      const hookResults: HookResult[] = await this.executeHooks(ctx, observer);
 
       // 4. Serialize → modified body
       const result = adapter.serialize(ctx);
 
       // ── Observer: pipeline end ──────────────────────────────────────────
       const durationMs = Date.now() - pipelineStartMs;
-      safeCall(() => this.observer.onPipelineEnd(metadata, durationMs, hookResults));
+      safeCall(() => observer.onPipelineEnd(metadata, durationMs, hookResults));
 
       return result;
     } catch (err) {
       // ── Observer: pipeline error ────────────────────────────────────────
       const error = err instanceof Error ? err : new Error(String(err));
-      safeCall(() => this.observer.onPipelineError(metadata, error));
+      safeCall(() => observer.onPipelineError(metadata, error));
       throw err; // re-throw so callers can handle it
     }
   }
@@ -161,7 +162,10 @@ export class InjectionPipeline {
    * `sessionId` in metadata, every hook falls back to `"none"` behavior to
    * preserve legacy semantics.
    */
-  private async executeHooks(ctx: AgentContext): Promise<HookResult[]> {
+  private async executeHooks(
+    ctx: AgentContext,
+    observer: InjectionObserver,
+  ): Promise<HookResult[]> {
     const executionOrder: InjectionPoint[] = [
       "system.prefix",
       "system.before_tools",
@@ -191,7 +195,7 @@ export class InjectionPipeline {
       for (const hook of hooks) {
         const hookStartMs = Date.now();
         // ── Observer: hook start ──────────────────────────────────────────
-        safeCall(() => this.observer.onHookStart(hook, point));
+        safeCall(() => observer.onHookStart(hook, point));
 
         try {
           const blocks = await this.resolveHookBlocks(hook, ctx, spaceId, userId, agentSource, sessionId);
@@ -216,7 +220,7 @@ export class InjectionPipeline {
 
           // ── Observer: hook done ─────────────────────────────────────────
           safeCall(() =>
-            this.observer.onHookDone(hook, point, blocks, durationMs, hook.cacheStrategy),
+            observer.onHookDone(hook, point, blocks, durationMs, hook.cacheStrategy),
           );
 
           results.push({
@@ -237,7 +241,7 @@ export class InjectionPipeline {
           );
 
           // ── Observer: hook error ────────────────────────────────────────
-          safeCall(() => this.observer.onHookError(hook, point, error, durationMs));
+          safeCall(() => observer.onHookError(hook, point, error, durationMs));
 
           results.push({
             hookId: hook.id,

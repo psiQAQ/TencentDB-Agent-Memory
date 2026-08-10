@@ -585,8 +585,8 @@ export async function handleAnthropicMessages(
   // 400，避免请求转发成功却因无定价而漏计费。价目表为空时跳过（向后兼容）。
   //
   // 内部/外部用户一视同仁 —— internal callers must also request by
-  // `modelName`, ensuring upstream ids and billing/observability keys align
-  // across all traffic.
+  // `modelName`, keeping upstream IDs and in-process pricing lookup aligned.
+  // Privacy-safe telemetry exports do not retain the model identity.
   const requestedModel = typeof body.model === "string" ? body.model : "unknown";
   if (!isModelInPricing(config.creditPricing, requestedModel)) {
     return c.json(
@@ -1083,11 +1083,9 @@ export async function handleAnthropicMessages(
     `session:${sessionKey}`,
   ];
 
-  // ── Langfuse turn context: one trace = one turn (deterministic traceId) ──
-  // Same (sessionKey, turnSeq) across a turn's tool-loop requests → same trace.
-  // Prefer the extension's monotonic per-session turnSeq (survives context
-  // compaction); fall back to the stateless count when it's not tracked
-  // (extension disabled/unavailable, or no-tools auxiliary request).
+  // ── Langfuse request context: one random request trace per proxy call ─────
+  // turnSeq remains useful for in-process ordering, but privacy-safe export
+  // deliberately provides no deterministic cross-request/session grouping.
   const turnSeq = target.turnSeq > 0 ? target.turnSeq : countHumanTurns(messages, "anthropic");
   const lf: LangfuseTurnContext = {
     traceId: langfuseTurnTraceId(traceId),

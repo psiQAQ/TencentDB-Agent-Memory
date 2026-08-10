@@ -359,7 +359,7 @@ creditReport:
 #   （回退到 usage_raw 表并标记 reason='unknown_model'）。
 # 字段说明：
 #   name          — 模型 ID（用于匹配 usage.model，大小写不敏感全词匹配）
-#   modelName     — 展示名（可选，供 UI/报表使用；未设置时回退到 name）
+#   modelName     — 请求匹配/进程内计价名称（可选；导出遥测会固定脱敏，不能按模型分组）
 #   input         — 标准输入 token（非缓存部分）
 #   output        — 输出 token
 #   cacheRead     — 缓存命中读取 token（prompt_cache_hit_tokens / cache_read_input_tokens）

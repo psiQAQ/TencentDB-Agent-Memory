@@ -47,6 +47,9 @@ export interface HookResult {
  * 生产实现：LoggingInjectionObserver（写入结构化日志）。
  */
 export interface InjectionObserver {
+  /** Return isolated mutable state for one request when the observer needs it. */
+  forRequest?(): InjectionObserver;
+
   /** 管线开始处理一个请求。 */
   onPipelineStart(meta: AgentContextMetadata): void;
 
@@ -241,6 +244,10 @@ export class LangfuseInjectionObserver implements InjectionObserver {
   private meta: AgentContextMetadata | null = null;
   /** Request-scoped ID; normalized from the existing request traceId. */
   private traceId: string | null = null;
+
+  forRequest(): InjectionObserver {
+    return new LangfuseInjectionObserver();
+  }
 
   onPipelineStart(meta: AgentContextMetadata): void {
     try {

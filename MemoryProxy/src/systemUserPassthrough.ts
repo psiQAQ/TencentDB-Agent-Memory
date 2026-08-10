@@ -322,12 +322,10 @@ async function recordTracesAndUsage(params: {
     });
   }
 
-  // ── Langfuse: generation under a deterministic turn trace ────────────────
-  //
-  // We use turnSeq=0 because internal users don't have a session-init or
-  // per-turn counter — one request = one trace = one generation. `sessionId`
-  // is the memory instance id, so Langfuse groups all requests for the same
-  // memory under one session view.
+  // ── Langfuse: one random request trace per proxy call ────────────────────
+  // Raw user/session/model fields remain available only for in-process
+  // attribution; the exporter emits redacted identities and total/category
+  // metrics, with no deterministic cross-request grouping.
   const lfTraceId = langfuseTurnTraceId(traceId);
   try {
     if (status >= 200 && status < 400) {
@@ -541,7 +539,7 @@ export async function handleSystemUserPassthrough(
       err instanceof Error ? err : new Error(String(err)),
     );
 
-    // Best-effort failure trace so dashboards see the outage.
+    // Best-effort failure trace so aggregate dashboards see the outage.
     recordTracesAndUsage({
       config, match, path, upstreamUrl, modelId, startTime, endTime,
       stream: false, traceId,
@@ -631,9 +629,9 @@ export async function handleSystemUserPassthrough(
  * Consume a stream and return both the raw text (for trace payload) and
  * extracted usage (Anthropic message_start/delta OR OpenAI final usage).
  *
- * Text is capped at 512 KiB — enough to see the shape of a response in
- * dashboards without unbounded memory growth. Usage extraction always
- * uses the full stream regardless of the cap.
+ * Text is capped at 512 KiB before in-process summary generation to avoid
+ * unbounded memory growth. Exporters retain only type/count summaries. Usage
+ * extraction always uses the full stream regardless of the cap.
  */
 async function consumeStream(
   stream: ReadableStream<Uint8Array>,

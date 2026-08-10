@@ -59,8 +59,8 @@ export interface ClickHouseRow {
   session_key: string;     // fixed redaction; unavailable for grouping
   turn_seq: number;        // numeric sequence only; no linkable session identity
   user_input: string;      // fixed redaction when content was present
-  model_id: string;
-  model_name: string;      // UI 展示名（来自定价表 modelName；未匹配时回落 modelId）
+  model_id: string;        // fixed redaction; unavailable for model grouping
+  model_name: string;      // fixed redaction; unavailable for UI/report breakdown
   user_id: string;         // fixed redaction; unavailable for billing attribution
   upstream_url: string;
   stream: number;          // 0 or 1
@@ -75,8 +75,8 @@ export interface ClickHouseRow {
   cache_creation_ephemeral_5m_input_tokens: number;      // 5m TTL 缓存写入
   cache_creation_ephemeral_1h_input_tokens: number;      // 1h TTL 缓存写入
   credit: number;
-  credit_saved: number;        // 路由节省的 credit（仅 event=usage 且 routed_from 非空时有值）
-  routed_from: string;
+  credit_saved: number;        // computed from raw in-process routedFrom before redaction
+  routed_from: string;         // fixed redaction; unavailable for model grouping
   space_id: string;            // 空间/租户标识（从 /proxy/<spaceId>/... 路径提取）
   source_tag: string;          // 来源标记，恒定为 "proxy"
   host: string;
@@ -94,8 +94,8 @@ export interface ClickHouseRow {
  */
 export interface ClickHouseRawUsageRow {
   timestamp: string;
-  model_id: string;
-  model_name: string;          // 展示名（与主表对齐；无定价配置时回落 model_id）
+  model_id: string;            // fixed redaction
+  model_name: string;          // fixed redaction
   key_id: string;              // legacy column; fixed redaction
   user_id: string;             // legacy column; fixed redaction
   session_key: string;
@@ -105,7 +105,7 @@ export interface ClickHouseRawUsageRow {
   stream: number;
   usage: string;               // JSON of allowlisted finite numeric usage counters
   reason: string;              // 'non_tokenhub' | 'unknown_model' | 'invalid_format' | 'invalid_credit' | 'report_failed'
-  routed_from: string;         // 路由前的原始模型
+  routed_from: string;         // fixed redaction
   space_id: string;            // 空间/租户标识（从 /proxy/<spaceId>/... 提取）
   source_tag: string;          // 来源标记，恒为 "proxy"
   host: string;
