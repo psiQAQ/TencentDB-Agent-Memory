@@ -104,12 +104,19 @@ let costGuardAvailable = false;
 // If the submodule is not initialized, we silently fall back to passthrough.
 // Use a variable to prevent TypeScript from statically resolving the module.
 const COST_GUARD_MODULE = "@context-proxy/cost-guard";
+
+export function isUsableCostGuardModule(mod: unknown): boolean {
+  return typeof (mod as { CostGuard?: unknown } | null)?.CostGuard === "function";
+}
+
 try {
   const mod = await import(/* @vite-ignore */ COST_GUARD_MODULE);
-  CostGuardClass = mod.CostGuard;
-  setDebugFn = mod.setAnalyzerDebug;
-  resolveAgentProfileFn = mod.resolveAgentProfile;
-  costGuardAvailable = true;
+  if (isUsableCostGuardModule(mod)) {
+    CostGuardClass = mod.CostGuard;
+    setDebugFn = mod.setAnalyzerDebug;
+    resolveAgentProfileFn = mod.resolveAgentProfile;
+    costGuardAvailable = true;
+  }
 } catch {
   // extension not available — passthrough mode
 }
