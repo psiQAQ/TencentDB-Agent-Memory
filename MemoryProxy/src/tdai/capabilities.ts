@@ -68,14 +68,13 @@ export async function fetchAssetCapabilities(input: FetchAssetCapabilitiesInput)
       signal: controller.signal,
     });
     if (!resp.ok) {
-      const text = await resp.text().catch(() => "");
-      console.warn(`[asset-capability] HTTP ${resp.status}: ${text.slice(0, 200)}`);
+      console.warn(`[asset-capability] HTTP category=${resp.status}`);
       return { ...DEFAULT_ASSET_CAPABILITIES };
     }
 
     const env = await resp.json() as ConfigUserGetEnvelope;
     if (env.code !== 0) {
-      console.warn(`[asset-capability] envelope error ${env.code}: ${env.message ?? ""}`);
+      console.warn(`[asset-capability] envelope error category=${env.code}`);
       return { ...DEFAULT_ASSET_CAPABILITIES };
     }
 
@@ -85,8 +84,8 @@ export async function fetchAssetCapabilities(input: FetchAssetCapabilitiesInput)
       if (cap) out[cap] = parseEnabled(item.effective_value);
     }
     return out;
-  } catch (err) {
-    console.warn(`[asset-capability] fetch failed: ${err instanceof Error ? err.message : String(err)}`);
+  } catch {
+    console.warn("[asset-capability] fetch failed");
     return { ...DEFAULT_ASSET_CAPABILITIES };
   } finally {
     clearTimeout(timer);

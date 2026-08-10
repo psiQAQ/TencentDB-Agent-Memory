@@ -15,6 +15,15 @@ export function extractAgentSourceFromPath(path: string): string | null {
     : null;
 }
 
+export function getAnthropicSourceBindingError(
+  path: string,
+  boundSource?: AnthropicMessageSource,
+): "unbound" | "conflict" | null {
+  if (!boundSource) return "unbound";
+  const pathSource = extractAgentSourceFromPath(path);
+  return pathSource && pathSource !== boundSource ? "conflict" : null;
+}
+
 /** Session IDs are opaque ASCII tokens, never storage paths or log text. */
 export function isValidSessionId(value: string): boolean {
   return value.length <= 256 && !value.includes("..") && /^[A-Za-z0-9._:-]+$/.test(value);

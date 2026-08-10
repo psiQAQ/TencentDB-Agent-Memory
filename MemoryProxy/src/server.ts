@@ -135,7 +135,8 @@ export function createApp(config: ProxyConfig): Hono {
   // ── Whitelisted auxiliary endpoints (must precede catch-all) ─────────────
   // 这些端点走轻量透传 handler（不进入路由模块，不构成对话回合）。
   // 详见 docs/design/2026-07-02-arbitrary-path-passthrough-design.md
-  app.post("/v1/messages/count_tokens", (c) => handleAuxiliaryEndpoint(c, config));
+  app.post("/v1/messages/count_tokens", (c) =>
+    handleAuxiliaryEndpoint(c, config, "claude-code"));
   app.post("/v1/embeddings", (c) => handleAuxiliaryEndpoint(c, config));
   app.post("/v1/completions", (c) => handleAuxiliaryEndpoint(c, config));
   app.post("/v1/moderations", (c) => handleAuxiliaryEndpoint(c, config));
@@ -197,6 +198,12 @@ export function createApp(config: ProxyConfig): Hono {
     handleAnthropicMessages(c, config, "opencode"));
   app.post("/pi/:spaceId/v1/messages", (c) =>
     handleAnthropicMessages(c, config, "pi"));
+  app.post("/claude-code/:spaceId/v1/messages/count_tokens", (c) =>
+    handleAuxiliaryEndpoint(c, config, "claude-code"));
+  app.post("/opencode/:spaceId/v1/messages/count_tokens", (c) =>
+    handleAuxiliaryEndpoint(c, config, "opencode"));
+  app.post("/pi/:spaceId/v1/messages/count_tokens", (c) =>
+    handleAuxiliaryEndpoint(c, config, "pi"));
   // Keep the generic shape only as an explicit fail-closed guard for unknown
   // Anthropic-style prefixes. It has no platform binding and cannot forward.
   app.post("/:agent/:spaceId/v1/messages", (c) => handleAnthropicMessages(c, config));
@@ -213,7 +220,8 @@ export function createApp(config: ProxyConfig): Hono {
   // Legacy /proxy/<spaceId>/ prefix — no agent info, defaults to Claude Code.
   // 保留以兼容不带 agent 前缀的客户端。
   app.post("/proxy/:spaceId/v1/messages", (c) => handleAnthropicMessages(c, config, "claude-code"));
-  app.post("/proxy/:spaceId/v1/messages/count_tokens", (c) => handleAuxiliaryEndpoint(c, config));
+  app.post("/proxy/:spaceId/v1/messages/count_tokens", (c) =>
+    handleAuxiliaryEndpoint(c, config, "claude-code"));
   app.post("/proxy/:spaceId/v1/embeddings", (c) => handleAuxiliaryEndpoint(c, config));
   app.post("/proxy/:spaceId/v1/completions", (c) => handleAuxiliaryEndpoint(c, config));
   app.post("/proxy/:spaceId/v1/moderations", (c) => handleAuxiliaryEndpoint(c, config));

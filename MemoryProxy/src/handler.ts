@@ -675,9 +675,9 @@ export async function handleChatCompletions(
             userKey: apiKey || null,
             timeoutMs: config.tdai.memory.timeoutMs,
           });
-          console.log(`[asset-capability] user=${(initResult.sessionInfo as { user_id?: string }).user_id ?? "-"} flags=${JSON.stringify(assetCapabilities)}`);
-        } catch (err) {
-          console.warn(`[asset-capability] resolve failed: ${err instanceof Error ? err.message : String(err)}`);
+          console.log("[asset-capability] resolved user=present");
+        } catch {
+          console.warn("[asset-capability] resolve failed");
         }
       }
 

@@ -20,7 +20,10 @@ import type {
 import { DEFAULT_TASK_LABEL } from "../types.js";
 import { SessionStore } from "../store.js";
 import { buildSessionInfo } from "../registrar.js";
-import { injectSessionContextWithToggles } from "../context-injector.js";
+import {
+  buildSessionContextBlockWithToggles,
+  injectSessionContextWithToggles,
+} from "../context-injector.js";
 import type { MetadataClient } from "../../meta/client.js";
 import { resolvePresetIdentity, type PresetIdentity } from "../preset.js";
 
@@ -56,9 +59,7 @@ export interface SessionInitResult {
   bypassed?: boolean;
   /**
    * Anthropic-only: pre-built `<session_context>` string the caller must
-   * append to `body.system` (the ClaudeCode init module populates this;
-   * CodeBuddy stays OpenAI so it is always undefined here). Kept in this
-   * interface so `session/index.ts`'s union type stays uniform.
+   * append to `body.system`.
    */
   systemAppend?: string | null;
 }
@@ -161,9 +162,21 @@ function applyArtifactsAndContext(
   taskDetail: TaskDetail | null | undefined,
   sessionKey: string,
   config: SessionInitConfig,
-): MessageArr {
+  reqCtx: SessionRequestContext,
+): Pick<SessionInitResult, "messages" | "systemAppend"> {
   // 曾经这里会按 config.keepInitArtifacts 决定要不要 stripInitArtifacts,
   // 现在**永远保留** session_init form 交互, 不做任何删除。
+  if (reqCtx.protocol === "anthropic") {
+    return {
+      messages,
+      systemAppend: buildSessionContextBlockWithToggles(
+        agentDetail,
+        taskDetail,
+        config,
+        sessionKey,
+      ),
+    };
+  }
   const injected = injectSessionContextWithToggles(messages, agentDetail, taskDetail, config, sessionKey);
   if (injected !== messages) {
     const finalRoles = (injected as unknown[]).map((m: any) => m.role);
@@ -172,7 +185,7 @@ function applyArtifactsAndContext(
         `ctx=${agentDetail ? "Y" : "N"}/${taskDetail ? "Y" : "N"} final=[${finalRoles.join(",")}]`,
     );
   }
-  return injected as MessageArr;
+  return { messages: injected as MessageArr };
 }
 
 /**
@@ -189,6 +202,7 @@ async function completeRegistration(
   config: SessionInitConfig,
   store: SessionStore,
   messages: MessageArr,
+  reqCtx: SessionRequestContext,
   metadataClient?: MetadataClient,
   userKey?: string,
   spaceId?: string,
@@ -289,10 +303,10 @@ async function completeRegistration(
   };
   await store.set(compositeKey, nextState);
 
-  const out = applyArtifactsAndContext(messages, agentDetail, taskDetail, compositeKey, config);
+  const out = applyArtifactsAndContext(messages, agentDetail, taskDetail, compositeKey, config, reqCtx);
   return {
     intercepted: false,
-    messages: out,
+    ...out,
     sessionInfo,
     justRegistered: true,
     agentDetail,
@@ -425,7 +439,7 @@ export async function handleSessionInit(
         return completeRegistration(
           { agent_id: pr.agentId!, task_id: pr.taskId },
           seedState, teams, compositeKey, sessionKey, userId,
-          config, store, messages, metadataClient, userKey, spaceId, agentSource,
+          config, store, messages, reqCtx, metadataClient, userKey, spaceId, agentSource,
         );
       } else if (pr.teamId) {
         // only team resolved → jump straight to agent+task selection (skip asset_confirm + team_select)
@@ -640,7 +654,7 @@ export async function handleSessionInit(
 
       return await completeRegistration(
         resolved, state, cachedTeams, compositeKey, sessionKey, userId,
-        config, store, messages, metadataClient, userKey, spaceId, agentSource,
+        config, store, messages, reqCtx, metadataClient, userKey, spaceId, agentSource,
       );
     }
 
@@ -668,6 +682,6 @@ export async function handleSessionInit(
   const bypassed = (state as any).bypassed === true;
   const agent = bypassed ? null : (state.agentDetail ?? null);
   const task = bypassed ? null : (state.taskDetail ?? null);
-  const out = applyArtifactsAndContext(messages, agent, task, sessionKey, config);
-  return { intercepted: false, messages: out, sessionInfo: state.sessionInfo, bypassed };
+  const out = applyArtifactsAndContext(messages, agent, task, sessionKey, config, reqCtx);
+  return { intercepted: false, ...out, sessionInfo: state.sessionInfo, bypassed };
 }

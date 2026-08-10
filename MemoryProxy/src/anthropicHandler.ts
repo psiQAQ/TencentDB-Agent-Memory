@@ -49,7 +49,7 @@ import type { CcRequestKind } from "./common/cc-request-classifier.js";
 import { buildRequestDebugMetadata } from "./common/langfuse-debug.js";
 import { resolveAgentAdapter } from "./agent-adapters/index.js";
 import {
-  extractAgentSourceFromPath,
+  getAnthropicSourceBindingError,
   isValidSessionId,
   type AnthropicMessageSource,
 } from "./agent-adapters/anthropic-platform.js";
@@ -531,14 +531,14 @@ export async function handleAnthropicMessages(
 ): Promise<Response> {
   // Platform and session identity are trust-boundary inputs. Validate them
   // before auth, body parsing, storage/Core access, logging, or upstream fetch.
-  const pathAgentSource = extractAgentSourceFromPath(c.req.path);
-  if (!boundAgentSource) {
+  const sourceBindingError = getAnthropicSourceBindingError(c.req.path, boundAgentSource);
+  if (sourceBindingError === "unbound") {
     return c.json(
       { type: "error", error: { type: "not_found_error", message: "Unsupported Anthropic platform route" } },
       404,
     );
   }
-  if (pathAgentSource && pathAgentSource !== boundAgentSource) {
+  if (sourceBindingError === "conflict") {
     return c.json(
       { type: "error", error: { type: "invalid_request_error", message: "Platform route binding mismatch" } },
       400,
@@ -551,7 +551,7 @@ export async function handleAnthropicMessages(
       400,
     );
   }
-  const agentSource = boundAgentSource;
+  const agentSource = boundAgentSource!;
   const startTime = new Date().toISOString();
   const traceId = uuidv7();
 
@@ -815,9 +815,9 @@ export async function handleAnthropicMessages(
             userKey: callerUserKey,
             timeoutMs: config.tdai.memory.timeoutMs,
           });
-          console.log(`[asset-capability] user=${(initResult.sessionInfo as { user_id?: string }).user_id ?? "-"} flags=${JSON.stringify(assetCapabilities)}`);
-        } catch (err) {
-          console.warn(`[asset-capability] resolve failed: ${err instanceof Error ? err.message : String(err)}`);
+          console.log("[asset-capability] resolved user=present");
+        } catch {
+          console.warn("[asset-capability] resolve failed");
         }
       }
 

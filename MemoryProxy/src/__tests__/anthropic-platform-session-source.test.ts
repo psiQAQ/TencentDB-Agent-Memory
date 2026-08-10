@@ -46,6 +46,8 @@ describe("Anthropic platform session source", () => {
     await Promise.resolve();
 
     expect(result.intercepted).toBe(false);
+    expect(result.messages).toEqual([{ role: "user", content: "hello" }]);
+    expect(result.systemAppend).toContain("<session_context>");
     expect(store.getBoundIdentity(compositeKey)?.agentSource).toBe(source);
     expect(store.get(compositeKey)?.sessionInfo?.session_id).toBe(sessionId);
     expect(appendParticipationLog).toHaveBeenCalledWith(expect.objectContaining({
@@ -56,5 +58,53 @@ describe("Anthropic platform session source", () => {
       .map(String)
       .join("\n");
     expect(output).not.toContain(sessionId);
+
+    const initialized = await handleSessionInit(
+      sessionId,
+      "user-1",
+      [{ role: "user", content: "again" }],
+      structuredClone(DEFAULT_CONFIG.sessionInit),
+      store,
+      { stream: false, modelId: "test-model", protocol: "anthropic" },
+      source,
+      metadataClient as never,
+      "memory-user-key",
+      "space-1",
+    );
+    expect(initialized.messages).toEqual([{ role: "user", content: "again" }]);
+    expect(initialized.systemAppend).toContain("<session_context>");
+  });
+
+  it("keeps the OpenAI initialized context in messages", async () => {
+    const store = new SessionStore();
+    const sessionId = "session-openai";
+    const compositeKey = `codebuddy:${sessionId}`;
+    store.bind(compositeKey, {
+      userId: "user-1",
+      agentSource: "codebuddy",
+      sessionId,
+      spaceId: "space-1",
+    });
+    await store.set(compositeKey, {
+      status: "initialized",
+      keyId: sessionId,
+      startedAt: Date.now(),
+      attemptCount: 0,
+      agentDetail: { id: "agent-1", name: "Agent" },
+      taskDetail: { id: "task-1", name: "Task" },
+    });
+
+    const result = await handleSessionInit(
+      sessionId,
+      "user-1",
+      [{ role: "user", content: "hello" }],
+      structuredClone(DEFAULT_CONFIG.sessionInit),
+      store,
+      { stream: false, modelId: "test-model", protocol: "openai" },
+      "codebuddy",
+    );
+
+    expect(result.messages?.map((message) => message.role)).toEqual(["system", "user"]);
+    expect(result.systemAppend).toBeUndefined();
   });
 });

@@ -141,11 +141,8 @@ export class SessionStore {
     if (this.repo) {
       try {
         await this.repo.upsert(spaceOf(id), id.userId, id.agentSource, id.sessionId, state);
-      } catch (err) {
-        console.warn(
-          `[session] L2a upsert failed for ${keyId}: ` +
-            (err instanceof Error ? err.message : String(err)),
-        );
+      } catch {
+        console.warn("[session] L2a upsert failed");
       }
     }
     // L2b: only write binding on terminal states
@@ -164,11 +161,8 @@ export class SessionStore {
           };
       try {
         await this.bindingRepo.putBinding(spaceOf(id), id.userId, id.agentSource, id.sessionId, binding);
-      } catch (err) {
-        console.warn(
-          `[session] L2b binding write failed for ${keyId}: ` +
-            (err instanceof Error ? err.message : String(err)),
-        );
+      } catch {
+        console.warn("[session] L2b binding write failed");
       }
     }
   }
@@ -224,11 +218,8 @@ export class SessionStore {
         console.log(`[session-db] hydrated ${loaded} initialized session(s) from disk`);
       }
       return loaded;
-    } catch (err) {
-      console.warn(
-        "[session-db] hydrateFromDb failed:",
-        err instanceof Error ? err.message : String(err),
-      );
+    } catch {
+      console.warn("[session-db] hydrateFromDb failed");
       return 0;
     }
   }
@@ -276,7 +267,7 @@ export class SessionStore {
     // initialized 快路径仍是纯内存零 IO。
     const l1 = this.get(keyId);
     if (l1 && l1.status === "initialized") {
-      console.log(`[cache] session=${keyId} L1 hit (terminal)`);
+      console.log("[cache] session=<redacted> L1 hit (terminal)");
       return l1;
     }
 
@@ -290,7 +281,7 @@ export class SessionStore {
     if (this.repo) {
       const l2a = await this.probeL2a(keyId, identity);
       if (l2a) {
-        console.log(`[cache] session=${keyId} L2a hit → promote L1${l1 ? " (override stale L1)" : ""}`);
+        console.log(`[cache] session=<redacted> L2a hit → promote L1${l1 ? " (override stale L1)" : ""}`);
         return l2a;
       }
     }
@@ -306,13 +297,13 @@ export class SessionStore {
     // zombie / user-mismatch 已在 `this.get()` 与 `probeL2a` 内部各自 invalidate，
     // 走到这里的 l1 一定是 fresh + user 匹配的。
     if (l1) {
-      console.log(`[cache] session=${keyId} L1 hit (pending, L2a miss fallback)`);
+      console.log("[cache] session=<redacted> L1 hit (pending, L2a miss fallback)");
       return l1;
     }
 
     // Step 3: L2b Binding
     if (!this.bindingRepo) {
-      console.log(`[cache] session=${keyId} miss (no bindingRepo) → history-scan`);
+      console.log("[cache] session=<redacted> miss (no bindingRepo) → history-scan");
       return this.tryHistoryScan(keyId, identity, ctx);
     }
     let binding: SessionBinding | null;
@@ -327,10 +318,10 @@ export class SessionStore {
       binding = null;
     }
     if (!binding) {
-      console.log(`[cache] session=${keyId} miss (no binding) → history-scan`);
+      console.log("[cache] session=<redacted> miss (no binding) → history-scan");
       return this.tryHistoryScan(keyId, identity, ctx);
     }
-    console.log(`[cache] session=${keyId} L2b binding hit outcome=${binding.outcome} → rebuild`);
+    console.log(`[cache] session=<redacted> L2b binding hit outcome=${binding.outcome} → rebuild`);
 
     // Async touch (refresh 30d TTL, don't await)
     void this.bindingRepo
@@ -397,7 +388,7 @@ export class SessionStore {
       Date.now() - row.startedAt > this.ttlMs
     ) {
       console.log(
-        `[session-recover] ${keyId} L2a pending expired (status=${row.status}, age=${Date.now() - row.startedAt}ms), invalidating`,
+        `[session-recover] session=<redacted> L2a pending expired (status=${row.status}), invalidating`,
       );
       try {
         this.repo!.deleteBySessionId(spaceOf(identity), identity.userId, identity.agentSource, identity.sessionId);
@@ -410,7 +401,7 @@ export class SessionStore {
     const storedUserId = row.userId ?? row.sessionInfo?.user_id;
     if (storedUserId && identity.userId && storedUserId !== identity.userId) {
       console.log(
-        `[session-recover] ${keyId} L2a user mismatch (stored=${storedUserId}, current=${identity.userId}), invalidating`,
+        "[session-recover] session=<redacted> L2a user mismatch, invalidating",
       );
       try {
         this.repo!.deleteBySessionId(spaceOf(identity), identity.userId, identity.agentSource, identity.sessionId);
@@ -423,7 +414,7 @@ export class SessionStore {
     // Promote back to L1 so subsequent turns don't hit the repo at all.
     this.states.set(keyId, row);
     console.log(
-      `[session-recover] ${keyId} L2a hit status=${row.status} (agent=${row.sessionInfo?.agent_id ?? "-"}, task=${row.sessionInfo?.task_id ?? "-"})`,
+      `[session-recover] session=<redacted> L2a hit status=${row.status} agent=${row.sessionInfo?.agent_id ? "present" : "none"} task=${row.sessionInfo?.task_id ? "present" : "none"}`,
     );
     return row;
   }
@@ -451,14 +442,14 @@ export class SessionStore {
   ): Promise<SessionInitState | undefined> {
     // Step 4.1: user mismatch → invalidate binding
     if (binding.userId && identity.userId && binding.userId !== identity.userId) {
-      console.log(`[session-recover] ${keyId} user mismatch (bound=${binding.userId}, current=${identity.userId}), invalidating`);
+      console.log("[session-recover] session=<redacted> user mismatch, invalidating");
       await this.bindingRepo?.deleteBinding(spaceOf(identity), identity.userId, identity.agentSource, identity.sessionId);
       return undefined;
     }
 
     if (!ctx.metadataClient) {
       // No client → can't recover, degrade to one-shot bypass
-      console.warn(`[session-recover] ${keyId} no metadataClient, one-shot bypass`);
+      console.warn("[session-recover] session=<redacted> no metadataClient, one-shot bypass");
       return {
         status: "initialized", keyId, startedAt: Date.now(),
         attemptCount: 0, bypassed: true,
@@ -509,12 +500,12 @@ export class SessionStore {
 
     // Step 4.3: dispatch
     if (agentNotFound) {
-      console.log(`[session-recover] ${keyId} agent ${binding.agentId} not found, deleting binding`);
+      console.log("[session-recover] session=<redacted> agent not found, deleting binding");
       await this.bindingRepo?.deleteBinding(spaceOf(identity), identity.userId, identity.agentSource, identity.sessionId);
       return undefined;
     }
     if (anyKernelError) {
-      console.warn(`[session-recover] ${keyId} kernel unavailable, one-shot bypass`);
+      console.warn("[session-recover] session=<redacted> kernel unavailable, one-shot bypass");
       // Don't delete binding; return one-shot bypass to serve this request
       return {
         status: "initialized", keyId, startedAt: Date.now(),
@@ -523,7 +514,7 @@ export class SessionStore {
       };
     }
     if (taskNotFound) {
-      console.log(`[session-recover] ${keyId} task ${binding.taskId} not found, keeping agent`);
+      console.log("[session-recover] session=<redacted> task not found, keeping agent");
       // Update binding to drop taskId
       await this.bindingRepo?.putBinding(
         spaceOf(identity),
@@ -566,15 +557,12 @@ export class SessionStore {
     if (this.repo) {
       try {
         await this.repo.upsert(spaceOf(identity), identity.userId, identity.agentSource, identity.sessionId, rebuilt);
-      } catch (err) {
-        console.warn(
-          `[session-recover] L2a upsert failed for ${keyId} during rebuild: ` +
-            (err instanceof Error ? err.message : String(err)),
-        );
+      } catch {
+        console.warn("[session-recover] L2a upsert failed during rebuild");
       }
     }
 
-    console.log(`[session-recover] ${keyId} rebuilt from binding (agent=${binding.agentId}, task=${binding.taskId ?? "-"})`);
+    console.log(`[session-recover] session=<redacted> rebuilt from binding agent=${binding.agentId ? "present" : "none"} task=${binding.taskId ? "present" : "none"}`);
 
     return rebuilt;
   }
@@ -672,13 +660,13 @@ export class SessionStore {
         taskDetail: null,
       };
       this.states.set(keyId, state);
-      console.log(`[session-recover] ${keyId} history scan → bypass (form found, no agent selected)`);
+      console.log("[session-recover] session=<redacted> history scan → bypass (form found, no agent selected)");
       return state;
     }
 
     if (!foundAgentId) {
       // Has history but can't extract anything → one-shot bypass, don't re-pop form
-      console.log(`[session-recover] ${keyId} history scan → one-shot bypass (conversation exists but no form markers found)`);
+      console.log("[session-recover] session=<redacted> history scan → one-shot bypass (conversation exists but no form markers found)");
       const state: SessionInitState = {
         status: "initialized",
         keyId,
@@ -693,7 +681,7 @@ export class SessionStore {
     }
 
     // Found agent_id in history — try kernel rebuild (same as L2b hit path)
-    console.log(`[session-recover] ${keyId} history scan → agent=${foundAgentId} found in form, attempting rebuild`);
+    console.log("[session-recover] session=<redacted> history scan → agent=present, attempting rebuild");
     const binding: SessionBinding = {
       outcome: "initialized",
       userId: identity.userId,
@@ -712,11 +700,8 @@ export function getSessionStore(): SessionStore {
     let repo: SessionRepo | undefined;
     try {
       repo = getSessionRepo();
-    } catch (err) {
-      console.warn(
-        "[session-db] session repo unavailable, running memory-only:",
-        err instanceof Error ? err.message : String(err),
-      );
+    } catch {
+      console.warn("[session-db] session repo unavailable, running memory-only");
     }
     _store = new SessionStore(DEFAULT_TTL_MS, repo);
     void _store.hydrateFromDb();

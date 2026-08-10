@@ -30,6 +30,10 @@ import { log } from "./report/log.js";
 import { verifyUserKey } from "./auth.js";
 import { matchSystemUserByUserId, hasSystemUsers } from "./systemUser.js";
 import { handleSystemUserPassthrough } from "./systemUserPassthrough.js";
+import {
+  getAnthropicSourceBindingError,
+  type AnthropicMessageSource,
+} from "./agent-adapters/anthropic-platform.js";
 
 /** Hop-by-hop headers 与 host header：不能透传到 upstream。 */
 const SKIP_REQUEST_HEADERS = new Set([
@@ -57,7 +61,7 @@ const SKIP_RESPONSE_HEADERS = new Set([
  */
 function buildAuxUpstreamHeaders(
   c: Context,
-  config: ProxyConfig,
+  upstreamApiKey: string,
   entry: WhitelistEndpoint,
 ): Record<string, string> {
   const headers: Record<string, string> = {};
@@ -68,12 +72,12 @@ function buildAuxUpstreamHeaders(
   }
   headers["content-type"] = headers["content-type"] ?? "application/json";
 
-  if (config.upstream.apiKey) {
+  if (upstreamApiKey) {
     if (entry.protocol === "anthropic") {
-      headers["x-api-key"] = config.upstream.apiKey;
+      headers["x-api-key"] = upstreamApiKey;
       delete headers["authorization"];
     } else {
-      headers["authorization"] = `Bearer ${config.upstream.apiKey}`;
+      headers["authorization"] = `Bearer ${upstreamApiKey}`;
       delete headers["x-api-key"];
     }
   }
@@ -160,16 +164,27 @@ function extractUsageFromResponse(
 export async function handleAuxiliaryEndpoint(
   c: Context,
   config: ProxyConfig,
+  boundAgentSource?: AnthropicMessageSource,
 ): Promise<Response> {
-  const traceId = uuidv7();
-  const startTime = new Date().toISOString();
-
   const entry = matchWhitelistEndpoint(c.req.path);
   if (!entry) {
     // Defensive: server.ts 应保证只有白名单路径路由到本 handler。
     // 若到达此处说明配置或路由不一致，返回 404 便于快速定位。
     return c.json({ error: "Unregistered endpoint" }, 404);
   }
+
+  if (entry.pathSuffix === "/v1/messages/count_tokens") {
+    const sourceBindingError = getAnthropicSourceBindingError(c.req.path, boundAgentSource);
+    if (sourceBindingError === "unbound") {
+      return c.json({ error: "Unsupported Anthropic platform route" }, 404);
+    }
+    if (sourceBindingError === "conflict") {
+      return c.json({ error: "Platform route binding mismatch" }, 400);
+    }
+  }
+
+  const traceId = uuidv7();
+  const startTime = new Date().toISOString();
 
   // 1. 鉴权（先做本地 keyId 解析，再走 auth 服务校验以与主 handler 对称）
   const apiKey =
@@ -211,10 +226,15 @@ export async function handleAuxiliaryEndpoint(
   const modelId = extractModelId(bodyText);
 
   // 3. 拼接 upstream URL（复用 joinUrl，天然消费白名单表）
-  const upstreamUrl = joinUrl(config.upstream.url, c.req.path);
+  const agentUpstream = boundAgentSource
+    ? config.upstream.agents?.[boundAgentSource]
+    : undefined;
+  const upstreamBaseUrl = agentUpstream?.url ?? config.upstream.url;
+  const upstreamApiKey = agentUpstream ? (agentUpstream.apiKey ?? "") : config.upstream.apiKey;
+  const upstreamUrl = joinUrl(upstreamBaseUrl, c.req.path);
 
   // 4. 构造上游请求头（按端点协议注入鉴权）
-  const upstreamHeaders = buildAuxUpstreamHeaders(c, config, entry);
+  const upstreamHeaders = buildAuxUpstreamHeaders(c, upstreamApiKey, entry);
 
   // 5. Pipeline log（简化：只发关键事件）
   const pipe = createPipeline(config, traceId, modelId);
