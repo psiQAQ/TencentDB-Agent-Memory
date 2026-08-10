@@ -202,19 +202,10 @@ export class InjectionPipeline {
           const durationMs = Date.now() - hookStartMs;
 
           if (blocks.length > 0) {
-            // 💡 显式打印注入成功的日志和文本前 120 字符预览，极大方便开发者排查和联调
             console.log(
-              `[injection] ✓ Hook "${hook.id}" successfully injected ${blocks.length} block(s) ` +
-              `at point "${point}" (cacheStrategy=${hook.cacheStrategy ?? "none"})`
+              `[injection] hook_done point=${point} blocks=${blocks.length} `
+                + `cacheStrategy=${hook.cacheStrategy ?? "none"}`,
             );
-            for (const b of blocks) {
-              if (b.type === "text") {
-                const preview = b.content.replace(/\s+/g, " ").slice(0, 120);
-                console.log(`[injection]   → text preview: "${preview}..."`);
-              } else if (b.type === "custom") {
-                console.log(`[injection]   → custom tool: "${b.metadata?.tool_name}"`);
-              }
-            }
             this.applyInjection(ctx, hook, point, blocks);
           }
 
@@ -236,8 +227,7 @@ export class InjectionPipeline {
 
           // Hook failure is non-fatal — log and continue
           console.error(
-            `[injection] Hook "${hook.id}" failed at point "${point}":`,
-            error.message,
+            `[injection] hook_error point=${point} category=execution_failed`,
           );
 
           // ── Observer: hook error ────────────────────────────────────────
@@ -288,7 +278,7 @@ export class InjectionPipeline {
     if (strategy === "session_init") {
       const cached = await this.hookCacheRepo.get(spaceId, userId, agentSource, sessionId, hook.id);
       if (cached !== null) {
-        console.log(`[hook-cache] session=${sessionId} hook=${hook.id} hit blocks=${cached.length}`);
+        console.log(`[hook-cache] lookup result=hit blocks=${cached.length}`);
         return cached;
       }
 
@@ -308,17 +298,14 @@ export class InjectionPipeline {
       if (fresh.length > 0 && !readOnly) {
         try {
           this.hookCacheRepo.put(spaceId, userId, agentSource, sessionId, hook.id, fresh);
-          console.log(`[hook-cache] session=${sessionId} hook=${hook.id} miss → self-heal put (blocks=${fresh.length})`);
-        } catch (err) {
-          console.warn(
-            `[injection] session_init cache self-heal put failed (session=${sessionId} hook=${hook.id}):`,
-            err instanceof Error ? err.message : String(err),
-          );
+          console.log(`[hook-cache] lookup result=miss selfHeal=true blocks=${fresh.length}`);
+        } catch {
+          console.warn("[hook-cache] self_heal_failed category=storage_error");
         }
       } else if (readOnly) {
-        console.log(`[hook-cache] session=${sessionId} hook=${hook.id} miss (readOnly, no self-heal) blocks=${fresh.length}`);
+        console.log(`[hook-cache] lookup result=miss readOnly=true selfHeal=false blocks=${fresh.length}`);
       } else {
-        console.log(`[hook-cache] session=${sessionId} hook=${hook.id} miss + execute returned empty (no self-heal)`);
+        console.log("[hook-cache] lookup result=miss selfHeal=false blocks=0");
       }
       return fresh;
     }
@@ -373,10 +360,7 @@ export class InjectionPipeline {
           return; // anchor hit — done
         }
         // Slot unresolved / structure missing → fall through to `point` (warn).
-        console.warn(
-          `[injection] anchor slot "${hook.anchor.slot ?? hook.anchor.rawKey}" `
-            + `unresolved on agent "${profile.id}", fallback to point "${point}"`,
-        );
+        console.warn(`[injection] anchor_unresolved point=${point} fallback=true`);
       }
     }
 

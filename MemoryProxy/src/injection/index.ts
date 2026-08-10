@@ -419,11 +419,8 @@ export async function prewarmFromConfig(
   }
   try {
     return await prewarmAll(bundle.registry, bundle.hookCacheRepo, input, opts);
-  } catch (err) {
-    console.warn(
-      "[hook-cache] prewarmFromConfig swallowed error:",
-      err instanceof Error ? err.message : String(err),
-    );
+  } catch {
+    console.warn("[hook-cache] prewarm_failed category=unexpected_error");
     return { cachedHookIds: [], skipped: [], durationMs: 0 };
   }
 }

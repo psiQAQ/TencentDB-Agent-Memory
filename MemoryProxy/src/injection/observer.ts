@@ -21,6 +21,33 @@ import { startObservation, LangfuseOtelSpanAttributes } from "@langfuse/tracing"
 import { privacySafeSessionId } from "../telemetry-privacy.js";
 import { langfuseTurnTraceId } from "../langfuse.js";
 
+const SAFE_POINTS = new Set<InjectionPoint>([
+  "system.prefix",
+  "system.suffix",
+  "system.before_tools",
+  "system.after_tools",
+  "user.before",
+  "user.after",
+  "user.first_turn",
+  "tools.append",
+  "tools.prepend",
+]);
+const SAFE_CACHE_STRATEGIES = new Set(["none", "session_init", "hybrid"]);
+
+function safePoint(point: unknown): InjectionPoint | "unknown" {
+  return SAFE_POINTS.has(point as InjectionPoint) ? point as InjectionPoint : "unknown";
+}
+
+function safeProtocol(protocol: unknown): "openai" | "anthropic" | "unknown" {
+  return protocol === "openai" || protocol === "anthropic" ? protocol : "unknown";
+}
+
+function safeCacheStrategy(strategy: unknown): string {
+  return typeof strategy === "string" && SAFE_CACHE_STRATEGIES.has(strategy)
+    ? strategy
+    : "unknown";
+}
+
 // ── Hook execution result ─────────────────────────────────────────────────────
 
 /** 单个钩子的执行结果汇总，由管线在 onPipelineEnd 时聚合上报。 */
@@ -124,10 +151,8 @@ export class LoggingInjectionObserver implements InjectionObserver {
   onPipelineStart(meta: AgentContextMetadata): void {
     try {
       log.info("injection.pipeline.start", {
-        traceId: meta.traceId.slice(0, 8),
-        protocol: meta.protocol,
-        agentSource: meta.agentSource,
-        modelId: meta.modelId,
+        protocol: safeProtocol(meta.protocol),
+        stream: meta.stream === true,
       });
     } catch { /* observer must never throw */ }
   }
@@ -141,9 +166,7 @@ export class LoggingInjectionObserver implements InjectionObserver {
       const totalBlockCount = results.reduce((sum, r) => sum + r.blockCount, 0);
       const errorCount = results.filter((r) => r.error).length;
       log.info("injection.pipeline.done", {
-        traceId: meta.traceId.slice(0, 8),
-        protocol: meta.protocol,
-        agentSource: meta.agentSource,
+        protocol: safeProtocol(meta.protocol),
         durationMs,
         hookCount: results.length,
         totalBlockCount,
@@ -152,28 +175,20 @@ export class LoggingInjectionObserver implements InjectionObserver {
     } catch { /* observer must never throw */ }
   }
 
-  onPipelineError(meta: AgentContextMetadata, error: Error): void {
+  onPipelineError(meta: AgentContextMetadata, _error: Error): void {
     try {
-      log.error(
-        "injection.pipeline.error",
-        {
-          traceId: meta.traceId.slice(0, 8),
-          protocol: meta.protocol,
-          agentSource: meta.agentSource,
-          errorMsg: error.message,
-        },
-        error,
-      );
+      log.error("injection.pipeline.error", {
+        protocol: safeProtocol(meta.protocol),
+        category: "pipeline_error",
+      });
     } catch { /* observer must never throw */ }
   }
 
   onHookStart(hook: InjectionHook, point: InjectionPoint): void {
     try {
       log.info("injection.hook.start", {
-        hookId: hook.id,
-        point,
-        cacheStrategy: hook.cacheStrategy ?? "none",
-        priority: hook.priority,
+        point: safePoint(point),
+        cacheStrategy: safeCacheStrategy(hook.cacheStrategy ?? "none"),
       });
     } catch { /* observer must never throw */ }
   }
@@ -186,36 +201,30 @@ export class LoggingInjectionObserver implements InjectionObserver {
     cacheStrategy?: string,
   ): void {
     try {
-      const blockSummaries = blocks.map((b) => ({
-        type: b.type,
-        source: String(b.metadata?.source ?? "unknown"),
-        preview: b.type === "text"
-          ? b.content.replace(/\s+/g, " ").slice(0, 200)
-          : `[${b.type}] ${b.metadata?.tool_name ?? ""}`,
-      }));
-
       log.info("injection.hook.done", {
-        hookId: hook.id,
-        point,
+        point: safePoint(point),
         blockCount: blocks.length,
+        textBlockCount: blocks.filter((block) => block.type === "text").length,
+        customBlockCount: blocks.filter((block) => block.type === "custom").length,
+        otherBlockCount: blocks.filter(
+          (block) => block.type !== "text" && block.type !== "custom",
+        ).length,
         durationMs,
-        cacheStrategy: cacheStrategy ?? hook.cacheStrategy ?? "none",
-        blocks: blockSummaries,
+        cacheStrategy: safeCacheStrategy(cacheStrategy ?? hook.cacheStrategy ?? "none"),
       });
     } catch { /* observer must never throw */ }
   }
 
   onHookError(
-    hook: InjectionHook,
+    _hook: InjectionHook,
     point: InjectionPoint,
-    error: Error,
+    _error: Error,
     durationMs: number,
   ): void {
     try {
       log.warn("injection.hook.error", {
-        hookId: hook.id,
-        point,
-        errorMsg: error.message,
+        point: safePoint(point),
+        category: "hook_error",
         durationMs,
       });
     } catch { /* observer must never throw */ }

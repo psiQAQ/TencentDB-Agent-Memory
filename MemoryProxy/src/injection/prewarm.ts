@@ -87,9 +87,7 @@ export async function prewarmAll(
   const targets = all.filter(shouldPrewarm);
 
   if (targets.length === 0) {
-    console.log(
-      `[hook-cache] prewarm session=${sessionId}: no hooks declared cacheStrategy, skipping`,
-    );
+    console.log("[hook-cache] prewarm_skipped reason=no_eligible_hooks");
     return { cachedHookIds, skipped, durationMs: Date.now() - startedAt };
   }
 
@@ -130,9 +128,7 @@ export async function prewarmAll(
   ]);
 
   if (settled.length === 0) {
-    console.warn(
-      `[hook-cache] prewarm session=${sessionId}: global timeout ${totalBudget}ms exceeded`,
-    );
+    console.warn("[hook-cache] prewarm_failed category=global_timeout");
     return { cachedHookIds, skipped, durationMs: Date.now() - startedAt };
   }
 
@@ -162,13 +158,8 @@ export async function prewarmAll(
 
   const durationMs = Date.now() - startedAt;
   console.log(
-    `[hook-cache] prewarm session=${sessionId}: cached=${cachedHookIds.length} skipped=${skipped.length} durationMs=${durationMs}`,
+    `[hook-cache] prewarm_done cached=${cachedHookIds.length} skipped=${skipped.length} durationMs=${durationMs}`,
   );
-  if (skipped.length > 0) {
-    for (const s of skipped) {
-      console.log(`[hook-cache]   - skip hook=${s.hookId} reason=${s.reason}`);
-    }
-  }
 
   return { cachedHookIds, skipped, durationMs };
 }
