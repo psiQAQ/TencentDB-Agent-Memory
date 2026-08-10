@@ -29,6 +29,7 @@ describe("upstream redirect privacy", () => {
   let receiver: Server;
   let redirectorOrigin: string;
   let receiverOrigin: string;
+  let primaryRequests: number;
   let receiverRequests: number;
   let receiverSawServerKey: boolean;
 
@@ -59,6 +60,7 @@ describe("upstream redirect privacy", () => {
         }));
         return;
       }
+      primaryRequests += 1;
       response.writeHead(302, { location: `${receiverOrigin}/capture` });
       response.end();
     });
@@ -66,6 +68,7 @@ describe("upstream redirect privacy", () => {
   });
 
   beforeEach(() => {
+    primaryRequests = 0;
     receiverRequests = 0;
     receiverSawServerKey = false;
   });
@@ -149,6 +152,7 @@ describe("upstream redirect privacy", () => {
     });
 
     expect(response.status).toBe(502);
+    expect(primaryRequests).toBe(1);
     expect(receiverRequests).toBe(0);
     expect(receiverSawServerKey).toBe(false);
   });

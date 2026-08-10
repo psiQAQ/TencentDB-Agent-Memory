@@ -1050,8 +1050,8 @@ export async function handleAnthropicMessages(
   const forwardEndpoint = matchWhitelistEndpoint(c.req.path)?.upstreamEndpoint ?? "/messages";
   // Isolation key is user-namespaced (`${user}:${session}`) so two users that
   // share the same client session id can't contaminate each other's state /
-  // turn counting. ClickHouse keeps the raw session_key (it has its own
-  // user_id column); this composite is internal to the extension only.
+  // turn counting. ClickHouse writes fixed-redaction session/user columns;
+  // this composite remains in-process and is internal to the extension only.
   const target: ForwardTarget = await resolveForwardTarget(config, {
     keyId: `${keyId}:${sessionKey}`,
     messages,

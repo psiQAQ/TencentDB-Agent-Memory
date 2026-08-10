@@ -32,7 +32,7 @@ MemoryProxy 是一个**透明的 LLM 请求代理**：把编码 Agent（Claude C
 - **Skill Bridge / Memory Bridge**：反向代理 MemoryCore 的 skill / memory HTTP 工具，转发时注入 `serviceToken`，避免凭据出现在 LLM 可见的 prompt 中。
 - **统一存储抽象（ProxyStorage）**：会话初始化状态、注入缓存与 Skill 状态（`inj:*` / `sk:*` / `vpin:*`）支持 Redis、COS（kernel-sts）、SQLite、FS、Memory 五种后端，多节点部署首选 COS。
 - **Input TPM / QPM 限流**：按 `spaceId × 最终模型` 在 Redis 上做 60 秒滑动窗口限流，可通过 `/v3/admin/rate-limits` 动态调整。
-- **可观测与用量上报**：Opik trace、Langfuse（一个 trace = 一个 turn）、ClickHouse（按 turn 记录 token 明细）三路互相独立，任一失败不影响业务。
+- **可观测与用量上报**：Opik、Langfuse、ClickHouse 三路互相独立。Langfuse 每个代理请求使用一个随机 trace，不提供跨请求稳定身份关联；ClickHouse 的身份列固定脱敏，仅保留聚合/分类指标；Opik 遵循自身的 request/fork trace 合同。任一失败不影响业务。
 - **Credit 计费上报**：每次上游响应完成后按定价表计算 CreditDelta 上报到计费服务；仅识别路径带 `/proxy/<spaceId>/` 的请求。
 - **多节点部署**：结合外部 gateway 与 COS 后端支持多实例水平扩展；`/skill-bridge` 与 `/memory-bridge` 前缀由 gateway 原样透传到 proxy 实例。
 
@@ -222,7 +222,7 @@ Anthropic Messages 客户端：
 | `knowledge` | 独立的 knowledge gateway（可与 skill 不同） |
 | `skillRuntime` | 是否允许主模型写 Skill（默认只读） |
 | `rateLimit` | Memory 实例 × 实际模型的 Input TPM / QPM 限流 |
-| `clickhouse` | 按 turn 的用量上报（计费数据源） |
+| `clickhouse` | 聚合/分类用量上报（计费总量；不支持原始身份/模型分组） |
 | `creditReport` / `creditPricing` | Credit 计费上报与定价表 |
 | `upstream.agents` | 按 agent name 覆盖上游 URL + apiKey（如 `claude-code` 单独走 CCR） |
 

@@ -77,7 +77,7 @@ export interface ClickHouseRow {
   credit: number;
   credit_saved: number;        // computed from raw in-process routedFrom before redaction
   routed_from: string;         // fixed redaction; unavailable for model grouping
-  space_id: string;            // 空间/租户标识（从 /proxy/<spaceId>/... 路径提取）
+  space_id: string;            // fixed redaction; unavailable for tenant grouping
   source_tag: string;          // 来源标记，恒定为 "proxy"
   host: string;
   upstream_request_id: string; // fixed redaction; unavailable for cross-system tracing
@@ -106,7 +106,7 @@ export interface ClickHouseRawUsageRow {
   usage: string;               // JSON of allowlisted finite numeric usage counters
   reason: string;              // 'non_tokenhub' | 'unknown_model' | 'invalid_format' | 'invalid_credit' | 'report_failed'
   routed_from: string;         // fixed redaction
-  space_id: string;            // 空间/租户标识（从 /proxy/<spaceId>/... 提取）
+  space_id: string;            // fixed redaction; unavailable for tenant grouping
   source_tag: string;          // 来源标记，恒为 "proxy"
   host: string;
   upstream_request_id: string; // fixed redaction
