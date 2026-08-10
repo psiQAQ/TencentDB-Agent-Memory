@@ -87,8 +87,10 @@ export function writeLog(config: ProxyConfig, entry: LogEntry): void {
       };
 
   // ── ClickHouse async write (if enabled) ──────────────────────────────────
-  if (config.clickhouse.enabled && (safeEntry.event === "usage" || safeEntry.event === "analyzer_usage")) {
-    const usageEntry = safeEntry as UsageLogEntry | AnalyzerUsageLogEntry;
+  if (config.clickhouse.enabled && (entry.event === "usage" || entry.event === "analyzer_usage")) {
+    // Keep the typed business event intact for classification and cost math.
+    // ClickHouse mappers redact identity/content only when constructing rows.
+    const usageEntry = entry as UsageLogEntry | AnalyzerUsageLogEntry;
     writeClickHouse({
       timestamp: usageEntry.timestamp,
       event: usageEntry.event,

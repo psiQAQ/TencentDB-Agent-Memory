@@ -16,9 +16,10 @@
 
 import type { AgentContextMetadata, ContextBlock, InjectionHook, InjectionPoint } from "./types.js";
 import { log } from "../report/log.js";
-import { createHash } from "node:crypto";
 import { TraceFlags } from "@opentelemetry/api";
 import { startObservation, LangfuseOtelSpanAttributes } from "@langfuse/tracing";
+import { privacySafeSessionId } from "../telemetry-privacy.js";
+import { langfuseTurnTraceId } from "../langfuse.js";
 
 // ── Hook execution result ─────────────────────────────────────────────────────
 
@@ -220,14 +221,6 @@ export class LoggingInjectionObserver implements InjectionObserver {
 
 // ── Langfuse implementation ───────────────────────────────────────────────────
 
-/**
- * 确定性派生 Langfuse traceId（与 langfuse.ts 中 langfuseTurnTraceId 算法一致）。
- * 由 sessionKey + turnSeq 经 SHA-256 派生，取 hex 前 32 位。
- */
-function deriveLangfuseTraceId(sessionKey: string, turnSeq: number): string {
-  return createHash("sha256").update(`${sessionKey}:${turnSeq}`).digest("hex").slice(0, 32);
-}
-
 /** 派生 phantom parent spanId（与 langfuse.ts 中 deriveParentSpanId 一致）。 */
 function deriveParentSpanId(traceId: string): string {
   return traceId.slice(0, 16);
@@ -236,23 +229,23 @@ function deriveParentSpanId(traceId: string): string {
 /**
  * Langfuse 注入观察者 —— 将每个钩子的执行作为 span observation 挂到 Langfuse turn trace 下。
  *
- * 前提条件：metadata.sessionKey 和 metadata.turnSeq 必须存在，
- * 否则所有方法降级为 no-op（因为无法派生 Langfuse traceId）。
- *
  * 每个 hook 产生一条 span observation：
- *   - name: `[inject] {hookId}` 或 `[inject] {hookId} (error)`
- *   - metadata: hookId, point, cacheStrategy, durationMs, blockCount, blocks 摘要
- *   - traceId: 由 sessionKey + turnSeq 确定性派生（与上游 LLM generation 共享同一 trace）
+ *   - name 使用固定类别，不包含 hook/user/session 标识
+ *   - metadata 只保留固定 point、数量、耗时与协议类别
+ *   - traceId 复用并规范化已有 request traceId，不从 session/user/key 派生
  *
  * 安全保证：所有方法内部 try/catch，绝不抛异常；observer 不存在或降级时 fallback noop。
  */
 export class LangfuseInjectionObserver implements InjectionObserver {
   /** 从 onPipelineStart 的 metadata 中捕获，后续 hook 回调使用。 */
   private meta: AgentContextMetadata | null = null;
+  /** Request-scoped ID; normalized from the existing request traceId. */
+  private traceId: string | null = null;
 
   onPipelineStart(meta: AgentContextMetadata): void {
     try {
       this.meta = meta;
+      this.traceId = langfuseTurnTraceId(meta.traceId);
       // 无 span — 延迟到 hook 级别记录
     } catch { /* observer must never throw */ }
   }
@@ -264,12 +257,14 @@ export class LangfuseInjectionObserver implements InjectionObserver {
   ): void {
     try {
       this.meta = null; // cleanup
+      this.traceId = null;
     } catch { /* observer must never throw */ }
   }
 
   onPipelineError(_meta: AgentContextMetadata, _error: Error): void {
     try {
       this.meta = null;
+      this.traceId = null;
     } catch { /* observer must never throw */ }
   }
 
@@ -291,35 +286,19 @@ export class LangfuseInjectionObserver implements InjectionObserver {
       const endTime = new Date();
       const startTime = new Date(endTime.getTime() - durationMs);
 
-      const blockSummaries = blocks.map((b) => ({
-        type: b.type,
-        source: String(b.metadata?.source ?? "unknown"),
-        preview: b.type === "text"
-          ? b.content.replace(/\s+/g, " ").slice(0, 300)
-          : `[${b.type}] ${b.metadata?.tool_name ?? ""}`,
-      }));
-
-      // Name 格式：[inject] <hookId> @ <point> — 可在 Langfuse 按前缀/关键词搜索
-      const name = blocks.length > 0
-        ? `[inject] ${hook.id} @ ${point}`
-        : `[inject] ${hook.id} @ ${point} (empty)`;
-
       const obsMeta: Record<string, unknown> = {
-        hookId: hook.id,
         point,
-        source: blocks[0]?.metadata?.source ?? "unknown",
-        cacheStrategy: cacheStrategy ?? hook.cacheStrategy ?? "none",
         durationMs,
         blockCount: blocks.length,
         protocol: this.meta?.protocol ?? "unknown",
-        agentSource: this.meta?.agentSource ?? "unknown",
+        stream: this.meta?.stream ?? false,
       };
 
       const span = startObservation(
-        name,
+        "injection-hook",
         {
-          input: { point, cacheStrategy: cacheStrategy ?? hook.cacheStrategy ?? "none" },
-          output: { blockCount: blocks.length, blocks: blockSummaries },
+          input: { point },
+          output: { blockCount: blocks.length, blockTypes: blocks.map((block) => block.type) },
           metadata: obsMeta,
         },
         {
@@ -339,10 +318,13 @@ export class LangfuseInjectionObserver implements InjectionObserver {
       otelSpan.setAttribute(LangfuseOtelSpanAttributes.OBSERVATION_METADATA, JSON.stringify(obsMeta));
       // trace 级标注：叠加注入摘要（last-write-wins，所有 hook 都会写，最终保留最后一次的值）
       otelSpan.setAttribute(LangfuseOtelSpanAttributes.TRACE_METADATA, JSON.stringify({
-        injection: { hookId: hook.id, point, blockCount: blocks.length, durationMs },
+        injection: { point, blockCount: blocks.length, durationMs },
       }));
       if (this.meta?.sessionKey) {
-        otelSpan.setAttribute(LangfuseOtelSpanAttributes.TRACE_SESSION_ID, this.meta.sessionKey);
+        otelSpan.setAttribute(
+          LangfuseOtelSpanAttributes.TRACE_SESSION_ID,
+          privacySafeSessionId(this.meta.sessionKey),
+        );
       }
 
       span.end(endTime);
@@ -363,21 +345,18 @@ export class LangfuseInjectionObserver implements InjectionObserver {
       const startTime = new Date(endTime.getTime() - durationMs);
 
       const obsMeta: Record<string, unknown> = {
-        hookId: hook.id,
         point,
-        errorMsg: error.message,
         durationMs,
         protocol: this.meta?.protocol ?? "unknown",
-        agentSource: this.meta?.agentSource ?? "unknown",
       };
 
       const span = startObservation(
-        `[inject] ${hook.id} @ ${point} (error)`,
+        "injection-hook-error",
         {
-          input: { point, cacheStrategy: hook.cacheStrategy ?? "none" },
-          output: { error: true, message: error.message },
+          input: { point },
+          output: { error: true },
           level: "ERROR",
-          statusMessage: error.message,
+          statusMessage: "operation_failed",
           metadata: obsMeta,
         },
         {
@@ -400,9 +379,8 @@ export class LangfuseInjectionObserver implements InjectionObserver {
     } catch { /* observer must never throw */ }
   }
 
-  /** Derive Langfuse traceId from stored metadata, or null if unavailable. */
+  /** Return this pipeline's request-scoped traceId, or null if unavailable. */
   private getLangfuseTraceId(): string | null {
-    if (!this.meta?.sessionKey || this.meta.turnSeq === undefined) return null;
-    return deriveLangfuseTraceId(this.meta.sessionKey, this.meta.turnSeq);
+    return this.traceId;
   }
 }

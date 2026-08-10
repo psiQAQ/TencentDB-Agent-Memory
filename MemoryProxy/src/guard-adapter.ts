@@ -12,12 +12,12 @@
  *   ForwardTarget, ForwardTargetRequest
  */
 
-import type { ProxyConfig } from "./types.js";
+import type { AnalyzerUsageLogEntry, ProxyConfig } from "./types.js";
 import { log } from "./report/log.js";
 import { RedisSessionStore } from "./redis-session-store.js";
 import { matchWhitelistEndpoint } from "./routes/whitelist.js";
 import { opikCreateTrace, opikCreateLlmSpan, uuidv7 } from "./opik.js";
-import { langfuseReportGeneration } from "./langfuse.js";
+import { langfuseReportGeneration, langfuseTurnTraceId } from "./langfuse.js";
 import { writeLog } from "./logger.js";
 
 // Optional Opik/Langfuse hooks — invoked only when the private extension is loaded
@@ -26,6 +26,41 @@ import { writeLog } from "./logger.js";
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type ExtensionTelemetry = { duration: number; input: string; output: string; model: string; usage: Record<string, unknown>; tags: string[] };
 type ExtensionTelemetryCtx = { traceId: string; keyId: string; sessionKey: string; turnSeq: number; startTime: string; spaceId?: string; triggeredBy?: string };
+
+/** Runtime trust boundary for opaque extension log events. */
+export function normalizeExtensionLogEvent(
+  event: Record<string, unknown>,
+): AnalyzerUsageLogEntry | null {
+  if (event.event !== "analyzer_usage") return null;
+  const parsedTimestamp = typeof event.timestamp === "string"
+    ? Date.parse(event.timestamp)
+    : Number.NaN;
+  const timestamp = Number.isFinite(parsedTimestamp)
+    ? new Date(parsedTimestamp).toISOString()
+    : new Date().toISOString();
+  const usage = event.usage && typeof event.usage === "object" && !Array.isArray(event.usage)
+    ? event.usage as Record<string, unknown>
+    : {};
+  const normalized: AnalyzerUsageLogEntry = {
+    timestamp,
+    event: "analyzer_usage",
+    modelId: typeof event.modelId === "string" ? event.modelId : "",
+    keyId: typeof event.keyId === "string" ? event.keyId : "",
+    upstreamUrl: typeof event.upstreamUrl === "string" ? event.upstreamUrl : "",
+    stream: event.stream === true,
+    usage,
+  };
+  if (typeof event.sessionKey === "string") normalized.sessionKey = event.sessionKey;
+  if (typeof event.turnSeq === "number" && Number.isFinite(event.turnSeq)) {
+    normalized.turnSeq = Math.max(0, Math.trunc(event.turnSeq));
+  }
+  if (typeof event.routedFrom === "string") normalized.routedFrom = event.routedFrom;
+  if (typeof event.spaceId === "string") normalized.spaceId = event.spaceId;
+  if (typeof event.upstreamRequestId === "string") {
+    normalized.upstreamRequestId = event.upstreamRequestId;
+  }
+  return normalized;
+}
 
 // ─── Transport types (host-side, generic) ───────────────────────────────────
 
@@ -200,20 +235,16 @@ function getCostGuard(config: ProxyConfig): unknown {
         });
       },
 
-      // ── Optional telemetry callback (opaque to the host) ──
-      // Invoked by the private extension with an internal step payload; the
-      // exact shape of that payload is owned by the extension. The host just
-      // forwards whatever it receives to the configured observability sinks so
-      // that internal steps appear alongside the primary request trace.
+      // ── Optional telemetry callback ──
+      // The extension owns the internal step shape; each exporter applies its
+      // fixed privacy allowlist before data leaves this process.
       reportAnalyzerTrace: (trace: ExtensionTelemetry, ctx: ExtensionTelemetryCtx) =>
         forwardExtensionTelemetry(config, trace, ctx),
 
       // ── Structured log events (ClickHouse / JSONL) ──
       writeLogEvent: (event: Record<string, unknown>) => {
-        // The extension produces events matching the host's LogEntry union shape.
-        // We trust the structure and cast — the logger validates internally.
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        writeLog(config, event as any);
+        const normalized = normalizeExtensionLogEvent(event);
+        if (normalized) writeLog(config, normalized);
       },
     });
 
@@ -391,10 +422,8 @@ export async function resolveForwardTarget(
 // ─── Extension telemetry forwarding (used only when the private extension is loaded) ───
 
 /**
- * Forward an opaque telemetry payload from the private extension to the
- * configured observability sinks (Opik + Langfuse). The payload shape is
- * owned by the extension; the host merely passes it through without
- * interpretation.
+ * Forward an extension telemetry payload to Opik + Langfuse. Exporters retain
+ * only fixed categories, counts, and numeric usage.
  *
  * This function is never called when the extension is unavailable
  * (passthrough mode).
@@ -425,7 +454,7 @@ function forwardExtensionTelemetry(
   if (trace.duration > 0) {
     const end = new Date(Date.parse(ctx.startTime) + trace.duration).toISOString();
     langfuseReportGeneration({
-      traceId: ctx.traceId,
+      traceId: langfuseTurnTraceId(ctx.traceId),
       name: `[internal] ${trace.model}`,
       model: trace.model,
       startTime: ctx.startTime,

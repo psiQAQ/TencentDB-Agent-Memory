@@ -947,7 +947,7 @@ export async function handleChatCompletions(
   // compaction); fall back to the stateless count when it's not tracked.
   const turnSeq = target.turnSeq > 0 ? target.turnSeq : countHumanTurns(messages, "openai");
   const lf: LangfuseTurnContext = {
-    traceId: langfuseTurnTraceId(sessionKey, turnSeq),
+    traceId: langfuseTurnTraceId(traceId),
     turnSeq,
     traceName: `${target.model} / ${keyId}`,
     userId: keyId,

@@ -1,7 +1,7 @@
 /** Opik tracing client for context-proxy.
  *
- * Project name is derived from the request API key:
- *   SHA-256(apiKey) → hex → first 8 chars
+ * Identity/project values may exist in-process, but outbound Opik payloads use
+ * fixed redaction and cannot group or correlate by user/session/model/project.
  *
  * All network calls are fire-and-forget. Failures are logged via structured logger
  * and never propagate to the hot request path.
@@ -158,6 +158,9 @@ export function opikCreateTrace(
       forkBody.metadata = privacySafeMetadata({ ...input.forkMetadata, forkTraceId });
     } else {
       forkBody.metadata = { forkTraceId };
+    }
+    if (config.opik.stripRequestLogContent) {
+      delete forkBody.input;
     }
     fireCreateTrace(url, headers, forkBody);
     return forkTraceId;

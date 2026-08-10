@@ -247,7 +247,9 @@ storage:
 
 
 # ── Opik LLM 可观测（Comet ML Opik） ─────────────────────────────────────────
-# 请求/响应的 trace 和 span 自动上报到 Opik。
+# 请求/响应的 trace 和 span 自动上报到 Opik。隐私安全导出不包含原始身份、
+# session、model、project 或正文，因此只能查看总量、固定类别与数值 usage，
+# 不能按用户/session/model/project 做分组或稳定关联。
 opik:
   enabled: false           # 是否启用 Opik 上报
   url: "http://127.0.0.1:5173"   # Opik 服务地址
@@ -256,8 +258,8 @@ opik:
 
 
 # ── Langfuse LLM 可观测（官方 SDK 上报） ──────────────────────────────────────
-# 一个 trace = 一个 turn（一次用户输入），同一 turn 内的工具循环请求归到同一个
-# trace 下的多个 generation。上报内容含：模型/延时/token 用量/缓存命中/成本。
+# traceId 不从 session/user/key 派生；每次随机生成。上报仅保留延时、token 用量、
+# 缓存命中、成本与固定类别，不能按用户/session/model/project 跨请求归并。
 langfuse:
   enabled: false           # 是否启用 Langfuse 上报
   host: ""                 # Langfuse 实例 base URL，例如 http://localhost:3000
@@ -267,17 +269,16 @@ langfuse:
 
 
 # ── ClickHouse 用量上报 ──────────────────────────────────────────────────────
-# 按 turn 记录每个用户的 token 消耗，支持按 model / user / session 维度查询。
-# 表结构含：timestamp / model_id / key_id(用户) / session_key + turn_seq(turn) /
-#           user_input / prompt_tokens / completion_tokens / total_tokens /
-#           cache_hit_tokens / cache_write_tokens。
+# 业务进程内仍用真实 typed event 做格式识别与成本计算；最终行把 user/session/
+# model/project/URL/request-id 固定脱敏，只支持总量与固定类别统计，不支持这些维度
+# 的分组、关联或账单归属。保留旧列仅为 schema 兼容。
 # 4xx/5xx 失败请求不写入。
 clickhouse:
   enabled: false           # 是否启用 ClickHouse 用量上报
   url: "http://clickhouse.example.com:8123"   # ClickHouse HTTP endpoint
   database: context_proxy            # 数据库名
   table: usage_logs                  # 用量表名（TokenHub 等已知格式）
-  rawTable: usage_raw                # 原始用量追溯表（非 TokenHub / 未知格式回退到这里）
+  rawTable: usage_raw                # 分类回退表（身份/正文仍固定脱敏，不可追溯个人）
   user: default                      # ClickHouse 用户名
   password: ""                       # ClickHouse 密码
   flushIntervalMs: 5000              # 定时 flush 间隔（毫秒），默认 5 秒
@@ -289,7 +290,7 @@ clickhouse:
 # 启用后 proxy 调用内核 POST /v3/meta/auth/verify 验证客户端 API Key。
 # 任何非 valid=true 的结果都返回 401 拒绝请求（包括超时/网络错误）。
 # x-tdai-service-id 从请求路径 /proxy/<spaceId>/... 自动提取。
-# 验证通过后 user_id 写入 ClickHouse key_id 列，并作为全链路用户标识。
+# 验证通过后的 user_id 仅用于进程内鉴权/业务逻辑；遥测导出列固定脱敏。
 auth:
   enabled: true            # 是否启用鉴权
   url: "http://kernel.example.com:8420"   # 内核鉴权服务 base URL（自动拼接 /v3/meta/auth/verify）
@@ -326,13 +327,13 @@ admin:
 # 命中流程：先用 apiKey 走 auth/verify 拿到 user_id → user_id 在下方 systemUsers
 # 列表里 → 命中，短路透传。命中后 proxy 将请求原样转发到
 # config.upstream.url，跳过会话初始化和上下文注入。
-# 仍会记 usage/credit（keyId = userId，spaceId = 路径中的 memory 实例 id）。
+# 仍会在进程内计算 usage/credit；最终遥测身份/space/model 列固定脱敏。
 # 依赖 auth.enabled=true —— auth 关掉时 verify 返回空 user_id，短路永远不会触发。
 # userKey 字段保留仅用作运维参考（曾经是匹配键，现在只在日志/注释里出现），
 # 可以不配；userId 必填。数组支持多条；空数组即禁用此特性。
 systemUsers:
   - name: memory                              # 逻辑名，只用于日志
-    userId: "${TDAI_MEMORY_SYSTEM_USER_ID}"   # 匹配键 & 计费归属的 user_id（必填）
+    userId: "${TDAI_MEMORY_SYSTEM_USER_ID}"   # 内部匹配键（必填；遥测导出固定脱敏）
     displayName: "${TDAI_MEMORY_SYSTEM_USER_NAME}"
     userKey: "${TDAI_MEMORY_SYSTEM_USER_KEY}" # 历史 sk-mem-xxx，仅供运维查看（可选）
   # - name: wiki

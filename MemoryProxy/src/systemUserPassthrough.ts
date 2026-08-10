@@ -13,9 +13,9 @@
  *
  * Observability, however, IS preserved — internal service traffic must still
  * be visible in dashboards:
- *  - Opik trace + LLM span (raw request / response, no flattening)
- *  - Langfuse generation under a deterministic turn trace
- *  - ClickHouse / JSONL usage row (attributed to systemUser.userId)
+ *  - Opik trace + LLM span with type/count summaries only
+ *  - Langfuse generation under the request-scoped random trace
+ *  - ClickHouse / JSONL aggregate usage row with fixed identity redaction
  *  - MemoryPlus credit report (spaceId = memory instance from path)
  *
  * ── Body forwarding ───────────────────────────────────────────────────────
@@ -36,9 +36,8 @@
  * The one header we rewrite in both paths is `Authorization`: the caller's
  * proxy-auth key is swapped for `config.upstream.apiKey` so TokenHub accepts
  * the request (see `buildPassthroughHeaders`). Trace payloads use whatever
- * we can JSON-parse from the raw body/response as-is; we do NOT flatten or
- * normalise message structure because that would be its own form of
- * "meddling".
+ * we can JSON-parse from the raw body/response as-is, then each exporter reduces
+ * it to fixed type/count summaries before data leaves the process.
  */
 
 import type { Context } from "hono";
@@ -157,14 +156,12 @@ function extractNonStreamUsage(
 /**
  * Common trace/usage recorder for both stream and non-stream paths.
  *
- * Attribution is deliberately identical across branches:
- *   - keyId       = systemUser.userId  (dashboards see WHICH internal service)
- *   - spaceId     = memory instance id from the request path
- *   - sessionKey  = spaceId (internal users multiplex one instance;
- *                   no per-conversation isolation is needed)
+ * In-process attribution is identical across branches so classification and
+ * credit math remain correct. Final exporters redact keyId/spaceId/sessionKey,
+ * so dashboards expose totals/categories only.
  *
- * `traceInput` / `traceOutput` are handed to opik/langfuse raw — parsed JSON
- * when possible, otherwise the string body. No message flattening.
+ * `traceInput` / `traceOutput` retain their parsed shape in-process; Opik and
+ * Langfuse store only type/count summaries.
  */
 async function recordTracesAndUsage(params: {
   config: ProxyConfig;
@@ -331,7 +328,7 @@ async function recordTracesAndUsage(params: {
   // per-turn counter — one request = one trace = one generation. `sessionId`
   // is the memory instance id, so Langfuse groups all requests for the same
   // memory under one session view.
-  const lfTraceId = langfuseTurnTraceId(sessionKey, 0);
+  const lfTraceId = langfuseTurnTraceId(traceId);
   try {
     if (status >= 200 && status < 400) {
       langfuseReportGeneration({

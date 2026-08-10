@@ -3,18 +3,8 @@
  *
  * 使用 Langfuse 官方 SDK（@langfuse/tracing + @langfuse/otel）上报 LLM 调用。
  *
- * 核心语义：**一个 trace = 一个会话里的一次用户输入（一个 turn）**。
- *   - 同一 turn 内的工具循环（model → tool → model → …）会产生多次 upstream 请求，
- *     它们共享同一个确定性 traceId，因此在 Langfuse 里归并到同一个 trace 下，
- *     每次 LLM 调用是该 trace 下的一个 generation observation。
- *   - traceId 由 `sessionKey + turnSeq` 经 SHA-256 派生（确定性），与官方
- *     `createTraceId(seed)` 的算法逐字节一致（取 SHA-256 hex 前 32 位）。
- *
- * 跨请求归并的机制：
- *   一个 turn 的多次请求是彼此独立的 HTTP handler 调用，没有共享的 async context。
- *   因此通过 `startObservation(..., { parentSpanContext: { traceId, ... } })` 显式把
- *   每个 generation 挂到已知的确定性 traceId 下（SDK 内部走
- *   `trace.setSpanContext(context.active(), parentSpanContext)`）。
+ * 隐私边界：traceId 每次随机生成，不从 session/user/key 派生。这样无法跨请求按
+ * user/session/turn 做稳定归并；导出仅支持单次调用的总量和固定类别指标。
  *
  * 设计原则：
  *   - Fire-and-forget：span 由 LangfuseSpanProcessor 异步批量导出
@@ -22,7 +12,7 @@
  *   - 与 Opik 上报完全独立（各用各的 traceId）
  */
 
-import { createHash } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import { TraceFlags } from "@opentelemetry/api";
 import { startObservation, LangfuseOtelSpanAttributes } from "@langfuse/tracing";
 import type { ProxyConfig } from "./types.js";
@@ -104,19 +94,17 @@ export async function shutdownLangfuse(): Promise<void> {
 }
 
 // ============================
-// 确定性 turn traceId
+// 不可关联的 turn traceId
 // ============================
 
 /**
- * 由 `sessionKey + turnSeq` 派生确定性 traceId（32 位小写 hex）。
- *
- * 与官方 `createTraceId(seed)` 算法一致：SHA-256(seed) 的 hex 取前 32 位。
- * 同一 turn 内每次请求都用相同 (sessionKey, turnSeq) → 得到相同 traceId →
- * 在 Langfuse 中归并到同一个 trace。
+ * 把本次请求已有的 UUID traceId 规范化为 32 位小写 hex。它只在同一 HTTP 请求
+ * 内关联各 sink，不从 session/user/key 派生，也不提供跨请求稳定关联。
  */
-export function langfuseTurnTraceId(sessionKey: string, turnSeq: number): string {
-  const seed = `${sessionKey}:${turnSeq}`;
-  return createHash("sha256").update(seed).digest("hex").slice(0, 32);
+export function langfuseTurnTraceId(requestTraceId: string): string {
+  const normalized = requestTraceId.replaceAll("-", "").toLowerCase();
+  if (/^[0-9a-f]{32}$/.test(normalized)) return normalized;
+  return randomUUID().replaceAll("-", "");
 }
 
 // ============================
@@ -128,19 +116,19 @@ export function langfuseTurnTraceId(sessionKey: string, turnSeq: number): string
  * generation 共享的 trace 级属性。由 handler 构造后传给各上报函数。
  */
 export interface LangfuseTurnContext {
-  /** 该 turn 的确定性 traceId（langfuseTurnTraceId 生成）。 */
+  /** 本次请求的随机 traceId（langfuseTurnTraceId 生成）。 */
   traceId: string;
-  /** turn 序号（countHumanTurns）—— 也用于 ClickHouse 按 turn 聚合。 */
+  /** 进程内 turn 序号；隐私安全导出不承诺按 session/turn 稳定聚合。 */
   turnSeq: number;
-  /** trace 名。 */
+  /** In-process trace name; outbound value is fixed redaction. */
   traceName: string;
-  /** trace userId（一般为 keyId）。 */
+  /** In-process userId; outbound value is fixed redaction. */
   userId: string;
-  /** trace sessionId（导出前转换为稳定的不可逆标识）。 */
+  /** trace sessionId（导出时固定脱敏，不可用于关联）。 */
   sessionId: string;
   /**
-   * trace 级标签 —— 只放该 turn 内稳定的维度（protocol / stream / session），
-   * 不含随请求变化的路由标签，避免同一 turn 的工具循环请求互相覆盖（last-write-wins）。
+   * trace 级标签导出前只保留 protocol/stream 等固定类别；session 标签固定脱敏，
+   * 不可用于跨请求关联。
    */
   tags: string[];
   /**
@@ -157,7 +145,7 @@ export interface LangfuseTurnContext {
 
 /** 一次 LLM 调用的上报参数（挂到指定 turn trace 下的 generation）。 */
 export interface LangfuseGenerationReport {
-  /** 所属 turn 的确定性 traceId（langfuseTurnTraceId 生成）。 */
+  /** 所属请求的随机 traceId（langfuseTurnTraceId 生成）。 */
   traceId: string;
   /** observation 名称（一般为模型名，或 `[internal] <model>`）。 */
   name: string;
@@ -177,12 +165,12 @@ export interface LangfuseGenerationReport {
   level?: "DEBUG" | "DEFAULT" | "WARNING" | "ERROR";
   /** 状态信息（一般用于 ERROR，描述失败原因）。 */
   statusMessage?: string;
-  // ── trace 级属性（同一 turn 的多次调用应传相同值；last-write-wins）──
-  /** trace 名。 */
+  // ── trace 级属性（仅限本次随机 trace；不提供跨请求稳定关联）──
+  /** In-process trace name; outbound value is fixed redaction. */
   traceName: string;
-  /** trace userId（一般为 keyId）。 */
+  /** In-process userId; outbound value is fixed redaction. */
   userId: string;
-  /** trace sessionId（导出前转换为稳定的不可逆标识）。 */
+  /** trace sessionId（导出时固定脱敏，不可用于关联）。 */
   sessionId: string;
   /** trace 标签。 */
   tags?: string[];
@@ -205,8 +193,8 @@ export interface LangfuseGenerationReport {
 
 /**
  * 派生一个合法的 phantom parent spanId（16 位 hex，非零）。
- * 用于把 generation 挂到确定性 traceId 下。同一 traceId 始终得到同一 spanId，
- * 因此一个 turn 内所有 generation 的 parent 一致（指向同一个不存在的 root span，
+ * 用于把 generation 挂到本次随机 traceId 下。同一 traceId 始终得到同一 spanId，
+ * 因此单次上报内 generation 的 parent 一致（指向同一个不存在的 root span，
  * Langfuse 据此把它们都视为该 trace 下的顶层 observation）。
  */
 function deriveParentSpanId(traceId: string): string {

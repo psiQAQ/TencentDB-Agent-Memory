@@ -1087,7 +1087,7 @@ export async function handleAnthropicMessages(
   // (extension disabled/unavailable, or no-tools auxiliary request).
   const turnSeq = target.turnSeq > 0 ? target.turnSeq : countHumanTurns(messages, "anthropic");
   const lf: LangfuseTurnContext = {
-    traceId: langfuseTurnTraceId(sessionKey, turnSeq),
+    traceId: langfuseTurnTraceId(traceId),
     turnSeq,
     traceName: `${target.model} / ${keyId}`,
     userId: keyId,

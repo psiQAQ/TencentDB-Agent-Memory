@@ -141,8 +141,8 @@ export interface RateLimitConfig {
 /**
  * Langfuse LLM observability configuration.
  *
- * 通过 Langfuse 官方 SDK 上报。一个 trace = 一个 turn（一次用户输入），
- * 同一 turn 内的工具循环请求归并到同一个 trace 下的多个 generation。
+ * 通过 Langfuse 官方 SDK 上报。本次 HTTP 请求内复用已有 request traceId；
+ * 不从 session/user/key 派生，因此不提供跨请求的用户/session/turn 归并。
  */
 export interface LangfuseConfig {
   enabled: boolean;
@@ -153,15 +153,8 @@ export interface LangfuseConfig {
   /** Langfuse secret key（sk-lf-...）。 */
   secretKey: string;
   /**
-   * Debug 模式：上报 generation 时保留原始 Anthropic body 结构
-   * （含 `cache_control` marker / `thinking` block / tool_use 原生形态），
-   * 而不是走 `flattenAnthropicMessagesForOpik` 压平。
-   *
-   * 用途：排查请求分类（Fork vs SideQuery vs Main）、cache 命中率、
-   *      thinking 签名合法性等需要看原生结构才能判断的问题。
-   *
-   * 代价：上报体积增大 2-5x（cache_control block、thinking block 全带过去），
-   *      Langfuse 存储成本增加。**线上默认关闭**，只在排障时打开。
+   * Debug 模式只增加结构类型、字段数和固定类别；原始 body、prompt、marker、
+   * header 名称和值仍不导出。
    */
   debug?: boolean;
 }
@@ -409,8 +402,9 @@ export interface ProxyConfig {
     enabled: boolean;
     url: string;         // ClickHouse HTTP endpoint
     database: string;    // Database name
-    table: string;       // Table name for usage logs
-    /** Raw usage traceability table (non-TokenHub / unrecognized format). */
+    /** Aggregate usage table; privacy-safe rows cannot group by user/session/model/project. */
+    table: string;
+    /** Categorical fallback table; identity/content fields remain fixed redaction. */
     rawTable: string;
     user: string;        // Auth user
     password: string;    // Auth password
@@ -796,13 +790,16 @@ export interface RawYamlConfig {
   };
 }
 
-/** request event — written when a request is intercepted (metadata only, no messages). */
+/**
+ * In-process request event. Exporters replace identity/model/routing fields with
+ * fixed redaction, so exported data supports totals/categories only.
+ */
 export interface RequestLogEntry {
   timestamp: string;
   event: "request";
   modelId: string;
-  keyId: string; // SHA-256(apiKey).slice(0, 8)
-  sessionKey?: string; // conversationId || keyId — per-conversation isolation key
+  keyId: string;
+  sessionKey?: string;
   upstreamUrl: string;
   stream: boolean;
   temperature?: number;
@@ -817,14 +814,17 @@ export interface RequestLogEntry {
   upstreamRequestId?: string;
 }
 
-/** usage event — written after LLM response is received. */
+/**
+ * In-process usage event. Typed fields remain available for cost/classification,
+ * then exporters remove raw user/session/model/project correlation dimensions.
+ */
 export interface UsageLogEntry {
   timestamp: string;
   event: "usage";
   modelId: string;
   keyId: string;
-  sessionKey?: string; // conversationId || keyId — per-conversation isolation key
-  /** Turn sequence number within the session (for per-turn aggregation). */
+  sessionKey?: string;
+  /** In-process turn sequence; exported identity dimensions are not linkable. */
   turnSeq?: number;
   /** Denoised user input of the turn (non-empty only on the turn's first request). */
   userInput?: string;
@@ -846,8 +846,8 @@ export interface UsageLogEntry {
  * Extension-emitted telemetry event.
  *
  * Emitted by the optional private extension (when loaded) via the injected
- * `writeLogEvent` callback. The host only forwards the payload to the log sink
- * — it does not interpret or generate this event on its own.
+ * `writeLogEvent` callback. The host runtime-validates its event, timestamp and
+ * stream fields before passing a typed event to the log sink.
  *
  * The field set intentionally mirrors {@link UsageLogEntry} so downstream log
  * consumers can process both events with a single schema; `event` distinguishes
@@ -861,9 +861,9 @@ export interface AnalyzerUsageLogEntry {
   sessionKey?: string;
   turnSeq?: number;
   upstreamUrl: string;
-  stream: false;
+  stream: boolean;
   usage: Record<string, unknown>;
-  /** Original model ID captured for correlation with the parent request. */
+  /** In-process original model ID; final exports use fixed redaction. */
   routedFrom?: string;
   spaceId?: string;
   upstreamRequestId?: string;

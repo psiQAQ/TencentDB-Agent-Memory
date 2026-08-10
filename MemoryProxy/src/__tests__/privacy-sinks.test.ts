@@ -3,12 +3,33 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-const { startObservation } = vi.hoisted(() => ({
-  startObservation: vi.fn((_name: string) => ({
-    otelSpan: { setAttribute: vi.fn() },
-    end: vi.fn(),
-  })),
-}));
+const {
+  clickhouseCommand,
+  clickhouseCreateClient,
+  clickhouseInsert,
+  startObservation,
+} = vi.hoisted(() => {
+  const clickhouseCommand = vi.fn(async () => undefined);
+  const clickhouseInsert = vi.fn(async (_input: unknown) => undefined);
+  const clickhouseClient = {
+    command: clickhouseCommand,
+    insert: clickhouseInsert,
+    close: vi.fn(async () => undefined),
+  };
+  return {
+    clickhouseCommand,
+    clickhouseCreateClient: vi.fn(() => clickhouseClient),
+    clickhouseInsert,
+    startObservation: vi.fn((
+      _name: string,
+      _input?: unknown,
+      _options?: { parentSpanContext?: { traceId?: string } },
+    ) => ({
+      otelSpan: { setAttribute: vi.fn() },
+      end: vi.fn(),
+    })),
+  };
+});
 
 vi.mock("@langfuse/tracing", () => ({
   startObservation,
@@ -23,6 +44,7 @@ vi.mock("@langfuse/tracing", () => ({
   },
 }));
 vi.mock("@langfuse/otel", () => ({ LangfuseSpanProcessor: class {} }));
+vi.mock("@clickhouse/client", () => ({ createClient: clickhouseCreateClient }));
 vi.mock("@opentelemetry/sdk-node", () => ({
   NodeSDK: class {
     start(): void {}
@@ -34,15 +56,22 @@ import {
   buildClickHouseRow,
   buildFailedReportRawRow,
   buildRawUsageRow,
+  flush,
+  flushRaw,
+  initClickHouse,
+  shutdownClickHouse,
 } from "../clickhouse.js";
 import { buildRequestDebugMetadata } from "../common/langfuse-debug.js";
 import { DEFAULT_CONFIG } from "../config.js";
+import { normalizeExtensionLogEvent } from "../guard-adapter.js";
 import { getRecentInspections, inspectAndRecord } from "../identity.js";
 import {
   initLangfuse,
+  langfuseTurnTraceId,
   langfuseReportGeneration,
   shutdownLangfuse,
 } from "../langfuse.js";
+import { LangfuseInjectionObserver } from "../injection/observer.js";
 import { writeLog } from "../logger.js";
 import { opikCreateLlmSpan, opikCreateTrace, opikUpdateTrace } from "../opik.js";
 import { log } from "../report/log.js";
@@ -142,6 +171,70 @@ describe("privacy-safe observability sinks", () => {
     }
   });
 
+  it("keeps typed usage for ClickHouse classification and cost before final row redaction", async () => {
+    clickhouseCommand.mockClear();
+    clickhouseCreateClient.mockClear();
+    clickhouseInsert.mockClear();
+    const config = structuredClone(DEFAULT_CONFIG);
+    config.log.file = "";
+    config.clickhouse = {
+      enabled: true,
+      url: "https://clickhouse.invalid",
+      database: "privacy_test",
+      table: "usage_logs",
+      rawTable: "usage_raw",
+      user: "default",
+      password: "",
+      flushIntervalMs: 60_000,
+      flushThreshold: 100,
+      ttlDays: 0,
+    };
+    config.creditPricing.models = [{
+      name: "priced-model",
+      modelName: PRIVATE_VALUE,
+      input: 1,
+      output: 2,
+      cacheRead: 0,
+      cacheWrite5m: 0,
+      cacheWrite1h: 0,
+    }];
+
+    initClickHouse(config.clickhouse);
+    await vi.waitFor(() => expect(clickhouseCreateClient).toHaveBeenCalledTimes(2));
+    writeLog(config, {
+      timestamp: "2026-08-10T12:34:56.789Z",
+      event: "usage",
+      modelId: "priced-model",
+      keyId: PRIVATE_VALUE,
+      sessionKey: PRIVATE_VALUE,
+      turnSeq: 3,
+      userInput: PRIVATE_VALUE,
+      upstreamUrl: "https://tokenhub.invalid/v1/messages",
+      stream: false,
+      usage: { input_tokens: 1_000, output_tokens: 500 },
+      routedFrom: PRIVATE_VALUE,
+      spaceId: PRIVATE_VALUE,
+      upstreamRequestId: PRIVATE_VALUE,
+    });
+    await flush();
+    await flushRaw();
+
+    const inserts = clickhouseInsert.mock.calls.map(([input]) => input as {
+      table: string;
+      values: Array<Record<string, unknown>>;
+    });
+    const usageInsert = inserts.find((input) => input.table === "usage_logs");
+    const rawInsert = inserts.find((input) => input.table === "usage_raw");
+    const row = usageInsert?.values[0];
+    expect(row?.credit).toBe(2);
+    expect(row?.prompt_tokens).toBe(1_000);
+    expect(row?.completion_tokens).toBe(500);
+    expect(rawInsert).toBeUndefined();
+    expect(containsPrivateValue(row)).toBe(false);
+    expect(row?.model_id === "[redacted]").toBe(true);
+    await shutdownClickHouse();
+  });
+
   it("stores no raw session or user input in ClickHouse rows", () => {
     const entry = {
       timestamp: new Date().toISOString(),
@@ -235,12 +328,95 @@ describe("privacy-safe observability sinks", () => {
         .filter((value) => value !== undefined && value !== "request_log")
         .every((value) => value === "[redacted]");
     })).toBe(true);
+    const summaryForkTrace = bodies[1] as Record<string, unknown>;
     const summaryForkSpan = bodies[3] as Record<string, unknown>;
+    const strippedForkTrace = bodies[6] as Record<string, unknown>;
     const strippedForkSpan = bodies[8] as Record<string, unknown>;
+    expect("input" in summaryForkTrace).toBe(true);
     expect("input" in summaryForkSpan).toBe(true);
     expect("output" in summaryForkSpan).toBe(true);
+    expect("input" in strippedForkTrace).toBe(false);
     expect("input" in strippedForkSpan).toBe(false);
     expect("output" in strippedForkSpan).toBe(false);
+  });
+
+  it("uses request-scoped Langfuse trace ids and privacy-safe injection observations", () => {
+    const requestTraceId = "019fed2a-0000-7000-8000-000000000001";
+    const firstTraceId = langfuseTurnTraceId(requestTraceId);
+    const secondTraceId = langfuseTurnTraceId(requestTraceId);
+    const otherTraceId = langfuseTurnTraceId("019fed2a-0000-7000-8000-000000000002");
+    expect(firstTraceId === secondTraceId).toBe(true);
+    expect(firstTraceId === otherTraceId).toBe(false);
+    expect(/^[0-9a-f]{32}$/.test(firstTraceId)).toBe(true);
+
+    const observer = new LangfuseInjectionObserver();
+    observer.onPipelineStart({
+      protocol: "anthropic",
+      traceId: requestTraceId,
+      keyId: PRIVATE_VALUE,
+      modelId: PRIVATE_VALUE,
+      stream: false,
+      agentSource: PRIVATE_VALUE,
+      userId: PRIVATE_VALUE,
+      spaceId: PRIVATE_VALUE,
+      sessionKey: PRIVATE_VALUE,
+      turnSeq: 7,
+      requestPath: `/${PRIVATE_VALUE}`,
+    });
+    observer.onHookDone({
+      id: PRIVATE_VALUE,
+      point: "system.prefix",
+      priority: 1,
+      description: PRIVATE_VALUE,
+      execute: () => [],
+    }, "system.prefix", [{
+      type: "text",
+      content: PRIVATE_VALUE,
+      metadata: { [PRIVATE_VALUE]: PRIVATE_VALUE, source: PRIVATE_VALUE },
+    }], 5, PRIVATE_VALUE);
+
+    const observation = startObservation.mock.results.at(-1)?.value;
+    const observationOptions = startObservation.mock.calls.at(-1)?.[2];
+    expect(observationOptions?.parentSpanContext?.traceId === firstTraceId).toBe(true);
+    expect(containsPrivateValue(startObservation.mock.calls.at(-1))).toBe(false);
+    expect(containsPrivateValue(observation?.otelSpan.setAttribute.mock.calls)).toBe(false);
+  });
+
+  it("runtime-validates opaque extension log control fields", () => {
+    const rejected = normalizeExtensionLogEvent({
+      event: PRIVATE_VALUE,
+      timestamp: PRIVATE_VALUE,
+      stream: PRIVATE_VALUE,
+    });
+    const normalized = normalizeExtensionLogEvent({
+      event: "analyzer_usage",
+      timestamp: PRIVATE_VALUE,
+      modelId: PRIVATE_VALUE,
+      keyId: PRIVATE_VALUE,
+      sessionKey: PRIVATE_VALUE,
+      upstreamUrl: `https://upstream.invalid/${PRIVATE_VALUE}`,
+      stream: PRIVATE_VALUE,
+      usage: { input_tokens: 1, [PRIVATE_VALUE]: PRIVATE_VALUE },
+      [PRIVATE_VALUE]: PRIVATE_VALUE,
+    });
+    const normalizedTimestamp = normalizeExtensionLogEvent({
+      event: "analyzer_usage",
+      timestamp: "2026-08-10T12:34:56+08:00",
+      modelId: "model",
+      keyId: "key",
+      upstreamUrl: "https://upstream.invalid",
+      stream: true,
+      usage: {},
+    });
+
+    expect(rejected).toBeNull();
+    expect(normalized?.event === "analyzer_usage").toBe(true);
+    expect(Number.isNaN(Date.parse(normalized?.timestamp ?? ""))).toBe(false);
+    expect(normalized?.timestamp.includes(PRIVATE_VALUE)).toBe(false);
+    expect(normalized?.stream).toBe(false);
+    expect(Object.keys(normalized ?? {}).includes(PRIVATE_VALUE)).toBe(false);
+    expect(normalizedTimestamp?.timestamp === "2026-08-10T04:34:56.000Z").toBe(true);
+    expect(normalizedTimestamp?.stream).toBe(true);
   });
 
   it("does not log raw Opik response bodies or errors", async () => {

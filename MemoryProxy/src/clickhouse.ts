@@ -1,7 +1,8 @@
 /**
  * ClickHouse async batch writer for usage logs (official @clickhouse/client SDK).
  *
- * 定位：**自建/云 ClickHouse 的用量上报**，用于给每个用户展示 token 消耗（按 turn）。
+ * 定位：**自建/云 ClickHouse 的聚合用量上报**。业务进程内完成格式识别和成本计算，
+ * 最终行固定脱敏身份/模型/路由字段，只支持总量与固定类别统计。
  * 与 Langfuse / Opik 上报互相独立 —— Langfuse 做 trace 可视化，这里做用量/计费数据源。
  *
  * Features:
@@ -37,7 +38,7 @@ export interface ClickHouseConfig {
   database: string;
   /** Table name for usage logs. */
   table: string;
-  /** Raw usage traceability table (non-TokenHub / unrecognized format). */
+  /** Categorical fallback table; identity/content fields remain fixed redaction. */
   rawTable: string;
   /** Auth user. */
   user: string;
@@ -51,16 +52,16 @@ export interface ClickHouseConfig {
   ttlDays: number;
 }
 
-/** One row = one upstream request (primary usage or extension telemetry). turn 由 (session_key, turn_seq) 标识。 */
+/** One privacy-safe aggregate row per upstream request. Identity columns are not linkable. */
 export interface ClickHouseRow {
   timestamp: string;       // ClickHouse DateTime64 format "YYYY-MM-DD HH:MM:SS.mmm"
   event: string;           // 'usage' | 'analyzer_usage' (extension telemetry)
-  session_key: string;     // 会话隔离键（turn 归并用）
-  turn_seq: number;        // turn 序号
-  user_input: string;      // 该 turn 的用户输入（仅首请求有值，去噪后；其余为空）
+  session_key: string;     // fixed redaction; unavailable for grouping
+  turn_seq: number;        // numeric sequence only; no linkable session identity
+  user_input: string;      // fixed redaction when content was present
   model_id: string;
   model_name: string;      // UI 展示名（来自定价表 modelName；未匹配时回落 modelId）
-  user_id: string;         // 用户标识（auth 启用时为 user_id，否则为 SHA-256(apiKey)[:8]）
+  user_id: string;         // fixed redaction; unavailable for billing attribution
   upstream_url: string;
   stream: number;          // 0 or 1
   prompt_tokens: number;
@@ -79,25 +80,24 @@ export interface ClickHouseRow {
   space_id: string;            // 空间/租户标识（从 /proxy/<spaceId>/... 路径提取）
   source_tag: string;          // 来源标记，恒定为 "proxy"
   host: string;
-  upstream_request_id: string; // 上游响应 header `x-request-id`（tokenhub/OpenAI 兼容网关生成），用于跨系统追溯
+  upstream_request_id: string; // fixed redaction; unavailable for cross-system tracing
 }
 
 /**
- * Minimized usage row for traceability (non-TokenHub or unrecognized format).
+ * Minimized categorical fallback row (non-TokenHub or unrecognized format).
  *
  * 字段与主表 `ClickHouseRow` 尽量对齐，方便运维/报表跨表 JOIN 查询。
  * 与 `usage_logs` 的差异：
  *  - `usage` 只保留固定数值字段，不保留任意 key/value 或失败详情
  *  - `reason` 字段记录落入 raw 表的原因（unknown_model / invalid_format / ...）
- *  - `key_id` 与 `user_id` **双写**（老表用 key_id，新表用 user_id），
- *    通过 ClickHouse `JSONEachRow` 格式的容错性实现双向兼容
+ *  - `key_id` 与 `user_id` 保留旧 schema 列，但都写固定脱敏值
  */
 export interface ClickHouseRawUsageRow {
   timestamp: string;
   model_id: string;
   model_name: string;          // 展示名（与主表对齐；无定价配置时回落 model_id）
-  key_id: string;              // 老列（兼容存量表）
-  user_id: string;             // 新列（与主表 user_id 命名统一），值 = key_id
+  key_id: string;              // legacy column; fixed redaction
+  user_id: string;             // legacy column; fixed redaction
   session_key: string;
   turn_seq: number;            // 与主表对齐
   user_input: string;          // 与主表对齐（用户输入前缀）
@@ -109,7 +109,7 @@ export interface ClickHouseRawUsageRow {
   space_id: string;            // 空间/租户标识（从 /proxy/<spaceId>/... 提取）
   source_tag: string;          // 来源标记，恒为 "proxy"
   host: string;
-  upstream_request_id: string; // 上游响应 header `x-request-id`（追溯用；与主表对齐）
+  upstream_request_id: string; // fixed redaction
 }
 
 // ── Writer state ────────────────────────────────────────────────────────────
@@ -247,7 +247,7 @@ async function ensureClickHouse(cfg: ClickHouseConfig): Promise<void> {
     clickhouse_settings: { wait_end_of_query: 1 },
   });
 
-  // Raw usage table (traceability for non-TokenHub / unrecognized format).
+  // Categorical fallback table for non-TokenHub / unrecognized format.
   if (cfg.rawTable) {
     // 新表默认排序键用 user_id（与主表对齐）；老表继续用 key_id（在 migrate 里补齐 user_id 列即可）
     const rawDdl = [
@@ -341,11 +341,11 @@ export async function migrateSchema(
       type: "LowCardinality(String) DEFAULT 'proxy'",
     },
     // 上游响应 header `x-request-id`（tokenhub 等 OpenAI/Anthropic 兼容网关返回）。
-    // 本次新增：用于跨系统追溯（客户端 x-request-id → 我方 upstream_request_id → 上游日志）。
+    // Legacy schema column retained; privacy-safe rows write fixed redaction.
     { table: cfg.table, column: "upstream_request_id", type: "String DEFAULT ''" },
   ];
 
-  // usage_raw：追溯表补齐（本次新增 6 列 + model_name + upstream_request_id）
+  // usage_raw：兼容旧表字段；privacy-safe rows 不提供身份或 request-id 追溯。
   if (cfg.rawTable) {
     migrations.push(
       { table: cfg.rawTable, column: "user_id", type: "String DEFAULT ''" },
@@ -430,7 +430,7 @@ const CREDIT_SANITY_CAP = 1_000_000;
 
 /**
  * Detect whether a computed credit value is anomalous and should be routed
- * to the raw traceability table instead of trusted for billing.
+ * to the categorical fallback table instead of trusted for aggregate cost.
  *
  * Triggers:
  *   - NaN / Infinity / -Infinity (arithmetic broke somewhere)
@@ -451,7 +451,7 @@ export interface ClickHouseWriteEntry {
   timestamp: string;
   event: string;
   modelId: string;
-  /** User identifier: user_id from auth/verify when enabled, or SHA-256(apiKey)[:8] fallback. */
+  /** In-process identity used for business logic; final rows use fixed redaction. */
   keyId: string;
   sessionKey?: string;
   turnSeq?: number;
@@ -460,13 +460,12 @@ export interface ClickHouseWriteEntry {
   stream: boolean;
   usage?: Record<string, unknown>;
   routedFrom?: string;
-  /** Space/tenant ID extracted from /proxy/<spaceId>/... path. */
+  /** In-process space/tenant ID; final rows use fixed redaction. */
   spaceId?: string;
   /**
    * Upstream request id — 来自上游响应 header `x-request-id`（tokenhub 等
-   * OpenAI/Anthropic 兼容网关会返回）。缺失时上游没返回或读取失败，落表为 ""。
-   * 用于跨系统追溯：客户端拿到的 x-request-id → 我方 usage_logs.upstream_request_id
-   * → 上游服务日志。
+   * OpenAI/Anthropic 兼容网关会返回）。仅用于进程内业务逻辑；隐私安全行写固定
+   * 脱敏值，不能用于跨系统追溯。
    */
   upstreamRequestId?: string;
   /** Pricing config for credit calculation (from config.yaml). */
@@ -572,7 +571,7 @@ export function buildClickHouseRow(entry: ClickHouseWriteEntry): ClickHouseRow |
 }
 
 /**
- * Determine if usage should be written to the raw traceability table.
+ * Determine if usage should be written to the categorical fallback table.
  *
  * Returns the reason string when the usage should be captured raw:
  *   - 'non_tokenhub'    — upstream URL does not contain "tokenhub"
@@ -683,7 +682,7 @@ export function buildFailedReportRawRow(
 }
 
 /**
- * Enqueue a "credit report failed" raw record to the traceability table.
+ * Enqueue a "credit report failed" categorical fallback record.
  *
  * Fire-and-forget: never throws, no-op when ClickHouse disabled or `rawTable`
  * not configured. Uses the same `rawBuffer` and `flushRaw` machinery as
@@ -714,7 +713,7 @@ export function writeClickHouse(entry: ClickHouseWriteEntry): void {
   if (disabled || !config) return;
 
   try {
-    // Raw usage traceability (only when rawTable is configured).
+    // Categorical fallback (only when rawTable is configured).
     if (config.rawTable) {
       const rawReason = getRawUsageReason(
         entry.upstreamUrl,
