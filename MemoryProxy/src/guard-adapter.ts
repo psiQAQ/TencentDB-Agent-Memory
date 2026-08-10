@@ -80,6 +80,11 @@ interface RetryTarget {
 export interface ForwardTarget {
   url: string;
   model: string;
+  /**
+   * Explicit server-side credentials for this target. A null value permits
+   * configured-key fallback only when `url` has the same origin as
+   * `ForwardTargetRequest.defaultUpstreamUrl`.
+   */
   authHeaders: Record<string, string> | null;
   bodyOverrides: Record<string, unknown> | null;
   retryTarget: RetryTarget | null;
@@ -373,8 +378,9 @@ export function resolveLatestUserQuery(
  *
  * The caller normalizes `req.requestPath` to the canonical upstream endpoint
  * (e.g. "/messages", "/chat/completions") so the extension's own URL joining
- * matches the host's whitelist behavior; the host then trusts the returned
- * `url`/`retryTarget.url` verbatim and only keeps transport-level fields.
+ * matches the host's whitelist behavior. Returned URLs are transport
+ * instructions only: handlers bind configured credentials to the selected
+ * default origin and require explicit server auth for cross-origin targets.
  */
 export async function resolveForwardTarget(
   config: ProxyConfig,

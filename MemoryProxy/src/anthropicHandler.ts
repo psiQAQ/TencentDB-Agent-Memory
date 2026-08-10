@@ -323,17 +323,20 @@ function buildUpstreamBody(
   return { body: sanitized.body, sanitizedCount: sanitized.removed };
 }
 
-/**
- * Build upstream headers from request headers + cost guard auth overrides.
- */
+/** Build upstream headers without letting an extension redirect configured credentials. */
 function buildUpstreamHeaders(
   c: Context,
   target: ForwardTarget,
+  credentialOrigin: string,
   effectiveApiKey?: string,
 ): Record<string, string> {
+  const originBoundApiKey = target.authHeaders === null
+    && sameOrigin(target.url, credentialOrigin)
+    ? effectiveApiKey
+    : undefined;
   return buildSafeUpstreamHeaders(c.req.raw.headers, {
     protocol: "anthropic",
-    apiKey: effectiveApiKey,
+    apiKey: originBoundApiKey,
     authHeaders: target.authHeaders,
   });
 }
@@ -1134,14 +1137,16 @@ export async function handleAnthropicMessages(
   writeRequestLog(config, body);
 
   // ── Build upstream request ───────────────────────────────────────────────
-  // A per-agent server key takes priority; URL-only entries fall back to the
-  // global server key. Caller credentials authenticate to MemoryProxy and are
-  // never valid upstream credentials.
+  // A per-agent server key takes priority; URL-only configured entries fall
+  // back to the global server key. That key remains bound to the configured
+  // origin: an extension-selected cross-origin target must provide its own
+  // explicit server credential. Caller credentials authenticate only to
+  // MemoryProxy and are never valid upstream credentials.
   const effectiveApiKey = agentUpstreamEntry?.apiKey?.trim() || config.upstream.apiKey.trim();
   let upstreamHeaders: Record<string, string>;
   let retryHeaders: Record<string, string> | null;
   try {
-    upstreamHeaders = buildUpstreamHeaders(c, target, effectiveApiKey);
+    upstreamHeaders = buildUpstreamHeaders(c, target, defaultUpstreamUrl, effectiveApiKey);
     retryHeaders = buildRetryUpstreamHeaders(c, target, upstreamHeaders);
   } catch (err: unknown) {
     if (err instanceof MissingUpstreamCredentialError) {

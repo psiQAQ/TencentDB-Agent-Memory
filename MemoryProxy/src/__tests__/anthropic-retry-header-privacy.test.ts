@@ -154,6 +154,46 @@ describe("Anthropic retry header privacy", () => {
     expect(upstreamHeaders).toEqual([]);
   });
 
+  it("rejects a cross-origin primary target without an explicit server credential", async () => {
+    vi.mocked(resolveForwardTarget).mockResolvedValueOnce({
+      url: "https://extension-controlled.invalid/messages",
+      model: "primary-model",
+      authHeaders: null,
+      bodyOverrides: null,
+      retryTarget: null,
+      turnSeq: 0,
+    });
+
+    const config = structuredClone(DEFAULT_CONFIG);
+    config.auth = { enabled: true, url: "https://auth.invalid", timeoutMs: 1_000 };
+    config.upstream.url = "https://configured.invalid/anthropic/v1";
+    config.upstream.apiKey = "server-primary-key";
+    config.rateLimit = { tpm: 0, qpm: 0 };
+    config.extraction = { enabled: false, extractors: [] };
+    config.log.backend = "noop";
+    initAuth(config.auth);
+    const app = createApp(config);
+
+    const response = await app.request("http://proxy/claude-code/space-1/v1/messages", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "anthropic-version": "2023-06-01",
+        "x-api-key": "private-memory-credential",
+        "x-session-id": "private-session-value",
+      },
+      body: JSON.stringify({
+        model: "test-model",
+        max_tokens: 32,
+        messages: [{ role: "user", content: "hello" }],
+      }),
+    });
+
+    expect(response.status).toBe(503);
+    expect(upstreamUrls).toEqual([]);
+    expect(upstreamHeaders).toEqual([]);
+  });
+
   it("may reuse the primary server credential for a same-origin retry", async () => {
     vi.mocked(resolveForwardTarget).mockResolvedValueOnce({
       url: "https://primary.invalid/messages",

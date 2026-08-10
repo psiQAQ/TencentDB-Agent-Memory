@@ -336,7 +336,9 @@ export interface SkillRuntimeConfig {
  *   └──────────────────────────────┴────────────┴──────────────────────────┘
  *
  * If neither the selected agent entry nor the global config has a server key,
- * Anthropic forwarding rejects the request before any upstream fetch.
+ * Anthropic forwarding rejects the request before any upstream fetch. A
+ * configured key is bound to the selected configured URL origin; an extension
+ * that returns another origin must supply explicit server-side auth headers.
  *
  * Priority order (high → low):
  *   1. `costGuard`-provided `target.authHeaders`（cheap-model 兜底路由自带凭据）
@@ -355,8 +357,10 @@ export interface AgentUpstreamEntry {
    * Per-agent apiKey. When set (non-empty):
    *   - OpenAI: `Authorization: Bearer <apiKey>` is injected
    *   - Anthropic: `x-api-key: <apiKey>` is injected
-   * When absent / empty on an Anthropic route, `upstream.apiKey` is used.
-   * If that is also empty, the request fails closed before upstream fetch.
+   * When absent / empty on an Anthropic route, `upstream.apiKey` is used for
+   * the configured URL origin only. If that is also empty, or an extension
+   * redirects to another origin without explicit server auth, the request
+   * fails closed before upstream fetch.
    */
   apiKey?: string;
 }
