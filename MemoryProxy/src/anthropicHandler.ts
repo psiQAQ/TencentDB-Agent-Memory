@@ -448,6 +448,7 @@ async function forwardWithRetry(
       method: "POST",
       headers: upstreamHeaders,
       body: JSON.stringify(upstreamBody),
+      redirect: "manual",
       signal: AbortSignal.timeout(forwardTimeoutMs),
     });
   } catch (err: unknown) {
@@ -457,6 +458,12 @@ async function forwardWithRetry(
       pipe.error("FORWARD", err);
     }
     forwardFailed = true;
+  }
+
+  if (upstreamResp && upstreamResp.status >= 300 && upstreamResp.status < 400) {
+    pipe.forwardDone(upstreamResp.status);
+    pipe.error("FORWARD_REDIRECT", "Upstream redirect rejected");
+    throw new Error("Upstream redirect rejected");
   }
 
   if (upstreamResp) {
@@ -483,8 +490,12 @@ async function forwardWithRetry(
         method: "POST",
         headers: retryHeaders!,
         body: JSON.stringify(originalBody),
+        redirect: "manual",
         signal: AbortSignal.timeout(forwardTimeoutMs),
       });
+      if (upstreamResp.status >= 300 && upstreamResp.status < 400) {
+        throw new Error("Upstream redirect rejected");
+      }
       if (upstreamResp.ok) {
         pipe.info("RETRY_SUCCESS", `Retry returned ${upstreamResp.status}`);
       } else {

@@ -241,6 +241,7 @@ export async function handleAuxiliaryEndpoint(
       method: "POST",
       headers: upstreamHeaders,
       body: rawBody,
+      redirect: "manual",
     });
   } catch (err: unknown) {
     pipe.error("AUX_FORWARD", err instanceof Error ? err : new Error(String(err)));
@@ -250,6 +251,10 @@ export async function handleAuxiliaryEndpoint(
     );
   }
   pipe.forwardDone(upstreamResp.status);
+  if (upstreamResp.status >= 300 && upstreamResp.status < 400) {
+    pipe.error("AUX_REDIRECT", "Upstream redirect rejected");
+    return c.json({ error: "Upstream redirect rejected" }, 502);
+  }
 
   // 7. 分流：stream vs non-stream
   const contentType = upstreamResp.headers.get("content-type") ?? "";

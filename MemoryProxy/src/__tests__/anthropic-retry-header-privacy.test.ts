@@ -238,4 +238,49 @@ describe("Anthropic retry header privacy", () => {
     ]);
     expect(upstreamHeaders[1]?.get("x-api-key")).toBe("server-primary-key");
   });
+
+  it("returns a controlled error instead of following a retry redirect", async () => {
+    const redirects: Array<RequestRedirect | undefined> = [];
+    vi.mocked(fetch).mockImplementation(async (input, init) => {
+      const url = input instanceof Request ? input.url : String(input);
+      if (url.endsWith("/v3/meta/auth/verify")) {
+        return Response.json({ code: 0, data: { valid: true, user: { user_id: "user-1" } } });
+      }
+      upstreamUrls.push(url);
+      upstreamHeaders.push(new Headers(init?.headers));
+      redirects.push(init?.redirect);
+      if (upstreamUrls.length === 1) {
+        return Response.json({ type: "error" }, { status: 401 });
+      }
+      return new Response(null, {
+        status: 302,
+        headers: { location: "https://redirect-receiver.invalid/capture" },
+      });
+    });
+
+    const config = structuredClone(DEFAULT_CONFIG);
+    config.auth = { enabled: true, url: "https://auth.invalid", timeoutMs: 1_000 };
+    config.rateLimit = { tpm: 0, qpm: 0 };
+    config.extraction = { enabled: false, extractors: [] };
+    config.log.backend = "noop";
+    initAuth(config.auth);
+    const app = createApp(config);
+
+    const response = await app.request("http://proxy/claude-code/space-1/v1/messages", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-api-key": "private-memory-credential",
+        "x-session-id": "private-session-value",
+      },
+      body: JSON.stringify({
+        model: "test-model",
+        max_tokens: 32,
+        messages: [{ role: "user", content: "hello" }],
+      }),
+    });
+
+    expect(response.status).toBe(502);
+    expect(redirects).toEqual(["manual", "manual"]);
+  });
 });

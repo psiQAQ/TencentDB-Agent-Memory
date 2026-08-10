@@ -517,6 +517,7 @@ export async function handleSystemUserPassthrough(
       method: "POST",
       headers,
       body: rawBody,
+      redirect: "manual",
     };
     if (forwardTimeoutMs > 0) {
       fetchOpts.signal = AbortSignal.timeout(forwardTimeoutMs);
@@ -550,6 +551,11 @@ export async function handleSystemUserPassthrough(
     }).catch(() => { /* best-effort */ });
 
     return c.json({ error: "Upstream request failed", detail: message }, 502);
+  }
+
+  if (upstreamResp.status >= 300 && upstreamResp.status < 400) {
+    log.warn("systemUser.redirect_rejected", { status: upstreamResp.status });
+    return c.json({ error: "Upstream redirect rejected" }, 502);
   }
 
   const upstreamRequestId = upstreamResp.headers.get("x-request-id") ?? undefined;
