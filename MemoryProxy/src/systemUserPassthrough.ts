@@ -220,10 +220,9 @@ async function recordTracesAndUsage(params: {
         spaceId: spaceId || undefined,
         upstreamRequestId,
       });
-    } catch (err: unknown) {
+    } catch {
       log.warn("systemUser.usage_log_failed", {
-        systemUser: match.name,
-        error: err instanceof Error ? err.message : String(err),
+        systemUser: true,
       });
     }
   }
@@ -241,14 +240,13 @@ async function recordTracesAndUsage(params: {
     );
     if (outcome.attempted && !outcome.ok) {
       log.warn("systemUser.credit_report_failed", {
-        systemUser: match.name,
-        error: outcome.errorMessage ?? "unknown",
+        systemUser: true,
+        attempted: true,
       });
     }
-  } catch (err: unknown) {
+  } catch {
     log.warn("systemUser.credit_report_error", {
-      systemUser: match.name,
-      error: err instanceof Error ? err.message : String(err),
+      systemUser: true,
     });
   }
 
@@ -315,10 +313,9 @@ async function recordTracesAndUsage(params: {
         systemUser: match.name,
       },
     });
-  } catch (err: unknown) {
+  } catch {
     log.warn("systemUser.opik_report_failed", {
-      systemUser: match.name,
-      error: err instanceof Error ? err.message : String(err),
+      systemUser: true,
     });
   }
 
@@ -377,10 +374,9 @@ async function recordTracesAndUsage(params: {
         observationMetadata: { stream, upstreamRequestId, systemUser: match.name },
       });
     }
-  } catch (err: unknown) {
+  } catch {
     log.warn("systemUser.langfuse_report_failed", {
-      systemUser: match.name,
-      error: err instanceof Error ? err.message : String(err),
+      systemUser: true,
     });
   }
 }
@@ -482,12 +478,9 @@ export async function handleSystemUserPassthrough(
   const requestPayload: unknown = bodyObj ?? bodyTextForTrace;
 
   log.info("systemUser.passthrough", {
-    systemUser: match.name,
-    userId: match.userId,
-    memoryId: spaceId || "(none)",
-    path,
-    upstreamUrl,
-    modelId,
+    systemUser: true,
+    memoryIdPresent: spaceId.length > 0,
+    modelConfigured: modelId.length > 0,
   });
 
   let headers: Record<string, string>;
@@ -536,8 +529,7 @@ export async function handleSystemUserPassthrough(
         : String(err);
     log.error(
       "systemUser.forward_failed",
-      { systemUser: match.name, upstreamUrl, path },
-      err instanceof Error ? err : new Error(String(err)),
+      { systemUser: true, timeout: isTimeout },
     );
 
     // Best-effort failure trace so aggregate dashboards see the outage.
@@ -573,10 +565,9 @@ export async function handleSystemUserPassthrough(
       const [a, b] = upstreamResp.body.tee();
       clientStream = a;
       tapStream = b;
-    } catch (err: unknown) {
+    } catch {
       log.warn("systemUser.stream_tee_failed", {
-        systemUser: match.name,
-        error: err instanceof Error ? err.message : String(err),
+        systemUser: true,
       });
       clientStream = upstreamResp.body;
     }
@@ -596,10 +587,9 @@ export async function handleSystemUserPassthrough(
             status,
           });
         })
-        .catch((err: unknown) => {
+        .catch(() => {
           log.warn("systemUser.stream_consume_failed", {
-            systemUser: match.name,
-            error: err instanceof Error ? err.message : String(err),
+            systemUser: true,
           });
         });
     }

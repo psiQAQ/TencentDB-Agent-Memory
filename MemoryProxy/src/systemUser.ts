@@ -10,7 +10,8 @@
  *
  * Entries are supplied via `systemUsers` in config.yaml and cached in-memory
  * at startup for O(1) lookup on every request. The `userKey` field is kept
- * for logging/dashboard purposes only and is NOT part of the match key.
+ * for in-process attribution only and is NOT part of the match key. Privacy-
+ * safe logs expose only counts and fixed event categories.
  *
  * Usage / credit reporting still fires for matched requests, attributed to
  * the entry's `userId` and the request path's spaceId (= memory instance id).
@@ -55,13 +56,11 @@ export function initSystemUsers(entries: SystemUserEntry[] | undefined): void {
     if (!e.userId) continue; // defensive — config.ts already filters, keep here too
     if (map.has(e.userId)) {
       log.warn("systemUser.duplicate_userid", {
-        userId: e.userId,
-        prev: map.get(e.userId)?.name,
-        next: e.name,
+        duplicate: true,
       });
     }
     if (e.name && seenNames.has(e.name)) {
-      log.warn("systemUser.duplicate_name", { name: e.name });
+      log.warn("systemUser.duplicate_name", { duplicate: true });
     }
     if (e.name) seenNames.add(e.name);
 
@@ -76,7 +75,6 @@ export function initSystemUsers(entries: SystemUserEntry[] | undefined): void {
   if (map.size > 0) {
     log.info("systemUser.init", {
       count: map.size,
-      names: Array.from(seenNames),
     });
   }
 }

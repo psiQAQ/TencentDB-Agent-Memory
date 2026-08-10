@@ -5,10 +5,18 @@ import { DEFAULT_CONFIG } from "../config.js";
 import { createPipeline, writeLog } from "../logger.js";
 import { createMemoryBridgeHandler } from "../memory/memory-bridge.js";
 import { log } from "../report/log.js";
+import { writeRequestLog } from "../requestLog.js";
+import { handleSessionInit as handleClaudeSessionInit } from "../session/claude-code/init.js";
 import {
   __resetSessionStoreForTests,
   getSessionStore,
+  SessionStore,
 } from "../session/store.js";
+import {
+  _resetSystemUsersForTest,
+  initSystemUsers,
+} from "../systemUser.js";
+import { handleSystemUserPassthrough } from "../systemUserPassthrough.js";
 
 const PRIVATE_VALUE = "private-active-diagnostics-value";
 const PRIVATE_REQUEST_ID = "reqpriv8";
@@ -45,6 +53,7 @@ beforeEach(() => {
 afterEach(() => {
   initAuth(DEFAULT_CONFIG.auth);
   __resetSessionStoreForTests();
+  _resetSystemUsersForTest();
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
 });
@@ -156,4 +165,102 @@ describe("active diagnostics privacy", () => {
       ...consoleError.mock.calls,
     ])).toBe(false);
   });
+
+  it("keeps request debug metadata free of the raw model", () => {
+    const debug = vi.spyOn(log, "debug").mockImplementation(() => {});
+    const config = structuredClone(DEFAULT_CONFIG);
+    config.log.level = "debug";
+
+    writeRequestLog(config, {
+      model: PRIVATE_VALUE,
+      messages: [{ role: "user", content: PRIVATE_VALUE }],
+      stream: false,
+    });
+
+    expect(containsPrivateValue(debug.mock.calls)).toBe(false);
+  });
+
+  it("keeps system-user registry identities out of structured logs", () => {
+    const info = vi.spyOn(log, "info").mockImplementation(() => {});
+    const warn = vi.spyOn(log, "warn").mockImplementation(() => {});
+
+    initSystemUsers([
+      { name: PRIVATE_VALUE, userId: PRIVATE_VALUE, displayName: PRIVATE_VALUE },
+      { name: PRIVATE_VALUE, userId: PRIVATE_VALUE, displayName: PRIVATE_VALUE },
+    ]);
+
+    expect(containsPrivateValue([...info.mock.calls, ...warn.mock.calls])).toBe(false);
+  });
+
+  it("keeps system-user passthrough identity, route, model, and errors out of logs", async () => {
+    const info = vi.spyOn(log, "info").mockImplementation(() => {});
+    const warn = vi.spyOn(log, "warn").mockImplementation(() => {});
+    const error = vi.spyOn(log, "error").mockImplementation(() => {});
+    const config = structuredClone(DEFAULT_CONFIG);
+    config.upstream.url = `https://upstream.invalid/${PRIVATE_VALUE}`;
+    config.upstream.apiKey = "server-key";
+    config.rateLimit = { tpm: 0, qpm: 0 };
+    config.creditReport.url = "";
+    config.log.file = "";
+    config.clickhouse.enabled = false;
+    config.opik.enabled = false;
+    config.langfuse.enabled = false;
+    vi.stubGlobal("fetch", vi.fn(async () => {
+      throw new Error(PRIVATE_VALUE);
+    }));
+
+    const app = new Hono();
+    app.post("*", (c) => handleSystemUserPassthrough(c, config, {
+      name: PRIVATE_VALUE,
+      userId: PRIVATE_VALUE,
+      displayName: PRIVATE_VALUE,
+    }, { model: PRIVATE_VALUE, messages: [] }));
+    const response = await app.request(`http://proxy/claude-code/${PRIVATE_VALUE}/v1/messages`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-api-key": "memory-user-key",
+        "x-session-id": "ses_safe",
+      },
+      body: JSON.stringify({ model: PRIVATE_VALUE, messages: [] }),
+    });
+
+    expect(response.status).toBe(502);
+    expect(containsPrivateValue([
+      ...info.mock.calls,
+      ...warn.mock.calls,
+      ...error.mock.calls,
+    ])).toBe(false);
+  });
+
+  it("keeps Claude session identity and prompt text out of console", async () => {
+    const consoleLog = vi.spyOn(console, "log").mockImplementation(() => {});
+    const consoleWarn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+    const store = new SessionStore();
+    await store.set(`claude-code:${PRIVATE_VALUE}`, {
+      status: "pending_asset_confirm",
+      keyId: PRIVATE_VALUE,
+      startedAt: 0,
+      attemptCount: 0,
+      userId: PRIVATE_VALUE,
+      cachedTeams: [],
+    });
+
+    await handleClaudeSessionInit(
+      PRIVATE_VALUE,
+      PRIVATE_VALUE,
+      [{ role: "user", content: PRIVATE_VALUE }],
+      structuredClone(DEFAULT_CONFIG.sessionInit),
+      store,
+      { stream: false, modelId: PRIVATE_VALUE, protocol: "anthropic" },
+    );
+
+    expect(containsPrivateValue([
+      ...consoleLog.mock.calls,
+      ...consoleWarn.mock.calls,
+      ...consoleError.mock.calls,
+    ])).toBe(false);
+  });
+
 });
