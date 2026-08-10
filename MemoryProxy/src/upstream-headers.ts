@@ -1,8 +1,7 @@
-const SAFE_REQUEST_HEADERS = new Set([
-  "accept",
-  "anthropic-beta",
-  "anthropic-version",
-]);
+const SAFE_REQUEST_HEADERS = {
+  anthropic: new Set(["accept", "anthropic-beta", "anthropic-version"]),
+  openai: new Set(["accept"]),
+};
 
 export interface UpstreamHeaderOptions {
   protocol: "anthropic" | "openai";
@@ -42,7 +41,7 @@ export function buildSafeUpstreamHeaders(
   const headers: Record<string, string> = { "content-type": "application/json" };
   for (const [rawName, value] of inbound.entries()) {
     const name = rawName.toLowerCase();
-    if (SAFE_REQUEST_HEADERS.has(name) && safeProtocolValue(name, value)) {
+    if (SAFE_REQUEST_HEADERS[options.protocol].has(name) && safeProtocolValue(name, value)) {
       headers[name] = value;
     }
   }

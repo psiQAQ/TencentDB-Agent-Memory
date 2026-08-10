@@ -45,6 +45,8 @@ function config(apiKey = "server-global-key") {
 function privateHeaders(): Record<string, string> {
   return {
     accept: "application/json",
+    "anthropic-beta": "private-beta-feature",
+    "anthropic-version": "2023-06-01",
     authorization: "Bearer private-caller-credential",
     "x-api-key": "private-memory-credential",
     cookie: "private-cookie-value",
@@ -81,6 +83,8 @@ function assertSafe(headers: Headers, expectedAuthorization: string): void {
     "x-vertex-ai-session-id",
     "x-tdai-service-id",
     "x-private-custom",
+    "anthropic-beta",
+    "anthropic-version",
   ];
   const hasForbiddenName = forbiddenNames.some((name) => headers.has(name));
   const hasPrivateValue = [...headers.values()].some((value) => value.startsWith("private-"));
@@ -259,6 +263,41 @@ describe("OpenAI upstream header privacy", () => {
     expect(upstreamHeaders).toEqual([]);
   });
 
+  it("allows explicit server auth for a cross-origin primary target", async () => {
+    vi.mocked(resolveForwardTarget).mockResolvedValueOnce(target({
+      url: "https://extension-controlled.invalid/v1/chat/completions",
+      authHeaders: { authorization: "Bearer server-extension-key" },
+    }));
+    const value = config();
+    initAuth(value.auth);
+
+    const response = await createApp(value).request(
+      "http://proxy/codebuddy/space-1/v1/chat/completions",
+      { method: "POST", headers: privateHeaders(), body: requestBody() },
+    );
+
+    expect(response.status).toBe(200);
+    expect(upstreamUrls).toEqual(["https://extension-controlled.invalid/v1/chat/completions"]);
+    assertSafe(upstreamHeaders[0]!, "Bearer server-extension-key");
+  });
+
+  it("prefers the selected per-agent server key over the global key", async () => {
+    const value = config();
+    value.upstream.agents.codebuddy = {
+      url: `${configuredOrigin}/v1`,
+      apiKey: "server-agent-key",
+    };
+    initAuth(value.auth);
+
+    const response = await createApp(value).request(
+      "http://proxy/codebuddy/space-1/v1/chat/completions",
+      { method: "POST", headers: privateHeaders(), body: requestBody() },
+    );
+
+    expect(response.status).toBe(200);
+    assertSafe(upstreamHeaders[0]!, "Bearer server-agent-key");
+  });
+
   it("uses distinct explicit server credentials for a cross-origin retry", async () => {
     vi.mocked(resolveForwardTarget).mockResolvedValueOnce(target({
       authHeaders: { authorization: "Bearer server-primary-key" },
@@ -376,6 +415,54 @@ describe("OpenAI upstream header privacy", () => {
       expect(extensionRequests).toBe(0);
     } finally {
       await Promise.all([close(configured), close(extension)]);
+    }
+  });
+
+  it("does not follow a retry redirect to a second origin", async () => {
+    vi.unstubAllGlobals();
+    let retryRequests = 0;
+    let receiverRequests = 0;
+    const receiver = createServer((_request, response) => {
+      receiverRequests += 1;
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end("{}");
+    });
+    const receiverUrl = await listen(receiver);
+    const upstream = createServer((request, response) => {
+      if (request.url === "/primary") {
+        response.writeHead(401, { "content-type": "application/json" });
+        response.end("{}");
+        return;
+      }
+      retryRequests += 1;
+      response.writeHead(302, { location: `${receiverUrl}/capture` });
+      response.end();
+    });
+    const upstreamUrl = await listen(upstream);
+
+    try {
+      vi.mocked(resolveForwardTarget).mockResolvedValueOnce(target({
+        url: `${upstreamUrl}/primary`,
+        authHeaders: { authorization: "Bearer server-primary-key" },
+        retryTarget: {
+          url: `${upstreamUrl}/retry`,
+          model: "retry-model",
+          authHeaders: { authorization: "Bearer server-retry-key" },
+        },
+      }));
+      const value = config();
+      initAuth(value.auth);
+
+      const response = await createApp(value).request(
+        "http://proxy/codebuddy/space-1/v1/chat/completions",
+        { method: "POST", headers: privateHeaders(), body: requestBody() },
+      );
+
+      expect(response.status).toBe(502);
+      expect(retryRequests).toBe(1);
+      expect(receiverRequests).toBe(0);
+    } finally {
+      await Promise.all([close(upstream), close(receiver)]);
     }
   });
 });
