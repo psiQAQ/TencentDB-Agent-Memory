@@ -150,8 +150,8 @@ async function loadSessionIdsL2(
   let recovered;
   try {
     recovered = await getSessionStore().getOrRecover(sessionKey, identity, {});
-  } catch (err) {
-    console.warn(`${TAG} L2 fallthrough error session=${sessionKey}: ${(err as Error).message}`);
+  } catch {
+    console.warn(`${TAG} L2 fallthrough failed`);
     return null;
   }
   return toIdFields(recovered);
@@ -202,8 +202,8 @@ async function resolveMemoryCtxs(config: ProxyConfig, ids: SessionIdFields, sess
       },
     };
     return await resolveFixedAssetCtxs(fakeCtx, identity, metadataClient);
-  } catch (err) {
-    console.warn(`${TAG} fixed asset ctx resolve failed: ${(err as Error).message}`);
+  } catch {
+    console.warn(`${TAG} fixed asset ctx resolve failed`);
     return [selfCtx(ids)];
   }
 }
@@ -265,7 +265,7 @@ export function createMemoryBridgeHandler(
         ?? config.coreSkill?.serviceId
         ?? "";
       if (apiKey && spaceId) {
-        console.log(`${TAG} session=${sessionKey} L1 miss → L2 fallthrough (apiKey=${apiKeyToKeyId(apiKey)} spaceId=${spaceId})`);
+        console.log(`${TAG} L1 miss → L2 fallthrough credential=true service=true`);
         ids = await loadSessionIdsL2(apiKey, spaceId, sessionKey);
       }
     }
@@ -374,11 +374,11 @@ export function createMemoryBridgeHandler(
     let upstream;
     try {
       upstream = await callUpstream(selectTargetCtx(ctxs, inboundBody.agent_id));
-    } catch (err) {
+    } catch {
       console.warn(
-        `${TAG} upstream fetch failed sub=${sub} err=${(err as Error).message}`,
+        `${TAG} upstream fetch failed sub=${sub}`,
       );
-      return envelope(50301, `${TAG} upstream unavailable: ${(err as Error).message}`, 502);
+      return envelope(50301, `${TAG} upstream unavailable`, 502);
     }
 
     const respText = upstream.text;

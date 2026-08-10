@@ -119,8 +119,8 @@ export function writeLog(config: ProxyConfig, entry: LogEntry): void {
   const line = JSON.stringify(safeEntry) + "\n";
   ensureDir(dir)
     .then(() => appendFile(logPath, line, "utf-8"))
-    .catch((err: unknown) => {
-      log.error("usage_log.write_failed", { path: logPath }, err instanceof Error ? err : new Error(String(err)));
+    .catch(() => {
+      log.error("usage_log.write_failed", { backend: "jsonl" });
     });
 }
 
@@ -179,13 +179,47 @@ export interface Pipeline {
   summary(): void;
 }
 
+const SAFE_PIPELINE_STAGES = new Set([
+  "AUX_FORWARD",
+  "AUX_ENDPOINT",
+  "AUX_REDIRECT",
+  "AUX_ROUTE",
+  "CREDIT_REPORT",
+  "FORWARD",
+  "FORWARD_REDIRECT",
+  "LANGFUSE_SPAN",
+  "LOG_WRITE",
+  "NONSTREAM_THINKING_FIX",
+  "OPIK_SPAN",
+  "RATE_LIMIT",
+  "RETRY",
+  "RETRY_FAILED",
+  "RETRY_FORWARD",
+  "RETRY_SUCCESS",
+  "SSE_FIX",
+  "STREAM",
+  "STREAM_CONSUME",
+  "STREAM_FINALIZE",
+  "STREAM_TAP",
+  "STREAM_TIMEOUT",
+  "STREAM_TIMEOUT_COMPLETE",
+  "TDAI_L0",
+  "UPSTREAM_4xx",
+]);
+
+function privacySafePipelineStage(stage: string): string {
+  return SAFE_PIPELINE_STAGES.has(stage) ? stage : "OTHER";
+}
+
 export function createPipeline(
   config: ProxyConfig,
   requestId: string,
   modelId: string,
 ): Pipeline {
   const pipeStart = Date.now();
-  const tag = `[${requestId.slice(0, 8)}]`;
+  const tag = "[request]";
+  const requestIdPresent = requestId.length > 0;
+  const modelConfigured = modelId.length > 0;
   const stages: string[] = [];
   let forwardMs = 0;
   let forwardStartMs = 0;
@@ -199,14 +233,17 @@ export function createPipeline(
 
   return {
     requestReceived(msgCount, isStream) {
-      pipeLog("→ REQ", `model=${modelId} msgs=${msgCount} stream=${isStream}`);
+      pipeLog("→ REQ", `model_configured=${modelConfigured} msgs=${msgCount} stream=${isStream}`);
     },
 
     forwardStart(upstreamUrl?: string) {
       forwardStartMs = Date.now();
       const url = upstreamUrl ?? config.upstream.url;
-      log.debug("pipeline.forward.start", { requestId: tag, upstream: url });
-      pipeLog("  → FORWARD", `upstream=${url}`);
+      log.debug("pipeline.forward.start", {
+        requestIdPresent,
+        upstreamConfigured: url.length > 0,
+      });
+      pipeLog("  → FORWARD", `upstream_configured=${url.length > 0}`);
     },
 
     forwardDone(status) {
@@ -222,7 +259,7 @@ export function createPipeline(
     streamDone(usage) {
       const total = elapsed(pipeStart);
       if (usage) {
-        pipeLog("  ✓ STREAM", `usage: ${JSON.stringify(usage)}`);
+        pipeLog("  ✓ STREAM", `usage: ${JSON.stringify(privacySafeUsage(usage))}`);
       } else {
         pipeLog("  ✓ STREAM", "done (no usage extracted)");
       }
@@ -232,27 +269,32 @@ export function createPipeline(
     responseDone(usage) {
       const total = elapsed(pipeStart);
       if (usage) {
-        pipeLog("  ✓ RESP", `usage: ${JSON.stringify(usage)}`);
+        pipeLog("  ✓ RESP", `usage: ${JSON.stringify(privacySafeUsage(usage))}`);
       } else {
         pipeLog("  ✓ RESP", "done (no usage)");
       }
       pipeLog("← DONE", `total=${total}`);
     },
 
-    info(stage, detail) {
-      pipeLog(`  ℹ ${stage}`, detail);
+    info(stage, _detail) {
+      pipeLog(`  ℹ ${privacySafePipelineStage(stage)}`, "event");
     },
 
-    error(stage, err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      log.error("pipeline.error", { requestId: tag, stage, error: msg }, err instanceof Error ? err : new Error(msg));
-      pipeLog(`  ✗ ${stage}`, msg);
+    error(stage, _err) {
+      const safeStage = privacySafePipelineStage(stage);
+      log.error("pipeline.error", { requestIdPresent, stage: safeStage });
+      pipeLog(`  ✗ ${safeStage}`, "error");
     },
 
     summary() {
       const total = elapsed(pipeStart);
       const path = stages.join(" → ");
-      log.debug("pipeline.summary", { requestId: tag, stages: path, totalMs: Number(total.replace("s", "")) * 1000 || 0, forwardMs });
+      log.debug("pipeline.summary", {
+        requestIdPresent,
+        stages: path,
+        totalMs: Number(total.replace("s", "")) * 1000 || 0,
+        forwardMs,
+      });
       pipeLog("  SUMMARY", `path=[${path}] total=${total} forward=${forwardMs}ms`);
     },
   };
