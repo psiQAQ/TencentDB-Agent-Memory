@@ -35,7 +35,9 @@ describe("upstream redirect privacy", () => {
   beforeAll(async () => {
     receiver = createServer((request, response) => {
       receiverRequests += 1;
-      receiverSawServerKey ||= request.headers["x-api-key"] === "server-key";
+      receiverSawServerKey ||=
+        request.headers["x-api-key"] === "server-key"
+        || request.headers.authorization === "Bearer server-key";
       response.writeHead(200, { "content-type": "application/json" });
       response.end(JSON.stringify({
         id: "redirected",
@@ -86,6 +88,10 @@ describe("upstream redirect privacy", () => {
       url: `${redirectorOrigin}/anthropic/v1`,
       apiKey: "server-key",
     };
+    value.upstream.agents.codebuddy = {
+      url: `${redirectorOrigin}/v1`,
+      apiKey: "server-key",
+    };
     value.rateLimit = { tpm: 0, qpm: 0 };
     value.extraction = { enabled: false, extractors: [] };
     value.creditReport.url = "";
@@ -123,6 +129,28 @@ describe("upstream redirect privacy", () => {
     expect(receiverSawServerKey).toBe(false);
     expect(receiverRequests).toBe(0);
     expect(response.status).toBe(502);
+  });
+
+  it("does not follow a primary OpenAI redirect", async () => {
+    const value = config();
+    initAuth(value.auth);
+    const app = createApp(value);
+
+    const response = await app.request("http://proxy/codebuddy/space-1/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        authorization: "Bearer memory-user-key",
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        model: "test-model",
+        messages: [{ role: "user", content: "hello" }],
+      }),
+    });
+
+    expect(response.status).toBe(502);
+    expect(receiverRequests).toBe(0);
+    expect(receiverSawServerKey).toBe(false);
   });
 
   it("does not follow a count_tokens redirect", async () => {

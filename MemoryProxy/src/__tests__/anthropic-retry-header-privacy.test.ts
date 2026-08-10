@@ -1,3 +1,5 @@
+import { createServer, type Server } from "node:http";
+import type { AddressInfo } from "node:net";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("../guard-adapter.js", async (importOriginal) => {
@@ -23,6 +25,23 @@ import { initAuth } from "../auth.js";
 import { DEFAULT_CONFIG } from "../config.js";
 import { resolveForwardTarget } from "../guard-adapter.js";
 import { createApp } from "../server.js";
+
+function listen(server: Server): Promise<string> {
+  return new Promise((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", () => {
+      server.off("error", reject);
+      const address = server.address() as AddressInfo;
+      resolve(`http://127.0.0.1:${address.port}`);
+    });
+  });
+}
+
+function close(server: Server): Promise<void> {
+  return new Promise((resolve, reject) => {
+    server.close((error) => error ? reject(error) : resolve());
+  });
+}
 
 describe("Anthropic retry header privacy", () => {
   let upstreamHeaders: Headers[];
@@ -282,5 +301,78 @@ describe("Anthropic retry header privacy", () => {
 
     expect(response.status).toBe(502);
     expect(redirects).toEqual(["manual", "manual"]);
+  });
+
+  it("keeps a retry redirect credential away from the second origin", async () => {
+    vi.unstubAllGlobals();
+    let receiverRequests = 0;
+    let retryRequests = 0;
+    const receiver = createServer((_request, response) => {
+      receiverRequests += 1;
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify({ type: "message", role: "assistant", content: [] }));
+    });
+    const receiverOrigin = await listen(receiver);
+    const upstream = createServer((request, response) => {
+      if (request.url?.endsWith("/v3/meta/auth/verify")) {
+        response.writeHead(200, { "content-type": "application/json" });
+        response.end(JSON.stringify({
+          code: 0,
+          data: { valid: true, user: { user_id: "user-1" } },
+        }));
+        return;
+      }
+      if (request.url === "/primary") {
+        response.writeHead(401, { "content-type": "application/json" });
+        response.end(JSON.stringify({ type: "error" }));
+        return;
+      }
+      retryRequests += 1;
+      response.writeHead(302, { location: `${receiverOrigin}/capture` });
+      response.end();
+    });
+    const upstreamOrigin = await listen(upstream);
+
+    try {
+      vi.mocked(resolveForwardTarget).mockResolvedValueOnce({
+        url: `${upstreamOrigin}/primary`,
+        model: "primary-model",
+        authHeaders: { "x-api-key": "server-primary-key" },
+        bodyOverrides: null,
+        retryTarget: {
+          url: `${upstreamOrigin}/retry`,
+          model: "retry-model",
+          authHeaders: { "x-api-key": "server-retry-key" },
+        },
+        turnSeq: 0,
+      });
+      const config = structuredClone(DEFAULT_CONFIG);
+      config.auth = { enabled: true, url: upstreamOrigin, timeoutMs: 1_000 };
+      config.rateLimit = { tpm: 0, qpm: 0 };
+      config.extraction = { enabled: false, extractors: [] };
+      config.log.backend = "noop";
+      initAuth(config.auth);
+      const app = createApp(config);
+
+      const response = await app.request("http://proxy/claude-code/space-1/v1/messages", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-api-key": "memory-user-key",
+          "x-session-id": "session-1",
+        },
+        body: JSON.stringify({
+          model: "test-model",
+          max_tokens: 32,
+          messages: [{ role: "user", content: "hello" }],
+        }),
+      });
+
+      expect(response.status).toBe(502);
+      expect(retryRequests).toBe(1);
+      expect(receiverRequests).toBe(0);
+    } finally {
+      await Promise.all([close(upstream), close(receiver)]);
+    }
   });
 });
