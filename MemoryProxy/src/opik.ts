@@ -13,6 +13,8 @@ import { log } from "./report/log.js";
 import {
   privacySafeMetadata,
   privacySafeTags,
+  privacySafeText,
+  privacySafeUsage,
   summarizeTelemetryValue,
 } from "./telemetry-privacy.js";
 
@@ -70,7 +72,7 @@ interface OpikTraceUpdate {
   projectName: string;
   endTime: string;
   output: Record<string, unknown> | unknown[];
-  usage: Record<string, unknown>; // raw, unmodified
+  usage: Record<string, unknown>; // allowlisted finite numeric counters only
 }
 
 interface OpikLlmSpan {
@@ -106,11 +108,10 @@ function fireCreateTrace(
     body: JSON.stringify(body),
   }).then(async (res) => {
     if (!res.ok) {
-      const body = await res.text().catch(() => "");
-      log.warn("opik.create_trace_error", { status: res.status, body: body.slice(0, 200) });
+      log.warn("opik.create_trace_error", { status: res.status });
     }
   }).catch((err: unknown) => {
-    log.warn("opik.create_trace_failed", { error: String(err) });
+    log.warn("opik.create_trace_failed", { errorCategory: err instanceof Error ? "error" : "unknown" });
   });
 }
 
@@ -130,8 +131,8 @@ export function opikCreateTrace(
 
   const traceBody: Record<string, unknown> = {
     id: input.traceId,
-    project_name: input.projectName,
-    name: input.name,
+    project_name: privacySafeText(input.projectName),
+    name: privacySafeText(input.name),
     start_time: input.startTime,
     input: summarizeTelemetryValue(input.input),
   };
@@ -149,13 +150,9 @@ export function opikCreateTrace(
     const forkBody: Record<string, unknown> = {
       ...traceBody,
       id: forkTraceId,
-      project_name: input.forkProjectName,
+      project_name: "request_log",
       input: summarizeTelemetryValue(input.input),
-      // tags: only keyId and modelId, strip routing / stream / anthropic etc.
-      tags: [
-        `keyId:${forkMeta.keyId || "unknown"}`,
-        `modelId:${forkMeta.modelId || "unknown"}`,
-      ],
+      tags: ["request_log"],
     };
     if (input.forkMetadata) {
       forkBody.metadata = privacySafeMetadata({ ...input.forkMetadata, forkTraceId });
@@ -183,19 +180,18 @@ export function opikUpdateTrace(
     method: "PATCH",
     headers,
     body: JSON.stringify({
-      project_name: update.projectName,
+      project_name: privacySafeText(update.projectName),
       workspace_name: "default",
       end_time: update.endTime,
       output: summarizeTelemetryValue(update.output),
-      usage: update.usage, // raw, unmodified
+      usage: privacySafeUsage(update.usage),
     }),
   }).then(async (res) => {
     if (!res.ok) {
-      const body = await res.text().catch(() => "");
-      log.warn("opik.update_trace_error", { status: res.status, body: body.slice(0, 200) });
+      log.warn("opik.update_trace_error", { status: res.status });
     }
   }).catch((err: unknown) => {
-    log.warn("opik.update_trace_failed", { error: String(err) });
+    log.warn("opik.update_trace_failed", { errorCategory: err instanceof Error ? "error" : "unknown" });
   });
 }
 
@@ -213,11 +209,10 @@ function fireCreateLlmSpan(
     body: JSON.stringify(body),
   }).then(async (res) => {
     if (!res.ok) {
-      const body = await res.text().catch(() => "");
-      log.warn("opik.create_llm_span_error", { status: res.status, body: body.slice(0, 200) });
+      log.warn("opik.create_llm_span_error", { status: res.status });
     }
   }).catch((err: unknown) => {
-    log.warn("opik.create_llm_span_failed", { error: String(err) });
+    log.warn("opik.create_llm_span_failed", { errorCategory: err instanceof Error ? "error" : "unknown" });
   });
 }
 
@@ -239,7 +234,7 @@ export function opikCreateLlmSpan(
   // Opik span usage only accepts flat INTEGER fields — decimals are truncated.
   // Credit values (e.g. 0.43) must be scaled ×100 to preserve precision.
   const flatUsage: Record<string, number> = {};
-  for (const [k, v] of Object.entries(span.usage)) {
+  for (const [k, v] of Object.entries(privacySafeUsage(span.usage))) {
     if (typeof v === "number") {
       if (k === "credit") {
         // Store as credit_x100 (integer) to avoid Opik truncation
@@ -253,14 +248,14 @@ export function opikCreateLlmSpan(
   const body: Record<string, unknown> = {
     id: uuidv7(),
     trace_id: span.traceId,
-    project_name: span.projectName,
-    name: span.name,
+    project_name: privacySafeText(span.projectName),
+    name: privacySafeText(span.name),
     type: "llm",
     start_time: span.startTime,
     end_time: span.endTime,
     input: summarizeTelemetryValue(span.inputMessages),
     output: summarizeTelemetryValue(outputMessages),
-    model: span.model,
+    model: privacySafeText(span.model),
     usage: flatUsage,
   };
   if (span.tags && span.tags.length > 0) {
@@ -274,7 +269,7 @@ export function opikCreateLlmSpan(
   if (span.forkProjectName && span.forkTraceId) {
     const forkMeta = span.forkMetadata || {};
     const forkMetadataFull: Record<string, unknown> = { ...forkMeta };
-    // Preserve raw credit in metadata for reference (usage only stores credit_x100 integer)
+    // Preserve numeric credit only (usage stores credit_x100 integer).
     const rawCredit = span.usage.credit;
     if (typeof rawCredit === "number") {
       forkMetadataFull["credit"] = rawCredit;
@@ -283,12 +278,12 @@ export function opikCreateLlmSpan(
     const forkBody: Record<string, unknown> = {
       id: uuidv7(),
       trace_id: span.forkTraceId,     // independent trace ID for fork project
-      project_name: span.forkProjectName,
-      name: span.name,
+      project_name: "request_log",
+      name: privacySafeText(span.name),
       type: "llm",
       start_time: span.startTime,     // use span fields directly (not body which has snake_case keys)
       end_time: span.endTime,
-      model: span.model,
+      model: privacySafeText(span.model),
       usage: flatUsage,
       metadata: privacySafeMetadata(forkMetadataFull),
     };
@@ -296,11 +291,7 @@ export function opikCreateLlmSpan(
       forkBody.input = summarizeTelemetryValue(span.inputMessages);
       forkBody.output = summarizeTelemetryValue(outputMessages);
     }
-    // request_log tags: only keyId and modelId, nothing else
-    forkBody.tags = [
-      `keyId:${forkMeta.keyId || "unknown"}`,
-      `modelId:${forkMeta.modelId || "unknown"}`,
-    ];
+    forkBody.tags = ["request_log"];
     fireCreateLlmSpan(url, headers, forkBody);
   }
 }

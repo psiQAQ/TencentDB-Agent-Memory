@@ -31,6 +31,8 @@ import {
   privacySafeMetadata,
   privacySafeSessionId,
   privacySafeTags,
+  privacySafeText,
+  privacySafeUsage,
   summarizeTelemetryValue,
 } from "./telemetry-privacy.js";
 
@@ -284,12 +286,14 @@ export function langfuseReportGeneration(report: LangfuseGenerationReport): void
 
   try {
     const generation = startObservation(
-      report.name,
+      privacySafeText(report.name),
       {
-        model: report.model,
+        model: privacySafeText(report.model),
         input: summarizeTelemetryValue(report.input),
         output: summarizeTelemetryValue(report.output),
-        usageDetails: report.usage ? normalizeUsageDetails(report.usage) : undefined,
+        usageDetails: report.usage
+          ? normalizeUsageDetails(privacySafeUsage(report.usage))
+          : undefined,
         metadata: privacySafeMetadata(report.observationMetadata),
         level: report.level,
         statusMessage: report.statusMessage ? "[redacted]" : undefined,
@@ -308,8 +312,14 @@ export function langfuseReportGeneration(report: LangfuseGenerationReport): void
 
     // trace 级属性：直接写 OTel 属性，SDK 会传播到所属 trace。
     const span = generation.otelSpan;
-    span.setAttribute(LangfuseOtelSpanAttributes.TRACE_NAME, report.traceName);
-    span.setAttribute(LangfuseOtelSpanAttributes.TRACE_USER_ID, report.userId);
+    span.setAttribute(
+      LangfuseOtelSpanAttributes.TRACE_NAME,
+      privacySafeText(report.traceName),
+    );
+    span.setAttribute(
+      LangfuseOtelSpanAttributes.TRACE_USER_ID,
+      privacySafeText(report.userId),
+    );
     span.setAttribute(
       LangfuseOtelSpanAttributes.TRACE_SESSION_ID,
       privacySafeSessionId(report.sessionId),
@@ -343,7 +353,9 @@ export function langfuseReportGeneration(report: LangfuseGenerationReport): void
 
     generation.end(new Date(report.endTime));
   } catch (err: unknown) {
-    log.debug("langfuse.report_error", { error: String(err) });
+    log.debug("langfuse.report_error", {
+      errorCategory: err instanceof Error ? "error" : "unknown",
+    });
   }
 }
 

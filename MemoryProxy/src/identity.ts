@@ -87,6 +87,12 @@ function present(value: string | null): string | null {
   return value ? "present" : null;
 }
 
+function safeAgentSource(value: string): string {
+  return ["claude-code", "codebuddy", "opencode", "pi"].includes(value)
+    ? value
+    : "other";
+}
+
 function privacySafeIdentity(identity: ClientIdentity): ClientIdentity {
   return {
     ...identity,
@@ -97,9 +103,7 @@ function privacySafeIdentity(identity: ClientIdentity): ClientIdentity {
     wechatWorkId: present(identity.wechatWorkId),
     requestId: present(identity.requestId),
     userAgent: present(identity.userAgent),
-    customHeaders: Object.fromEntries(
-      Object.keys(identity.customHeaders).map((name) => [name, "present"]),
-    ),
+    customHeaders: {},
     userInfo: identity.userInfo
       ? Object.fromEntries(
           Object.keys(identity.userInfo).map((name) => [
@@ -109,18 +113,22 @@ function privacySafeIdentity(identity: ClientIdentity): ClientIdentity {
         ) as unknown as UserInfoFromPrompt
       : null,
     proxyToken: present(identity.proxyToken),
+    agentSource: safeAgentSource(identity.agentSource),
   };
 }
 
 export function recordInspection(inspection: RequestInspection): void {
   recentInspections.push({
     ...inspection,
+    method: ["GET", "POST", "PUT", "PATCH", "DELETE"].includes(inspection.method)
+      ? inspection.method
+      : "OTHER",
+    path: "[redacted]",
     identity: privacySafeIdentity(inspection.identity),
-    allHeaders: Object.fromEntries(
-      Object.keys(inspection.allHeaders).map((name) => [name, "present"]),
-    ),
+    allHeaders: {},
     bodyMeta: {
       ...inspection.bodyMeta,
+      model: inspection.bodyMeta.model ? "present" : null,
       systemPromptPreview: undefined,
       systemPromptTail: undefined,
     },
@@ -464,9 +472,7 @@ export function inspectAndRecord(
     `user=${identity.userInfo?.usernameFromPath ? "present" : "none"} ` +
     `ws=${identity.userInfo?.workspaceFolder ? "present" : "none"} ` +
     `proxyToken=${identity.proxyToken ? "present" : "none"}` +
-    (Object.keys(identity.customHeaders).length > 0
-      ? ` custom=[${Object.keys(identity.customHeaders).join(",")}]`
-      : ""),
+    ` customHeaderCount=${Object.keys(identity.customHeaders).length}`,
   );
 
   return identity;

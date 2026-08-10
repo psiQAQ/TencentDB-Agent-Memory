@@ -17,11 +17,14 @@
 
 import type { ClickHouseClient } from "@clickhouse/client";
 import { log } from "./report/log.js";
-import { hostname } from "node:os";
 import { computeCreditDelta } from "./credit-reporter.js";
 import { getModelPricing, resolveModelName } from "./pricing.js";
 import type { CreditPricingConfig, CreditPricingEntry } from "./types.js";
-import { privacySafeSessionId, privacySafeText } from "./telemetry-privacy.js";
+import {
+  privacySafeSessionId,
+  privacySafeText,
+  privacySafeUsage,
+} from "./telemetry-privacy.js";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -80,11 +83,11 @@ export interface ClickHouseRow {
 }
 
 /**
- * Raw usage row for traceability (non-TokenHub or unrecognized format).
+ * Minimized usage row for traceability (non-TokenHub or unrecognized format).
  *
  * 字段与主表 `ClickHouseRow` 尽量对齐，方便运维/报表跨表 JOIN 查询。
  * 与 `usage_logs` 的差异：
- *  - 保留 `usage` 原文（JSON 字符串），不做解析
+ *  - `usage` 只保留固定数值字段，不保留任意 key/value 或失败详情
  *  - `reason` 字段记录落入 raw 表的原因（unknown_model / invalid_format / ...）
  *  - `key_id` 与 `user_id` **双写**（老表用 key_id，新表用 user_id），
  *    通过 ClickHouse `JSONEachRow` 格式的容错性实现双向兼容
@@ -100,7 +103,7 @@ export interface ClickHouseRawUsageRow {
   user_input: string;          // 与主表对齐（用户输入前缀）
   upstream_url: string;
   stream: number;
-  usage: string;               // JSON.stringify(raw usage), unmodified
+  usage: string;               // JSON of allowlisted finite numeric usage counters
   reason: string;              // 'non_tokenhub' | 'unknown_model' | 'invalid_format' | 'invalid_credit' | 'report_failed'
   routed_from: string;         // 路由前的原始模型
   space_id: string;            // 空间/租户标识（从 /proxy/<spaceId>/... 提取）
@@ -111,7 +114,14 @@ export interface ClickHouseRawUsageRow {
 
 // ── Writer state ────────────────────────────────────────────────────────────
 
-const HOST_ID = hostname();
+const SAFE_HOST_CATEGORY = "proxy";
+const SAFE_RAW_REASONS = new Set([
+  "invalid_credit",
+  "invalid_format",
+  "non_tokenhub",
+  "report_failed",
+  "unknown_model",
+]);
 
 let config: ClickHouseConfig | null = null;
 let client: ClickHouseClient | null = null;
@@ -536,10 +546,10 @@ export function buildClickHouseRow(entry: ClickHouseWriteEntry): ClickHouseRow |
     session_key: privacySafeSessionId(entry.sessionKey),
     turn_seq: entry.turnSeq ?? 0,
     user_input: privacySafeText(entry.userInput),
-    model_id: entry.modelId,
-    model_name: resolveModelName(entry.pricingConfig, entry.modelId),
-    user_id: entry.keyId,
-    upstream_url: entry.upstreamUrl,
+    model_id: privacySafeText(entry.modelId),
+    model_name: privacySafeText(resolveModelName(entry.pricingConfig, entry.modelId)),
+    user_id: privacySafeText(entry.keyId),
+    upstream_url: privacySafeText(entry.upstreamUrl),
     stream: entry.stream ? 1 : 0,
     prompt_tokens: promptTokens,
     completion_tokens: completionTokens,
@@ -553,11 +563,11 @@ export function buildClickHouseRow(entry: ClickHouseWriteEntry): ClickHouseRow |
     cache_creation_ephemeral_1h_input_tokens: num(cacheCreation?.ephemeral_1h_input_tokens),
     credit: computeCreditDelta(usage, entry.pricingConfig, entry.modelId, entry.upstreamUrl),
     credit_saved: computeCreditSaved(entry, usage),
-    routed_from: entry.routedFrom ?? "",
-    space_id: entry.spaceId ?? "",
+    routed_from: privacySafeText(entry.routedFrom),
+    space_id: privacySafeText(entry.spaceId),
     source_tag: "proxy",
-    host: HOST_ID,
-    upstream_request_id: entry.upstreamRequestId ?? "",
+    host: SAFE_HOST_CATEGORY,
+    upstream_request_id: privacySafeText(entry.upstreamRequestId),
   };
 }
 
@@ -616,32 +626,31 @@ export function buildRawUsageRow(
 ): ClickHouseRawUsageRow {
   return {
     timestamp: toChTimestamp(entry.timestamp),
-    model_id: entry.modelId,
-    model_name: resolveModelName(entry.pricingConfig, entry.modelId),
-    key_id: entry.keyId,          // 老列兼容（老 usage_raw 表仍以 key_id 作为主键的一部分）
-    user_id: entry.keyId,          // 新列（与主表统一）；双写靠 JSONEachRow 容错
+    model_id: privacySafeText(entry.modelId),
+    model_name: privacySafeText(resolveModelName(entry.pricingConfig, entry.modelId)),
+    key_id: privacySafeText(entry.keyId),
+    user_id: privacySafeText(entry.keyId),
     session_key: privacySafeSessionId(entry.sessionKey),
     turn_seq: entry.turnSeq ?? 0,
     user_input: privacySafeText(entry.userInput),
-    upstream_url: entry.upstreamUrl,
+    upstream_url: privacySafeText(entry.upstreamUrl),
     stream: entry.stream ? 1 : 0,
-    usage: JSON.stringify(entry.usage ?? {}),
-    reason,
-    routed_from: entry.routedFrom ?? "",
-    space_id: entry.spaceId ?? "",
+    usage: JSON.stringify(privacySafeUsage(entry.usage)),
+    reason: SAFE_RAW_REASONS.has(reason) ? reason : "invalid_format",
+    routed_from: privacySafeText(entry.routedFrom),
+    space_id: privacySafeText(entry.spaceId),
     source_tag: "proxy",
-    host: HOST_ID,
-    upstream_request_id: entry.upstreamRequestId ?? "",
+    host: SAFE_HOST_CATEGORY,
+    upstream_request_id: privacySafeText(entry.upstreamRequestId),
   };
 }
 
 /**
  * Pure mapper: build a raw-table row for a **failed credit report** scenario.
  *
- * Reason is fixed to `"report_failed"`. The error detail (HTTP status / timeout
- * / upstream code message) is embedded into the usage JSON under a meta field
- * `__report_error`, so the raw table's `usage` column self-contains everything
- * an ops user needs to reconstruct the failure without a JOIN.
+ * Reason is fixed to `"report_failed"`. Error details are intentionally not
+ * stored; the usage JSON contains only allowlisted numeric counters plus a
+ * fixed `report_failed` category flag.
  *
  * Row shape is identical to `buildRawUsageRow` output, allowing it to be
  * appended to the same `usage_raw` table and flushed by `flushRaw`.
@@ -650,28 +659,26 @@ export function buildFailedReportRawRow(
   entry: ClickHouseWriteEntry,
   errorDetail: string,
 ): ClickHouseRawUsageRow {
-  const usageWithError = {
-    ...(entry.usage ?? {}),
-    __report_error: errorDetail,
-  };
+  void errorDetail;
+  const usageWithError = { ...privacySafeUsage(entry.usage), report_failed: 1 };
   return {
     timestamp: toChTimestamp(entry.timestamp),
-    model_id: entry.modelId,
-    model_name: resolveModelName(entry.pricingConfig, entry.modelId),
-    key_id: entry.keyId,
-    user_id: entry.keyId,
+    model_id: privacySafeText(entry.modelId),
+    model_name: privacySafeText(resolveModelName(entry.pricingConfig, entry.modelId)),
+    key_id: privacySafeText(entry.keyId),
+    user_id: privacySafeText(entry.keyId),
     session_key: privacySafeSessionId(entry.sessionKey),
     turn_seq: entry.turnSeq ?? 0,
     user_input: privacySafeText(entry.userInput),
-    upstream_url: entry.upstreamUrl,
+    upstream_url: privacySafeText(entry.upstreamUrl),
     stream: entry.stream ? 1 : 0,
     usage: JSON.stringify(usageWithError),
     reason: "report_failed",
-    routed_from: entry.routedFrom ?? "",
-    space_id: entry.spaceId ?? "",
+    routed_from: privacySafeText(entry.routedFrom),
+    space_id: privacySafeText(entry.spaceId),
     source_tag: "proxy",
-    host: HOST_ID,
-    upstream_request_id: entry.upstreamRequestId ?? "",
+    host: SAFE_HOST_CATEGORY,
+    upstream_request_id: privacySafeText(entry.upstreamRequestId),
   };
 }
 

@@ -252,7 +252,7 @@ opik:
   enabled: false           # 是否启用 Opik 上报
   url: "http://127.0.0.1:5173"   # Opik 服务地址
   apiKey: ""               # Opik API Key（若 Opik 实例需要鉴权）
-  # stripRequestLogContent: false  # true = fork 出的 request_log trace 不记录消息内容（节省存储）
+  # stripRequestLogContent: false  # false = 只记录类型/计数摘要；true = 连安全摘要也省略（从不记录原文）
 
 
 # ── Langfuse LLM 可观测（官方 SDK 上报） ──────────────────────────────────────

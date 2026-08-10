@@ -401,7 +401,7 @@ export interface ProxyConfig {
     enabled: boolean;
     url: string;    // Opik server base URL
     apiKey: string; // Opik server auth key (optional)
-    /** When true, forked request_log traces/spans do not store message content. */
+    /** False keeps safe type/count summaries; true omits them. Raw content is never exported. */
     stripRequestLogContent: boolean;
   };
   langfuse: LangfuseConfig;
@@ -830,7 +830,7 @@ export interface UsageLogEntry {
   userInput?: string;
   upstreamUrl: string;
   stream: boolean;
-  usage: Record<string, unknown>; // raw LLM usage object, unmodified
+  usage: Record<string, unknown>; // filtered to known finite numeric counters before storage
   routedFrom?: string;     // original model if routing was applied
   /** Space/tenant ID extracted from /proxy/<spaceId>/... path. */
   spaceId?: string;

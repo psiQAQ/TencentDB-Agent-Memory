@@ -255,12 +255,12 @@ async function recordTracesAndUsage(params: {
     });
   }
 
-  // ── Opik: create trace + LLM span (raw payloads, no flattening) ─────────
+  // ── Opik: create trace + LLM span (privacy-safe summaries only) ─────────
   //
   // We wrap `requestPayload` in `{ messages: ... }` when it happens to be a
   // parsed object with a `messages` array (matches the shape the main
-  // handler produces for OpenAI/Anthropic requests), otherwise we just
-  // stringify — opik accepts `input` as an arbitrary object.
+  // handler produces for OpenAI/Anthropic requests); the exporter records
+  // only fixed type/count summaries from either shape.
   const opikInput = normaliseForOpikInput(requestPayload);
   const forkTraceId = opikCreateTrace(config, {
     traceId,
@@ -588,8 +588,7 @@ export async function handleSystemUserPassthrough(
             config, match, path, upstreamUrl, modelId,
             startTime, endTime, stream: true, traceId,
             requestPayload,
-            // For streams we hand the raw SSE text through — opik/langfuse
-            // will store it as a string blob under `{raw: ...}`.
+            // Exporters reduce the raw SSE text to a type/length summary.
             responsePayload: rawText,
             usage,
             upstreamRequestId,

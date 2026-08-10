@@ -13,10 +13,19 @@
 
 import { appendFile, mkdir } from "node:fs/promises";
 import { resolve, dirname } from "node:path";
-import type { LogEntry, ProxyConfig } from "./types.js";
+import type {
+  AnalyzerUsageLogEntry,
+  LogEntry,
+  ProxyConfig,
+  UsageLogEntry,
+} from "./types.js";
 import { log } from "./report/log.js";
 import { writeClickHouse } from "./clickhouse.js";
-import { privacySafeSessionId, privacySafeText } from "./telemetry-privacy.js";
+import {
+  privacySafeSessionId,
+  privacySafeText,
+  privacySafeUsage,
+} from "./telemetry-privacy.js";
 
 // ── JSONL file logger (usage events only) ─────────────────────────────────────
 
@@ -39,31 +48,62 @@ async function ensureDir(dir: string): Promise<void> {
 
 /** Append a single usage log entry as a JSON line. Fire-and-forget (no await needed). */
 export function writeLog(config: ProxyConfig, entry: LogEntry): void {
-  const safeEntry = {
-    ...entry,
+  const common = {
+    timestamp: entry.timestamp,
+    event: entry.event,
+    modelId: privacySafeText(entry.modelId),
+    keyId: privacySafeText(entry.keyId),
     ...(entry.sessionKey ? { sessionKey: privacySafeSessionId(entry.sessionKey) } : {}),
-    ...("userInput" in entry && entry.userInput
-      ? { userInput: privacySafeText(entry.userInput) }
+    upstreamUrl: privacySafeText(entry.upstreamUrl),
+    stream: entry.stream,
+    ...(entry.routedFrom ? { routedFrom: privacySafeText(entry.routedFrom) } : {}),
+    ...(entry.upstreamRequestId
+      ? { upstreamRequestId: privacySafeText(entry.upstreamRequestId) }
       : {}),
-  } as LogEntry;
+  };
+  const safeEntry = entry.event === "request"
+    ? {
+        ...common,
+        ...(typeof entry.temperature === "number" && Number.isFinite(entry.temperature)
+          ? { temperature: entry.temperature }
+          : {}),
+        ...(typeof entry.maxTokens === "number" && Number.isFinite(entry.maxTokens)
+          ? { maxTokens: entry.maxTokens }
+          : {}),
+        ...(typeof entry.routingPercent === "number" && Number.isFinite(entry.routingPercent)
+          ? { routingPercent: entry.routingPercent }
+          : {}),
+      }
+    : {
+        ...common,
+        ...(typeof entry.turnSeq === "number" && Number.isFinite(entry.turnSeq)
+          ? { turnSeq: entry.turnSeq }
+          : {}),
+        ...(entry.event === "usage" && entry.userInput
+          ? { userInput: privacySafeText(entry.userInput) }
+          : {}),
+        usage: privacySafeUsage(entry.usage),
+        ...(entry.spaceId ? { spaceId: privacySafeText(entry.spaceId) } : {}),
+      };
 
   // ── ClickHouse async write (if enabled) ──────────────────────────────────
   if (config.clickhouse.enabled && (safeEntry.event === "usage" || safeEntry.event === "analyzer_usage")) {
+    const usageEntry = safeEntry as UsageLogEntry | AnalyzerUsageLogEntry;
     writeClickHouse({
-      timestamp: safeEntry.timestamp,
-      event: safeEntry.event,
-      modelId: safeEntry.modelId,
-      keyId: safeEntry.keyId,
-      sessionKey: safeEntry.sessionKey,
-      turnSeq: "turnSeq" in safeEntry ? safeEntry.turnSeq : undefined,
-      userInput: "userInput" in safeEntry ? safeEntry.userInput : undefined,
-      upstreamUrl: safeEntry.upstreamUrl,
-      stream: safeEntry.stream,
-      usage: safeEntry.usage,
-      routedFrom: "routedFrom" in safeEntry ? safeEntry.routedFrom : undefined,
-      spaceId: "spaceId" in safeEntry ? safeEntry.spaceId : undefined,
+      timestamp: usageEntry.timestamp,
+      event: usageEntry.event,
+      modelId: usageEntry.modelId,
+      keyId: usageEntry.keyId,
+      sessionKey: usageEntry.sessionKey,
+      turnSeq: usageEntry.turnSeq,
+      userInput: "userInput" in usageEntry ? usageEntry.userInput : undefined,
+      upstreamUrl: usageEntry.upstreamUrl,
+      stream: usageEntry.stream,
+      usage: usageEntry.usage,
+      routedFrom: usageEntry.routedFrom,
+      spaceId: usageEntry.spaceId,
       upstreamRequestId:
-        "upstreamRequestId" in safeEntry ? safeEntry.upstreamRequestId : undefined,
+        usageEntry.upstreamRequestId,
       pricingConfig: config.creditPricing,
     });
   }
