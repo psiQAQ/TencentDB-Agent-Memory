@@ -1,7 +1,6 @@
 /** Core request handler: intercept → forward → parse usage → log. */
 
 import type { Context } from "hono";
-import { createHash } from "node:crypto";
 import { writeLog, createPipeline } from "./logger.js";
 import {
   apiKeyToKeyId,
@@ -304,8 +303,8 @@ async function forwardWithRetry(
   let upstreamResp: Response | undefined;
   let forwardFailed = false;
 
-  // ── Optional outbound body md5 debug log (see anthropicHandler.ts) ─────
-  // openai 协议侧没有 cache_control 概念，只算 sys + 整个 messages 数组两个 md5。
+  // Compatibility flag retained, but privacy-safe diagnostics expose only
+  // shape/count metadata and never a stable content-derived digest.
   if (process.env.PROXY_DEBUG_DUMP_OUTBOUND_MD5) {
     try {
       const msgs = (upstreamBody as { messages?: Array<{ role?: string; content?: unknown }> }).messages ?? [];
@@ -314,15 +313,13 @@ async function forwardWithRetry(
         ? sysMsg.content
         : sysMsg?.content ? JSON.stringify(sysMsg.content) : "";
       const msgsFullStr = JSON.stringify(msgs);
-      const sysMd5 = createHash("md5").update(sysStr).digest("hex").slice(0, 12);
-      const msgsFullMd5 = createHash("md5").update(msgsFullStr).digest("hex").slice(0, 12);
       // eslint-disable-next-line no-console
       console.log(
-        `[outbound-md5] session=<redacted> protocol=openai sysBytes=${sysStr.length} sysMd5=${sysMd5} msgsCount=${msgs.length} msgsFullBytes=${msgsFullStr.length} msgsFullMd5=${msgsFullMd5}`,
+        `[outbound-summary] protocol=openai system_present=${sysMsg !== undefined} sysBytes=${sysStr.length} msgsCount=${msgs.length} msgsBytes=${msgsFullStr.length}`,
       );
-    } catch (e) {
+    } catch {
       // eslint-disable-next-line no-console
-      console.log(`[outbound-md5] session=<redacted> <error: ${(e as Error).message}>`);
+      console.log("[outbound-summary] protocol=openai failed");
     }
   }
 
@@ -512,20 +509,17 @@ export async function handleChatCompletions(
   let messages = Array.isArray(body.messages) ? body.messages : [];
   const isStream = body.stream === true;
 
-  // [debug] Log last 3 message roles and content types to diagnose session-init issues
+  // Privacy-safe request-tail shape for session-init diagnosis.
   if (config.sessionInit?.enabled && messages.length > 2) {
     const tail = messages.slice(-3);
-    const summary = tail.map((m: any, idx: number) => {
-      const role = m.role;
-      const ct = m.content;
-      const contentType = typeof ct === "string" ? `string(${ct.slice(0, 80)})` :
-        Array.isArray(ct) ? `array[${ct.map((b: any) => b.type).join(",")}]` :
-        ct === null ? "null" : typeof ct;
-      const tcid = m.tool_call_id;
-      const tcs = m.tool_calls ? `tool_calls[${m.tool_calls.map((t: any) => t.id).join(",")}]` : "";
-      return `[${idx}]role=${role} content=${contentType} tool_call_id=${tcid} ${tcs}`;
-    }).join(" | ");
-    console.log(`[session-init-debug] raw-tail msgs=${messages.length} ${summary}`);
+    const toolMessageCount = tail.filter((message: any) =>
+      Boolean(message?.tool_call_id) || Array.isArray(message?.tool_calls)
+    ).length;
+    console.log("[session-init-debug] request_tail", {
+      messageCount: messages.length,
+      tailCount: tail.length,
+      toolMessageCount,
+    });
   }
 
   // ── Resolve agent source from URL path (e.g. /claude-code/v1/chat/completions) ──
@@ -580,7 +574,13 @@ export async function handleChatCompletions(
   let assetCapabilities: import("./injection/types.js").AssetCapabilityFlags | undefined;
   let injectedSkipped = !conversationId;
   let sessionJustRegistered = false;
-  console.log(`[injection-debug] agentSource=${agentSource} sessionInitEnabled=${config.sessionInit?.enabled} injectionEnabled=${config.injection?.enabled} injectors=${JSON.stringify(config.injection?.injectors)} injectedSkipped=${injectedSkipped}`);
+  console.log("[injection-debug] request_config", {
+    agentSourceRecognized: ["claude-code", "codebuddy"].includes(agentSource),
+    sessionInitEnabled: config.sessionInit?.enabled === true,
+    injectionEnabled: config.injection?.enabled === true,
+    injectorCount: config.injection?.injectors?.length ?? 0,
+    injectedSkipped,
+  });
   if (config.sessionInit?.enabled && conversationId) {
     try {
       const { getSessionStore, handleSessionInit, parsePresetIdentity } = await import("./session/index.js");
@@ -728,11 +728,8 @@ export async function handleChatCompletions(
             // 透传 caller 的 sk-mem key，用于 prewarm 阶段 TDAI ACL 校验（x-tdai-user-key）
             callerUserKey: apiKey ?? undefined,
           });
-        } catch (err) {
-          console.warn(
-            "[hook-cache] handler prewarm error:",
-            err instanceof Error ? err.message : String(err),
-          );
+        } catch {
+          console.warn("[hook-cache] handler prewarm failed");
           // Don't re-throw: the pipeline's resolveHookBlocks has its own
           // cache-miss → execute() fallback as a safety net (see pipeline.ts).
         }
@@ -751,8 +748,8 @@ export async function handleChatCompletions(
       // call is a no-op and guards against future refactors that copy
       // the object between these two lines.
       restoreSessionSpaceId(sessionInfo, spaceId);
-    } catch (err: unknown) {
-      console.error("[session-init] Error in handleSessionInit:", err instanceof Error ? err.message : String(err));
+    } catch {
+      console.error("[session-init] handleSessionInit failed");
       sessionInfo = undefined;
       injectedSkipped = true;
     }
@@ -820,8 +817,8 @@ export async function handleChatCompletions(
         const userMsg = { role: "user" as const, content: memCmd.rawMessage };
         try {
           await recordTdaiTurn(tdaiClientForMem, tdaiIdentityForMem, userMsg, memResult.messageText);
-        } catch (err: unknown) {
-          console.error("[mem-command] L0 write error:", err);
+        } catch {
+          console.error("[mem-command] L0 write failed");
         }
       }
 
@@ -841,8 +838,8 @@ export async function handleChatCompletions(
             protocol: "openai",
             assetCapabilities,
           });
-        } catch (err: unknown) {
-          console.warn("[mem-command] skill extract trigger error:", err instanceof Error ? err.message : String(err));
+        } catch {
+          console.warn("[mem-command] skill extract trigger failed");
         }
       }
 

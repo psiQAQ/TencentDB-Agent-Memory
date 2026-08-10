@@ -8,7 +8,6 @@
  */
 
 import type { Context } from "hono";
-import { createHash } from "node:crypto";
 import { writeLog, createPipeline } from "./logger.js";
 import {
   apiKeyToKeyId,
@@ -420,18 +419,14 @@ async function forwardWithRetry(
       const prefixEnd = anchorIdx >= 0 ? anchorIdx + 1 : msgs.length;
       const msgsPrefixStr = JSON.stringify(msgs.slice(0, prefixEnd));
 
-      const sysFullMd5 = createHash("md5").update(sysFullStr).digest("hex").slice(0, 12);
-      const sysTextMd5 = createHash("md5").update(sysTextStr).digest("hex").slice(0, 12);
-      const msgsPrefixMd5 = createHash("md5").update(msgsPrefixStr).digest("hex").slice(0, 12);
-
       // eslint-disable-next-line no-console
       console.log(
-        `[outbound-md5] session=<redacted> sysBytes=${sysFullStr.length} sysFullMd5=${sysFullMd5} sysTextMd5=${sysTextMd5} msgsCount=${msgs.length} msgsAnchorIdx=${anchorIdx} msgsPrefixBytes=${msgsPrefixStr.length} msgsPrefixMd5=${msgsPrefixMd5}`,
+        `[outbound-summary] protocol=anthropic system_present=${sys !== undefined} sysBytes=${sysFullStr.length} sysTextBytes=${sysTextStr.length} msgsCount=${msgs.length} msgsAnchorIdx=${anchorIdx} msgsPrefixBytes=${msgsPrefixStr.length}`,
       );
-    } catch (e) {
+    } catch {
       // best-effort；不应因 debug 崩流程
       // eslint-disable-next-line no-console
-      console.log(`[outbound-md5] session=<redacted> <error: ${(e as Error).message}>`);
+      console.log("[outbound-summary] protocol=anthropic failed");
     }
   }
 
@@ -691,7 +686,13 @@ export async function handleAnthropicMessages(
   let assetCapabilities: import("./injection/types.js").AssetCapabilityFlags | undefined;
   let injectedSkipped = !conversationId;
   let sessionJustRegistered = false;
-  console.log(`[injection-debug] agentSource=${agentSource} sessionInitEnabled=${config.sessionInit?.enabled} injectionEnabled=${config.injection?.enabled} injectors=${JSON.stringify(config.injection?.injectors)} injectedSkipped=${injectedSkipped}`);
+  console.log("[injection-debug] request_config", {
+    agentSourceRecognized: ["claude-code", "opencode", "pi"].includes(agentSource),
+    sessionInitEnabled: config.sessionInit?.enabled === true,
+    injectionEnabled: config.injection?.enabled === true,
+    injectorCount: config.injection?.injectors?.length ?? 0,
+    injectedSkipped,
+  });
   // CC 分流：SIDEQUERY 完全跳过 session-init（独立小请求无对话概念）。
   //          FORK 允许走 L2b recovery 复用 MAIN 已建的 session，但不进 form 交互路径
   //          （借用 MAIN 的 sessionInfo，见下方的 kind === 'fork' 分支保护）。
@@ -846,11 +847,8 @@ export async function handleAnthropicMessages(
             // 透传 caller 的 sk-mem key，用于 prewarm 阶段 TDAI ACL 校验（x-tdai-user-key）
             callerUserKey: callerUserKey ?? undefined,
           });
-        } catch (err) {
-          console.warn(
-            "[hook-cache] handler prewarm error (anthropic):",
-            err instanceof Error ? err.message : String(err),
-          );
+        } catch {
+          console.warn("[hook-cache] handler prewarm failed protocol=anthropic");
           // Don't re-throw: the pipeline's resolveHookBlocks has its own
           // cache-miss → execute() fallback as a safety net (see pipeline.ts).
         }
@@ -878,8 +876,8 @@ export async function handleAnthropicMessages(
       if (sessionInfo && !sessionInfo.space_id && spaceId) {
         sessionInfo.space_id = spaceId;
       }
-    } catch (err: unknown) {
-      console.error("[session-init] Error in handleSessionInit (anthropic):", err instanceof Error ? err.message : String(err));
+    } catch {
+      console.error("[session-init] handleSessionInit failed protocol=anthropic");
       sessionInfo = undefined;
       injectedSkipped = true;
     }
@@ -953,8 +951,8 @@ export async function handleAnthropicMessages(
         const userMsg = { role: "user" as const, content: memCmd.rawMessage };
         try {
           await recordTdaiTurn(tdaiClientForMem, tdaiIdentityForMem, userMsg, memResult.messageText);
-        } catch (err: unknown) {
-          console.error("[mem-command] L0 write error:", err);
+        } catch {
+          console.error("[mem-command] L0 write failed");
         }
       }
 
@@ -978,8 +976,8 @@ export async function handleAnthropicMessages(
             protocol: "anthropic",
             assetCapabilities,
           });
-        } catch (err: unknown) {
-          console.warn("[mem-command] skill extract trigger error:", err instanceof Error ? err.message : String(err));
+        } catch {
+          console.warn("[mem-command] skill extract trigger failed");
         }
       }
 
@@ -1009,7 +1007,12 @@ export async function handleAnthropicMessages(
   const skipInjection = requestKind === "sidequery";
   if (!injectedSkipped && !skipInjection && config.injection?.enabled && config.injection.injectors.length > 0) {
     try {
-      console.log(`[injection-debug] entering injection pipeline session=<redacted> turnSeq=${countHumanTurns(messages, "anthropic")} injectors=${config.injection.injectors} kind=${requestKind}`);
+      console.log("[injection-debug] entering_pipeline", {
+        turnSeq: countHumanTurns(messages, "anthropic"),
+        injectorCount: config.injection.injectors.length,
+        main: requestKind === "main",
+        fork: requestKind === "fork",
+      });
       const injectionTurnSeq = countHumanTurns(messages, "anthropic");
       const { getInjectionPipeline } = await import("./injection/index.js");
       const pipeline = getInjectionPipeline(config);
@@ -1033,8 +1036,8 @@ export async function handleAnthropicMessages(
       body = injectedBody;
       messages = Array.isArray(injectedBody.messages) ? injectedBody.messages : messages;
       hasTools = Array.isArray(body.tools) && body.tools.length > 0;
-    } catch (err: unknown) {
-      console.error("[injection] anthropic pipeline error:", err instanceof Error ? err.message : String(err));
+    } catch {
+      console.error("[injection] anthropic pipeline failed");
     }
   } else if (skipInjection) {
     console.log("[injection-debug] skipping injection for kind=sidequery session=<redacted>");
