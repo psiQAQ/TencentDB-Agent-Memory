@@ -240,10 +240,12 @@ export function createMemoryBridgeHandler(
     const path = new URL(c.req.url).pathname;
     const sub = extractSubpath(path);
     if (!sub) {
-      return envelope(40401, `${TAG} unknown path ${path}`, 404);
+      console.warn(`${TAG} request rejected reason=unknown_path`);
+      return envelope(40401, `${TAG} unknown path`, 404);
     }
     if (!ALLOWED_SUBPATHS.has(sub)) {
-      return envelope(40301, `${TAG} subpath '${sub}' not allowed via bridge`, 403);
+      console.warn(`${TAG} request rejected reason=subpath_not_allowed`);
+      return envelope(40301, `${TAG} subpath not allowed via bridge`, 403);
     }
     if (c.req.method !== "POST") {
       return envelope(40501, `${TAG} method ${c.req.method} not allowed`, 405);
@@ -284,8 +286,9 @@ export function createMemoryBridgeHandler(
           return envelope(40001, `${TAG} body must be a JSON object`, 400);
         }
       }
-    } catch (err) {
-      return envelope(40001, `${TAG} invalid JSON body: ${(err as Error).message}`, 400);
+    } catch {
+      console.warn(`${TAG} request rejected reason=invalid_json`);
+      return envelope(40001, `${TAG} invalid JSON body`, 400);
     }
 
     // 强制注入 session IdFields — LLM 不能伪造身份。

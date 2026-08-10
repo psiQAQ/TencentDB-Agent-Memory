@@ -19,6 +19,7 @@ import {
 import { handleSystemUserPassthrough } from "../systemUserPassthrough.js";
 
 const PRIVATE_VALUE = "private-active-diagnostics-value";
+const PRIVATE_BODY_VALUE = "rawjsonx";
 const PRIVATE_REQUEST_ID = "reqpriv8";
 const TEST_USER_KEY = "abc";
 const TEST_USER_KEY_FINGERPRINT = "ba7816bf";
@@ -26,6 +27,7 @@ const TEST_USER_KEY_FINGERPRINT = "ba7816bf";
 function containsPrivateValue(value: unknown): boolean {
   const needles = [
     PRIVATE_VALUE,
+    PRIVATE_BODY_VALUE,
     PRIVATE_REQUEST_ID,
     TEST_USER_KEY_FINGERPRINT,
   ];
@@ -166,6 +168,60 @@ describe("active diagnostics privacy", () => {
     ])).toBe(false);
   });
 
+  it("returns fixed memory-bridge rejection envelopes and diagnostics", async () => {
+    const consoleWarn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const config = structuredClone(DEFAULT_CONFIG);
+    const store = getSessionStore();
+    await store.set("ses_safe", {
+      status: "initialized",
+      keyId: "key-safe",
+      startedAt: 0,
+      attemptCount: 0,
+      userId: "user-safe",
+      sessionInfo: {
+        session_id: "session-safe",
+        team_id: "team-safe",
+        agent_id: "agent-safe",
+        user_id: "user-safe",
+        space_id: "space-safe",
+      },
+    });
+    const handler = createMemoryBridgeHandler(config);
+    const app = new Hono();
+    app.all("/memory-bridge/*", (c) => handler(c));
+
+    const unknownPath = await app.request(
+      `http://proxy/memory-bridge/${PRIVATE_VALUE}`,
+      { method: "POST", headers: { "content-type": "application/json" }, body: "{}" },
+    );
+    const forbiddenSubpath = await app.request(
+      `http://proxy/memory-bridge/v3/${PRIVATE_VALUE}`,
+      { method: "POST", headers: { "content-type": "application/json" }, body: "{}" },
+    );
+    const invalidJson = await app.request(
+      "http://proxy/memory-bridge/v3/scenario/read",
+      {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-session-id": "ses_safe" },
+        body: PRIVATE_BODY_VALUE,
+      },
+    );
+    const responseBodies = await Promise.all([
+      unknownPath.json(),
+      forbiddenSubpath.json(),
+      invalidJson.json(),
+    ]);
+
+    expect([unknownPath.status, forbiddenSubpath.status, invalidJson.status]).toEqual([404, 403, 400]);
+    expect(containsPrivateValue(responseBodies)).toBe(false);
+    expect(containsPrivateValue(consoleWarn.mock.calls)).toBe(false);
+    expect(consoleWarn.mock.calls.map(([event]) => event)).toEqual([
+      "[memory-bridge] request rejected reason=unknown_path",
+      "[memory-bridge] request rejected reason=subpath_not_allowed",
+      "[memory-bridge] request rejected reason=invalid_json",
+    ]);
+  });
+
   it("keeps request debug metadata free of the raw model", () => {
     const debug = vi.spyOn(log, "debug").mockImplementation(() => {});
     const config = structuredClone(DEFAULT_CONFIG);
@@ -226,11 +282,22 @@ describe("active diagnostics privacy", () => {
     });
 
     expect(response.status).toBe(502);
+    const responseBody = await response.json();
+    expect(containsPrivateValue(responseBody)).toBe(false);
+    expect(responseBody).toEqual({
+      error: "Upstream request failed",
+      detail: "upstream_transport_error",
+    });
     expect(containsPrivateValue([
       ...info.mock.calls,
       ...warn.mock.calls,
       ...error.mock.calls,
     ])).toBe(false);
+    expect(error).toHaveBeenCalledWith("systemUser.forward_failed", {
+      systemUser: true,
+      timeout: false,
+      category: "transport_error",
+    });
   });
 
   it("keeps Claude session identity and prompt text out of console", async () => {

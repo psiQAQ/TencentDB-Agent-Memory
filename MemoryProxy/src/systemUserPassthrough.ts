@@ -522,14 +522,11 @@ export async function handleSystemUserPassthrough(
     }
     const endTime = new Date().toISOString();
     const isTimeout = err instanceof DOMException && err.name === "TimeoutError";
-    const message = isTimeout
-      ? `timeout after ${forwardTimeoutMs}ms`
-      : err instanceof Error
-        ? err.message
-        : String(err);
+    const failureCategory = isTimeout ? "timeout" : "transport_error";
+    const failureDetail = isTimeout ? "upstream_timeout" : "upstream_transport_error";
     log.error(
       "systemUser.forward_failed",
-      { systemUser: true, timeout: isTimeout },
+      { systemUser: true, timeout: isTimeout, category: failureCategory },
     );
 
     // Best-effort failure trace so aggregate dashboards see the outage.
@@ -537,12 +534,12 @@ export async function handleSystemUserPassthrough(
       config, match, path, upstreamUrl, modelId, startTime, endTime,
       stream: false, traceId,
       requestPayload,
-      responsePayload: { error: message },
+      responsePayload: { error: failureDetail },
       usage: null,
       status: 502,
     }).catch(() => { /* best-effort */ });
 
-    return c.json({ error: "Upstream request failed", detail: message }, 502);
+    return c.json({ error: "Upstream request failed", detail: failureDetail }, 502);
   }
 
   if (upstreamResp.status >= 300 && upstreamResp.status < 400) {

@@ -917,7 +917,7 @@ export async function handleAnthropicMessages(
           requestId: `mem-cmd-${Date.now()}`,
           thinking: thinkingEnabled,
         });
-        console.log(`[mem-command] cmd=${memCmd.command} session=<redacted> blocked: session not initialized`);
+        console.log("[mem-command] blocked session=<redacted> reason=session_not_initialized");
         return errResponse;
       }
       // 检测请求是否开启了 extended thinking（Anthropic 协议）
@@ -982,7 +982,7 @@ export async function handleAnthropicMessages(
       }
 
       // Step 18: observability
-      console.log(`[mem-command] cmd=${memCmd.command} session=<redacted> success=${memResult.success}`);
+      console.log(`[mem-command] completed session=<redacted> success=${memResult.success}`);
 
       return memResult.response;
     }

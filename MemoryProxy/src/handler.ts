@@ -788,7 +788,7 @@ export async function handleChatCompletions(
           stream: isStream,
           requestId: `mem-cmd-${Date.now()}`,
         });
-        console.log(`[mem-command] cmd=${memCmd.command} session=<redacted> blocked: session not initialized`);
+        console.log("[mem-command] blocked session=<redacted> reason=session_not_initialized");
         return errResponse;
       }
       const memResult = await executeMemCommand(memCmd, {
@@ -843,7 +843,7 @@ export async function handleChatCompletions(
         }
       }
 
-      console.log(`[mem-command] cmd=${memCmd.command} session=<redacted> success=${memResult.success}`);
+      console.log(`[mem-command] completed session=<redacted> success=${memResult.success}`);
 
       return memResult.response;
     }

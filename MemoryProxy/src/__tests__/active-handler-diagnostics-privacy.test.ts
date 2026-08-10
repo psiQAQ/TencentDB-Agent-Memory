@@ -7,7 +7,19 @@ import { createApp } from "../server.js";
 const PRIVATE_VALUE = "private-active-handler-value";
 
 function containsPrivateValue(value: unknown): boolean {
-  return JSON.stringify(value).includes(PRIVATE_VALUE);
+  const seen = new Set<object>();
+
+  const visit = (item: unknown): boolean => {
+    if (typeof item === "string") return item.includes(PRIVATE_VALUE);
+    if (item instanceof Error) {
+      return visit(item.message) || visit(item.stack);
+    }
+    if (!item || typeof item !== "object" || seen.has(item)) return false;
+    seen.add(item);
+    return Object.entries(item).some(([key, nested]) => visit(key) || visit(nested));
+  };
+
+  return visit(value);
 }
 
 afterEach(() => {
@@ -18,6 +30,46 @@ afterEach(() => {
 });
 
 describe("active handler diagnostics privacy", () => {
+  it.each([
+    ["claude-code", false],
+    ["opencode", true],
+  ])("keeps %s mem-command diagnostics private", async (agentSource, stream) => {
+    const consoleLog = vi.spyOn(console, "log").mockImplementation(() => {});
+    const config = structuredClone(DEFAULT_CONFIG);
+    config.memCommand = { enabled: true, allowedCommands: [] };
+    config.sessionInit.enabled = false;
+    config.injection.enabled = false;
+    config.extraction = { enabled: false, extractors: [] };
+    config.creditReport.url = "";
+    config.log.backend = "noop";
+    initAuth(config.auth);
+    const app = createApp(config);
+
+    const response = await app.request(`http://proxy/${agentSource}/space-1/v1/messages`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-api-key": "memory-user-key",
+        "x-session-id": "ses_safe",
+      },
+      body: JSON.stringify({
+        model: "test-model",
+        max_tokens: 16,
+        stream,
+        messages: [{
+          role: "user",
+          content: [{ type: "text", text: `mem:${PRIVATE_VALUE}\nunknown` }],
+        }],
+      }),
+    });
+
+    expect(response.status).toBe(200);
+    expect(containsPrivateValue(consoleLog.mock.calls)).toBe(false);
+    expect(consoleLog).toHaveBeenCalledWith(
+      "[mem-command] blocked session=<redacted> reason=session_not_initialized",
+    );
+  });
+
   it("keeps OpenAI request-tail diagnostics and outbound summaries private", async () => {
     const consoleLog = vi.spyOn(console, "log").mockImplementation(() => {});
     const consoleWarn = vi.spyOn(console, "warn").mockImplementation(() => {});
