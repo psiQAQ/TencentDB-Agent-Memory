@@ -318,11 +318,11 @@ async function forwardWithRetry(
       const msgsFullMd5 = createHash("md5").update(msgsFullStr).digest("hex").slice(0, 12);
       // eslint-disable-next-line no-console
       console.log(
-        `[outbound-md5] session=${sessionKeyForDebug ?? "?"} protocol=openai sysBytes=${sysStr.length} sysMd5=${sysMd5} msgsCount=${msgs.length} msgsFullBytes=${msgsFullStr.length} msgsFullMd5=${msgsFullMd5}`,
+        `[outbound-md5] session=<redacted> protocol=openai sysBytes=${sysStr.length} sysMd5=${sysMd5} msgsCount=${msgs.length} msgsFullBytes=${msgsFullStr.length} msgsFullMd5=${msgsFullMd5}`,
       );
     } catch (e) {
       // eslint-disable-next-line no-console
-      console.log(`[outbound-md5] session=${sessionKeyForDebug ?? "?"} <error: ${(e as Error).message}>`);
+      console.log(`[outbound-md5] session=<redacted> <error: ${(e as Error).message}>`);
     }
   }
 
@@ -569,7 +569,7 @@ export async function handleChatCompletions(
   let assetCapabilities: import("./injection/types.js").AssetCapabilityFlags | undefined;
   let injectedSkipped = !conversationId;
   let sessionJustRegistered = false;
-  console.log(`[injection-debug] conversationId=${conversationId} sessionKey=${sessionKey} userId=${userId} agentSource=${agentSource} sessionInitEnabled=${config.sessionInit?.enabled} injectionEnabled=${config.injection?.enabled} injectors=${JSON.stringify(config.injection?.injectors)} injectedSkipped=${injectedSkipped} spaceId=${spaceId}`);
+  console.log(`[injection-debug] agentSource=${agentSource} sessionInitEnabled=${config.sessionInit?.enabled} injectionEnabled=${config.injection?.enabled} injectors=${JSON.stringify(config.injection?.injectors)} injectedSkipped=${injectedSkipped}`);
   if (config.sessionInit?.enabled && conversationId) {
     try {
       const { getSessionStore, handleSessionInit, parsePresetIdentity } = await import("./session/index.js");
@@ -653,14 +653,14 @@ export async function handleChatCompletions(
         return initResult.response;
       }
 
-      console.log(`[injection-debug] initResult session=${sessionKey} intercepted=${initResult.intercepted} bypassed=${initResult.bypassed} justRegistered=${initResult.justRegistered} hasSessionInfo=${!!initResult.sessionInfo} hasAgentDetail=${!!initResult.agentDetail}`);
+      console.log(`[injection-debug] initResult session=<redacted> intercepted=${initResult.intercepted} bypassed=${initResult.bypassed} justRegistered=${initResult.justRegistered} hasSessionInfo=${!!initResult.sessionInfo} hasAgentDetail=${!!initResult.agentDetail}`);
       // 见 anthropicHandler 对称位置：只在真正走 sessionInit state machine 时继承。
       if (wentThroughSessionInitStateMachine && initResult.justRegistered) sessionJustRegistered = true;
 
       // Case 1.5: Bypass path → skip ALL injection hooks
       if (initResult.bypassed) {
         injectedSkipped = true;
-        console.log(`[session-init] session=${sessionKey} bypassed → skipping all injection`);
+        console.log("[session-init] session=<redacted> bypassed → skipping all injection");
       }
 
       if (!initResult.bypassed && initResult.sessionInfo) {
@@ -780,7 +780,7 @@ export async function handleChatCompletions(
           stream: isStream,
           requestId: `mem-cmd-${Date.now()}`,
         });
-        console.log(`[mem-command] cmd=${memCmd.command} session=${sessionKey} blocked: session not initialized`);
+        console.log(`[mem-command] cmd=${memCmd.command} session=<redacted> blocked: session not initialized`);
         return errResponse;
       }
       const memResult = await executeMemCommand(memCmd, {
@@ -835,7 +835,7 @@ export async function handleChatCompletions(
         }
       }
 
-      console.log(`[mem-command] cmd=${memCmd.command} session=${sessionKey} success=${memResult.success}`);
+      console.log(`[mem-command] cmd=${memCmd.command} session=<redacted> success=${memResult.success}`);
 
       return memResult.response;
     }

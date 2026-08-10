@@ -14,7 +14,7 @@
 import type { AgentAdapter } from "./types.js";
 import { claudeCodeAdapter } from "./claude-code.js";
 import { codebuddyAdapter } from "./codebuddy.js";
-import { defaultAdapter } from "./default.js";
+import { defaultAdapter, opencodeAdapter, piAdapter } from "./default.js";
 
 export type { AgentAdapter, AgentKind, RequestKind } from "./types.js";
 
@@ -22,6 +22,10 @@ export function resolveAgentAdapter(agentSource: string): AgentAdapter {
   switch (agentSource) {
     case "claude-code":
       return claudeCodeAdapter;
+    case "opencode":
+      return opencodeAdapter;
+    case "pi":
+      return piAdapter;
     case "codebuddy":
       return codebuddyAdapter;
     default:

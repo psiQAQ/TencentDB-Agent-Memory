@@ -10,6 +10,7 @@ import { createMemoryBridgeHandler } from "./memory/memory-bridge.js";
 import { createInstanceDestroyHandler } from "./routes/instance-destroy.js";
 import { createRateLimitHandlers } from "./routes/rate-limits.js";
 import { hasCostGuardMarker } from "./routes/whitelist.js";
+import { isAnthropicMessageSource } from "./agent-adapters/anthropic-platform.js";
 import { tryActivateStorage, tryActivateRedis } from "./injection/index.js";
 import { getEffectiveBackend } from "./storage/factory.js";
 import type { ProxyConfig } from "./types.js";
@@ -129,7 +130,7 @@ export function createApp(config: ProxyConfig): Hono {
 
   // ── Whitelisted primary endpoints ────────────────────────────────────────
   // Anthropic Messages API
-  app.post("/v1/messages", (c) => handleAnthropicMessages(c, config));
+  app.post("/v1/messages", (c) => handleAnthropicMessages(c, config, "claude-code"));
 
   // ── Whitelisted auxiliary endpoints (must precede catch-all) ─────────────
   // 这些端点走轻量透传 handler（不进入路由模块，不构成对话回合）。
@@ -158,7 +159,14 @@ export function createApp(config: ProxyConfig): Hono {
   // 详见 `hasCostGuardMarker`。
   // Hono 优先匹配更精确的路径，需注册在通用 `/:agent/:spaceId/v1/...` 之前。
   if (config.costGuard.markerOptIn) {
-    app.post("/:agent/:spaceId/cost-guard/v1/messages", (c) => handleAnthropicMessages(c, config));
+    app.post("/:agent/:spaceId/cost-guard/v1/messages", (c) => {
+      const source = c.req.param("agent");
+      return handleAnthropicMessages(
+        c,
+        config,
+        isAnthropicMessageSource(source) ? source : undefined,
+      );
+    });
     app.post("/:agent/:spaceId/cost-guard/v1/chat/completions", (c) => handleChatCompletions(c, config));
   }
 
@@ -172,10 +180,25 @@ export function createApp(config: ProxyConfig): Hono {
   // (OpenAI handler)，把 Anthropic body 打到 OpenAI 端点 → 上游 400。所以只要
   // markerOptIn=true 就必须显式注册这两条 anthropic/openai 5 段路由。
   if (config.injection?.assetReflection?.markerOptIn) {
-    app.post("/:agent/:spaceId/analyse/v1/messages", (c) => handleAnthropicMessages(c, config));
+    app.post("/:agent/:spaceId/analyse/v1/messages", (c) => {
+      const source = c.req.param("agent");
+      return handleAnthropicMessages(
+        c,
+        config,
+        isAnthropicMessageSource(source) ? source : undefined,
+      );
+    });
     app.post("/:agent/:spaceId/analyse/v1/chat/completions", (c) => handleChatCompletions(c, config));
   }
 
+  app.post("/claude-code/:spaceId/v1/messages", (c) =>
+    handleAnthropicMessages(c, config, "claude-code"));
+  app.post("/opencode/:spaceId/v1/messages", (c) =>
+    handleAnthropicMessages(c, config, "opencode"));
+  app.post("/pi/:spaceId/v1/messages", (c) =>
+    handleAnthropicMessages(c, config, "pi"));
+  // Keep the generic shape only as an explicit fail-closed guard for unknown
+  // Anthropic-style prefixes. It has no platform binding and cannot forward.
   app.post("/:agent/:spaceId/v1/messages", (c) => handleAnthropicMessages(c, config));
   app.post("/:agent/:spaceId/v1/messages/count_tokens", (c) => handleAuxiliaryEndpoint(c, config));
   app.post("/:agent/:spaceId/v1/embeddings", (c) => handleAuxiliaryEndpoint(c, config));
@@ -187,9 +210,9 @@ export function createApp(config: ProxyConfig): Hono {
   app.post("/:agent/v1/messages", (c) => handleAnthropicMessages(c, config));
   app.post("/:agent/v1/chat/completions", (c) => handleChatCompletions(c, config));
 
-  // Legacy /proxy/<spaceId>/ prefix — no agent info, defaults to codebuddy.
+  // Legacy /proxy/<spaceId>/ prefix — no agent info, defaults to Claude Code.
   // 保留以兼容不带 agent 前缀的客户端。
-  app.post("/proxy/:spaceId/v1/messages", (c) => handleAnthropicMessages(c, config));
+  app.post("/proxy/:spaceId/v1/messages", (c) => handleAnthropicMessages(c, config, "claude-code"));
   app.post("/proxy/:spaceId/v1/messages/count_tokens", (c) => handleAuxiliaryEndpoint(c, config));
   app.post("/proxy/:spaceId/v1/embeddings", (c) => handleAuxiliaryEndpoint(c, config));
   app.post("/proxy/:spaceId/v1/completions", (c) => handleAuxiliaryEndpoint(c, config));

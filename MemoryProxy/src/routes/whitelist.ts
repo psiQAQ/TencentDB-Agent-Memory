@@ -103,7 +103,7 @@ const PROXY_PREFIX_RE = /^\/proxy\/[^/]+/;
  * lookahead `(?=/v1/)` 确保白名单入口 `/v1/messages` 自身不会被误剥。
  * agent 段限定为已知名字，避免误伤路径中恰好有 "v1" 字面量的其它请求。
  */
-const AGENT_PREFIX_RE = /^\/(claude-code|codebuddy|cursor|anthropic|openai)(?:\/[^/]+)?(?=\/v1\/)/i;
+const AGENT_PREFIX_RE = /^\/(claude-code|opencode|pi|codebuddy|cursor|anthropic|openai)(?:\/[^/]+)?(?=\/v1\/)/i;
 
 /**
  * `/cost-guard` marker 正则：位于 `/{agent}/{spaceId}` 之后的独立 segment。

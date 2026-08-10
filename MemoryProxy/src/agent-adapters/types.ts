@@ -20,7 +20,7 @@
  * 只是**取用户输入的规则**和**分类规则**按 agent 适配。
  */
 
-export type AgentKind = "claude-code" | "codebuddy" | "unknown";
+export type AgentKind = "claude-code" | "opencode" | "pi" | "codebuddy" | "unknown";
 
 export type RequestKind = "main" | "fork" | "sidequery";
 

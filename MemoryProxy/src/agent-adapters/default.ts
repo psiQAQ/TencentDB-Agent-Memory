@@ -39,3 +39,7 @@ export const defaultAdapter: AgentAdapter = {
     return joinAllTextBlocks(content);
   },
 };
+
+/** OpenCode and Pi use the default Anthropic message semantics observed here. */
+export const opencodeAdapter: AgentAdapter = { ...defaultAdapter, agentKind: "opencode" };
+export const piAdapter: AgentAdapter = { ...defaultAdapter, agentKind: "pi" };

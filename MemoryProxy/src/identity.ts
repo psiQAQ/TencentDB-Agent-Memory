@@ -418,31 +418,16 @@ export function inspectAndRecord(
 
   // Also log to stderr for real-time visibility
   console.error(
-    `[identity] userId=${identity.userId ?? "?"} keyId=${identity.keyId} ` +
-    `sessionId=${identity.sessionId ?? "none"} ` +
-    `wechatId=${identity.wechatWorkId ?? "none"} ` +
-    `user=${identity.userInfo?.usernameFromPath ?? "?"} ` +
-    `ws=${identity.userInfo?.workspaceFolder ?? "?"} ` +
-    `proxyToken=${identity.proxyToken ? identity.proxyToken.slice(0, 12) + "***" : "none"}` +
+    `[identity] userId=${identity.userId ? "present" : "none"} keyId=${identity.keyId === "unknown" ? "none" : "present"} ` +
+    `sessionId=${identity.sessionId ? "present" : "none"} ` +
+    `wechatId=${identity.wechatWorkId ? "present" : "none"} ` +
+    `user=${identity.userInfo?.usernameFromPath ? "present" : "none"} ` +
+    `ws=${identity.userInfo?.workspaceFolder ? "present" : "none"} ` +
+    `proxyToken=${identity.proxyToken ? "present" : "none"}` +
     (Object.keys(identity.customHeaders).length > 0
       ? ` custom=[${Object.keys(identity.customHeaders).join(",")}]`
       : ""),
   );
-
-  // [DEBUG-CC-SESSION] 临时调试：打印 Claude Code SDK 注入的 session id 值，
-  // 用于验证「同一次 claude 启动多次请求同 id / 不同启动不同 id」。验证完即移除。
-  {
-    const ccSid =
-      identity.customHeaders["x-claude-code-session-id"] ??
-      identity.customHeaders["X-Claude-Code-Session-Id"];
-    const xApp =
-      identity.customHeaders["x-app"] ?? identity.customHeaders["X-App"];
-    if (ccSid || xApp) {
-      console.error(
-        `[debug-cc] x-claude-code-session-id=${ccSid ?? "none"} x-app=${xApp ?? "none"}`,
-      );
-    }
-  }
 
   return identity;
 }
