@@ -6,6 +6,7 @@ import { handleAnthropicMessages } from "../anthropicHandler.js";
 import { initAuth } from "../auth.js";
 import { DEFAULT_CONFIG } from "../config.js";
 import { createApp } from "../server.js";
+import { _resetSystemUsersForTest, initSystemUsers } from "../systemUser.js";
 import type { ProxyConfig } from "../types.js";
 
 const SOURCES = ["claude-code", "opencode", "pi"] as const;
@@ -77,6 +78,7 @@ describe("native Anthropic platform routes", () => {
 
   afterEach(() => {
     initAuth(DEFAULT_CONFIG.auth);
+    _resetSystemUsersForTest();
     vi.unstubAllGlobals();
     vi.restoreAllMocks();
   });
@@ -157,6 +159,112 @@ describe("native Anthropic platform routes", () => {
     expect(headers?.get("anthropic-version")).toBe("2023-06-01");
     expect(headers?.get("anthropic-beta")).toBe("safe-feature");
     expect(headers?.get("accept")).toBe("application/json");
+  });
+
+  it("falls back to the global server key for a URL-only agent override", async () => {
+    const config = configWithAuth();
+    config.upstream.apiKey = "global-server-key";
+    config.upstream.agents.opencode = { url: "https://opencode.upstream.invalid/anthropic/v1" };
+    initAuth(config.auth);
+    const app = createApp(config);
+
+    const response = await app.request(
+      "http://proxy/opencode/space-1/v1/messages",
+      messagesRequest("ses_global_fallback"),
+    );
+
+    expect(response.status).toBe(200);
+    expect(upstreamHeaders).toHaveLength(1);
+    expect(upstreamHeaders[0]?.get("x-api-key")).toBe("global-server-key");
+  });
+
+  it("rejects before upstream fetch when no server key is configured", async () => {
+    const config = configWithAuth();
+    config.upstream.apiKey = "";
+    config.upstream.agents.pi = { url: "https://pi.upstream.invalid/anthropic/v1" };
+    initAuth(config.auth);
+    const app = createApp(config);
+
+    const response = await app.request(
+      "http://proxy/pi/space-1/v1/messages",
+      messagesRequest("ses_missing_server_key"),
+    );
+
+    expect(response.status).toBe(503);
+    expect(calls).toEqual(["https://memory-core.invalid/v3/meta/auth/verify"]);
+    expect(upstreamHeaders).toHaveLength(0);
+  });
+
+  it("replaces a system user's caller credential with the global server key", async () => {
+    const config = configWithAuth();
+    config.upstream.apiKey = "global-system-key";
+    initAuth(config.auth);
+    initSystemUsers([{ name: "memory", userId: "user-1", displayName: "Memory" }]);
+    const app = createApp(config);
+
+    const response = await app.request("http://proxy/claude-code/space-1/v1/messages", {
+      ...messagesRequest("system_user_session"),
+      headers: {
+        "content-type": "application/json",
+        "anthropic-version": "2023-06-01",
+        authorization: "Bearer private-system-caller",
+        "x-api-key": "private-system-memory-key",
+        "x-session-id": "system_user_session",
+        "x-team-id": "private-system-team",
+      },
+    });
+
+    const headers = upstreamHeaders[0];
+    const hasPrivateValue = [...(headers?.values() ?? [])]
+      .some((value) => value.startsWith("private-"));
+    expect(response.status).toBe(200);
+    expect(upstreamHeaders).toHaveLength(1);
+    expect(hasPrivateValue).toBe(false);
+    expect(headers?.get("x-api-key")).toBe("global-system-key");
+    expect(headers?.has("authorization")).toBe(false);
+    expect(headers?.has("x-team-id")).toBe(false);
+  });
+
+  it.each([
+    ["stream", { stream: true }],
+    ["tool", { tools: [{ name: "safe-tool", description: "safe description" }] }],
+  ])("uses the same safe header builder for a %s request", async (_label, extraBody) => {
+    const config = configWithAuth();
+    initAuth(config.auth);
+    const app = createApp(config);
+    const base = JSON.parse(String(messagesRequest("ses_variant").body)) as Record<string, unknown>;
+
+    const response = await app.request("http://proxy/claude-code/space-1/v1/messages", {
+      ...messagesRequest("ses_variant"),
+      body: JSON.stringify({ ...base, ...extraBody }),
+    });
+
+    const headers = upstreamHeaders[0];
+    expect(response.status).toBe(200);
+    expect(headers?.get("x-api-key")).toBe("server-key");
+    expect(headers?.has("x-session-id")).toBe(false);
+  });
+
+  it("uses the same safe header builder when upstream returns an error", async () => {
+    const config = configWithAuth();
+    initAuth(config.auth);
+    const app = createApp(config);
+    vi.mocked(fetch).mockImplementationOnce(async () => Response.json({
+      code: 0,
+      data: { valid: true, user: { user_id: "user-1" } },
+    })).mockImplementationOnce(async (_input, init) => {
+      upstreamHeaders.push(new Headers(init?.headers));
+      return Response.json({ type: "error" }, { status: 401 });
+    });
+
+    const response = await app.request(
+      "http://proxy/claude-code/space-1/v1/messages",
+      messagesRequest("ses_error"),
+    );
+
+    expect(response.status).toBe(401);
+    expect(upstreamHeaders[0]?.get("x-api-key")).toBe("server-key");
+    expect(upstreamHeaders[0]?.has("x-session-id")).toBe(false);
   });
 
   it("rejects an unknown Anthropic-style prefix before auth or upstream", async () => {

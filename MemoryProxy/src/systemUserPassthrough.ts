@@ -65,7 +65,10 @@ import {
   isRateLimitExceededError,
   recordInputTokenUsage,
 } from "./rate-limit/guard.js";
-import { buildSafeUpstreamHeaders } from "./upstream-headers.js";
+import {
+  buildSafeUpstreamHeaders,
+  MissingUpstreamCredentialError,
+} from "./upstream-headers.js";
 
 /** Response headers that would confuse the client if forwarded verbatim. */
 const SKIP_RESPONSE_HEADERS = new Set([
@@ -492,7 +495,15 @@ export async function handleSystemUserPassthrough(
     modelId,
   });
 
-  const headers = buildPassthroughHeaders(c, config);
+  let headers: Record<string, string>;
+  try {
+    headers = buildPassthroughHeaders(c, config);
+  } catch (err: unknown) {
+    if (err instanceof MissingUpstreamCredentialError) {
+      return c.json({ error: err.message }, 503);
+    }
+    throw err;
+  }
   const forwardTimeoutMs = config.server.forwardTimeoutMs ?? 600_000;
 
   let upstreamResp: Response;

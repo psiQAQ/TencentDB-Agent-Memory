@@ -10,6 +10,13 @@ export interface UpstreamHeaderOptions {
   authHeaders?: Record<string, string> | null;
 }
 
+export class MissingUpstreamCredentialError extends Error {
+  constructor() {
+    super("Server upstream credentials are not configured");
+    this.name = "MissingUpstreamCredentialError";
+  }
+}
+
 function safeProtocolValue(name: string, value: string): boolean {
   if (name === "accept") {
     return value === "application/json" || value === "text/event-stream";
@@ -31,19 +38,28 @@ export function buildSafeUpstreamHeaders(
     }
   }
 
-  const explicit = new Headers(options.authHeaders ?? undefined);
-  const explicitApiKey = explicit.get("x-api-key");
-  const explicitAuthorization = explicit.get("authorization");
+  let explicitApiKey = "";
+  let explicitAuthorization = "";
+  for (const [rawName, rawValue] of Object.entries(options.authHeaders ?? {})) {
+    const name = rawName.toLowerCase();
+    const value = typeof rawValue === "string" ? rawValue.trim() : "";
+    if (name === "x-api-key" && value) explicitApiKey = value;
+    if (name === "authorization" && /^Bearer\s+\S+$/i.test(value)) {
+      explicitAuthorization = value;
+    }
+  }
   if (explicitApiKey) {
     headers["x-api-key"] = explicitApiKey;
   } else if (explicitAuthorization) {
     headers.authorization = explicitAuthorization;
-  } else if (options.apiKey) {
+  } else if (options.apiKey?.trim()) {
     if (options.protocol === "anthropic") {
-      headers["x-api-key"] = options.apiKey;
+      headers["x-api-key"] = options.apiKey.trim();
     } else {
-      headers.authorization = `Bearer ${options.apiKey}`;
+      headers.authorization = `Bearer ${options.apiKey.trim()}`;
     }
+  } else {
+    throw new MissingUpstreamCredentialError();
   }
   return headers;
 }

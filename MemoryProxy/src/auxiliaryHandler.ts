@@ -34,7 +34,10 @@ import {
   getAnthropicSourceBindingError,
   type AnthropicMessageSource,
 } from "./agent-adapters/anthropic-platform.js";
-import { buildSafeUpstreamHeaders } from "./upstream-headers.js";
+import {
+  buildSafeUpstreamHeaders,
+  MissingUpstreamCredentialError,
+} from "./upstream-headers.js";
 
 /** 响应头中不应回传给客户端的头（避免 stream 长度不一致等问题）。 */
 const SKIP_RESPONSE_HEADERS = new Set([
@@ -48,7 +51,7 @@ const SKIP_RESPONSE_HEADERS = new Set([
  * 构造转发到上游的请求头。
  *
  * 与主 handler 的差异：辅助端点不涉及路由的 auth override，只需按端点
- * 协议注入 `upstream.apiKey`：
+ * 协议注入服务端 per-agent key（未配置时回退 `upstream.apiKey`）：
  *  - `anthropic` → `x-api-key`（同时清除 `authorization`）
  *  - `openai`    → `Authorization: Bearer`
  */
@@ -209,11 +212,19 @@ export async function handleAuxiliaryEndpoint(
     ? config.upstream.agents?.[boundAgentSource]
     : undefined;
   const upstreamBaseUrl = agentUpstream?.url ?? config.upstream.url;
-  const upstreamApiKey = agentUpstream ? (agentUpstream.apiKey ?? "") : config.upstream.apiKey;
+  const upstreamApiKey = agentUpstream?.apiKey?.trim() || config.upstream.apiKey.trim();
   const upstreamUrl = joinUrl(upstreamBaseUrl, c.req.path);
 
   // 4. 构造上游请求头（按端点协议注入鉴权）
-  const upstreamHeaders = buildAuxUpstreamHeaders(c, upstreamApiKey, entry);
+  let upstreamHeaders: Record<string, string>;
+  try {
+    upstreamHeaders = buildAuxUpstreamHeaders(c, upstreamApiKey, entry);
+  } catch (err: unknown) {
+    if (err instanceof MissingUpstreamCredentialError) {
+      return c.json({ error: err.message }, 503);
+    }
+    throw err;
+  }
 
   // 5. Pipeline log（简化：只发关键事件）
   const pipe = createPipeline(config, traceId, modelId);

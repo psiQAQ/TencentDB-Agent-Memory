@@ -331,20 +331,19 @@ export interface SkillRuntimeConfig {
  * prefix like "claude-code") needs a different upstream than the global
  * default, this struct provides the replacement `url` (and optional `apiKey`).
  *
- * Fallback semantics — three cases, matching the runtime `effectiveApiKey`
- * resolution in `handler.ts` / `anthropicHandler.ts`:
+ * Anthropic fallback semantics — caller credentials terminate at MemoryProxy
+ * and are never forwarded upstream:
  *
  *   ┌──────────────────────────────┬────────────┬──────────────────────────┐
  *   │ agent config                 │ url used   │ apiKey used              │
  *   ├──────────────────────────────┼────────────┼──────────────────────────┤
  *   │ NOT in agents map            │ upstream.url│ upstream.apiKey (global)│
- *   │ in map, url only, no apiKey  │ agent.url  │ passthrough client key  │
+ *   │ in map, url only, no apiKey  │ agent.url  │ upstream.apiKey (global)│
  *   │ in map, url + apiKey         │ agent.url  │ agent.apiKey            │
  *   └──────────────────────────────┴────────────┴──────────────────────────┘
  *
- * The presence of an entry cuts the global `upstream.apiKey` fallback —
- * this is intentional so an operator can run some agents on a server-side
- * key and others on the client's own key from a single proxy config.
+ * If neither the selected agent entry nor the global config has a server key,
+ * Anthropic forwarding rejects the request before any upstream fetch.
  *
  * Priority order (high → low):
  *   1. `costGuard`-provided `target.authHeaders`（cheap-model 兜底路由自带凭据）
@@ -363,9 +362,8 @@ export interface AgentUpstreamEntry {
    * Per-agent apiKey. When set (non-empty):
    *   - OpenAI: `Authorization: Bearer <apiKey>` is injected
    *   - Anthropic: `x-api-key: <apiKey>` is injected
-   * When absent / empty: the client's own auth header is passed through
-   * upstream untouched. This does NOT fall back to `upstream.apiKey` —
-   * that fallback only applies when this agent has no entry at all.
+   * When absent / empty on an Anthropic route, `upstream.apiKey` is used.
+   * If that is also empty, the request fails closed before upstream fetch.
    */
   apiKey?: string;
 }

@@ -12,6 +12,7 @@ vi.mock("../guard-adapter.js", async (importOriginal) => {
       retryTarget: {
         url: "https://retry.invalid/messages",
         model: "retry-model",
+        authHeaders: { "x-api-key": "server-retry-key" },
       },
       turnSeq: 0,
     })),
@@ -24,14 +25,17 @@ import { createApp } from "../server.js";
 
 describe("Anthropic retry header privacy", () => {
   let upstreamHeaders: Headers[];
+  let upstreamUrls: string[];
 
   beforeEach(() => {
     upstreamHeaders = [];
+    upstreamUrls = [];
     vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
       const url = input instanceof Request ? input.url : String(input);
       if (url.endsWith("/v3/meta/auth/verify")) {
         return Response.json({ code: 0, data: { valid: true, user: { user_id: "user-1" } } });
       }
+      upstreamUrls.push(url);
       upstreamHeaders.push(new Headers(init?.headers));
       return Response.json(
         { id: "msg-test", type: "message", role: "assistant", content: [], model: "test" },
@@ -93,9 +97,14 @@ describe("Anthropic retry header privacy", () => {
 
     expect(response.status).toBe(200);
     expect(upstreamHeaders).toHaveLength(2);
+    expect(upstreamUrls).toEqual([
+      "https://primary.invalid/messages",
+      "https://retry.invalid/messages",
+    ]);
+    expect(upstreamHeaders[0]?.get("x-api-key")).toBe("server-primary-key");
     expect(hasPrivateHeader).toBe(false);
     expect(hasPrivateValue).toBe(false);
-    expect(retryHeaders?.get("x-api-key")).toBe("server-primary-key");
+    expect(retryHeaders?.get("x-api-key")).toBe("server-retry-key");
     expect(retryHeaders?.get("anthropic-version")).toBe("2023-06-01");
     expect(retryHeaders?.get("anthropic-beta")).toBe("safe-feature");
     expect(retryHeaders?.get("accept")).toBe("application/json");

@@ -134,6 +134,39 @@ describe("route-bound Anthropic count_tokens", () => {
     expect(headers.get("accept")).toBe("application/json");
   });
 
+  it("falls back to the global server key for a URL-only agent override", async () => {
+    const config = configWithAuth();
+    config.upstream.agents.opencode = { url: "https://opencode.upstream.invalid/anthropic/v1" };
+    initAuth(config.auth);
+    const app = createApp(config);
+
+    const response = await app.request(
+      "http://proxy/opencode/space-1/v1/messages/count_tokens",
+      request(),
+    );
+
+    expect(response.status).toBe(200);
+    expect(calls[1]?.headers.get("x-api-key")).toBe("global-key");
+  });
+
+  it("rejects count_tokens before upstream fetch when no server key is configured", async () => {
+    const config = configWithAuth();
+    config.upstream.apiKey = "";
+    config.upstream.agents.pi = { url: "https://pi.upstream.invalid/anthropic/v1" };
+    initAuth(config.auth);
+    const app = createApp(config);
+
+    const response = await app.request(
+      "http://proxy/pi/space-1/v1/messages/count_tokens",
+      request(),
+    );
+
+    expect(response.status).toBe(503);
+    expect(calls.map((call) => call.url)).toEqual([
+      "https://auth.invalid/v3/meta/auth/verify",
+    ]);
+  });
+
   it("rejects an unknown source before auth, body, upstream, or credit", async () => {
     const config = configWithAuth();
     initAuth(config.auth);

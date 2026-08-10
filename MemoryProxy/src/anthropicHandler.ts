@@ -59,7 +59,10 @@ import {
   isRateLimitExceededError,
   recordInputTokenUsage,
 } from "./rate-limit/guard.js";
-import { buildSafeUpstreamHeaders } from "./upstream-headers.js";
+import {
+  buildSafeUpstreamHeaders,
+  MissingUpstreamCredentialError,
+} from "./upstream-headers.js";
 
 const SKIP_RESPONSE_HEADERS = new Set([
   "content-encoding",
@@ -341,6 +344,7 @@ function buildUpstreamHeaders(
 async function forwardWithRetry(
   target: ForwardTarget,
   upstreamHeaders: Record<string, string>,
+  retryHeaders: Record<string, string> | null,
   upstreamBody: Record<string, unknown>,
   originalBody: Record<string, unknown>,
   pipe: ReturnType<typeof createPipeline>,
@@ -437,8 +441,6 @@ async function forwardWithRetry(
     const reason = forwardFailed ? "timeout/error" : `${upstreamResp!.status}`;
     pipe.info("RETRY", `Routed model failed (${reason}), retrying with ${target.retryTarget.model}`);
 
-    const retryHeaders: Record<string, string> = { ...upstreamHeaders };
-
     try {
       if (rateLimitContext) {
         await enforceRateLimit({
@@ -450,7 +452,7 @@ async function forwardWithRetry(
       }
       upstreamResp = await fetch(target.retryTarget.url, {
         method: "POST",
-        headers: retryHeaders,
+        headers: retryHeaders!,
         body: JSON.stringify(originalBody),
         signal: AbortSignal.timeout(forwardTimeoutMs),
       });
@@ -1106,17 +1108,33 @@ export async function handleAnthropicMessages(
   writeRequestLog(config, body);
 
   // ── Build upstream request ───────────────────────────────────────────────
-  // Per-agent apiKey resolution — three cases:
-  //   (a) no entry in agents map           → global upstream.apiKey (兜底)
-  //   (b) entry present, apiKey empty      → "" (passthrough, keep client key)
-  //   (c) entry present, apiKey non-empty  → agent.apiKey (server-side key)
-  // The presence of an entry (case b/c) is what cuts the global fallback —
-  // this is the switch that lets one proxy serve mixed server-key / client-key
-  // agents from a single config.
-  const effectiveApiKey = agentUpstreamEntry
-    ? (agentUpstreamEntry.apiKey ?? "")
-    : config.upstream.apiKey;
-  const upstreamHeaders = buildUpstreamHeaders(c, target, effectiveApiKey);
+  // A per-agent server key takes priority; URL-only entries fall back to the
+  // global server key. Caller credentials authenticate to MemoryProxy and are
+  // never valid upstream credentials.
+  const effectiveApiKey = agentUpstreamEntry?.apiKey?.trim() || config.upstream.apiKey.trim();
+  let upstreamHeaders: Record<string, string>;
+  let retryHeaders: Record<string, string> | null;
+  try {
+    upstreamHeaders = buildUpstreamHeaders(c, target, effectiveApiKey);
+    retryHeaders = target.retryTarget
+      ? buildSafeUpstreamHeaders(c.req.raw.headers, {
+          protocol: "anthropic",
+          apiKey: effectiveApiKey,
+          authHeaders: target.retryTarget.authHeaders,
+        })
+      : null;
+  } catch (err: unknown) {
+    if (err instanceof MissingUpstreamCredentialError) {
+      return c.json(
+        {
+          type: "error",
+          error: { type: "api_error", message: err.message },
+        },
+        503,
+      );
+    }
+    throw err;
+  }
   const { body: upstreamBody, sanitizedCount } = buildUpstreamBody(body, target);
   if (sanitizedCount > 0) {
     pipe.info(
@@ -1135,7 +1153,7 @@ export async function handleAnthropicMessages(
 
   try {
     const result = await forwardWithRetry(
-      target, upstreamHeaders, upstreamBody,
+      target, upstreamHeaders, retryHeaders, upstreamBody,
       retryBody,
       pipe, forwardTimeoutMs,
       { config, instanceId: spaceId || undefined },
