@@ -1579,6 +1579,152 @@ describe("session cache identity isolation", () => {
     });
   });
 
+  it("rejects a recovery whose L2 read is overtaken by a pending delete replacement", async () => {
+    let signalReadStarted!: () => void;
+    let releaseRead!: () => void;
+    let signalDeleteStarted!: () => void;
+    let releaseDelete!: () => void;
+    let releaseReplacement!: (value: boolean) => void;
+    const readStarted = new Promise<void>((resolve) => { signalReadStarted = resolve; });
+    const readReleased = new Promise<void>((resolve) => { releaseRead = resolve; });
+    const deleteStarted = new Promise<void>((resolve) => { signalDeleteStarted = resolve; });
+    const deleteReleased = new Promise<void>((resolve) => { releaseDelete = resolve; });
+    const identity = victimIdentity();
+    const key = sessionStoreKey(identity);
+    const repo: SessionRepo = {
+      upsert: vi.fn(async () => new Promise<boolean>((resolve) => {
+        releaseReplacement = resolve;
+      })),
+      getBySessionId: vi.fn(async () => {
+        signalReadStarted();
+        await readReleased;
+        return victimState();
+      }),
+      deleteBySessionId: vi.fn(async () => {
+        signalDeleteStarted();
+        await deleteReleased;
+        return true;
+      }),
+      loadAllInitialized: async () => [],
+    };
+    const store = new SessionStore(30 * 60 * 1_000, repo);
+    store.bind(key, identity);
+
+    const recovery = store.getOrRecover(key, identity, {});
+    await readStarted;
+    store.delete(key);
+    await deleteStarted;
+    const replacement = store.set(key, victimState());
+    releaseRead();
+    releaseDelete();
+
+    await expect(recovery)
+      .rejects.toMatchObject({ name: "SessionIdentityConflictError" });
+    releaseReplacement(true);
+    await expect(replacement).resolves.toBeUndefined();
+  });
+
+  it.each([
+    ["l2a", "false"],
+    ["l2a", "throw"],
+    ["l2b", "false"],
+    ["l2b", "throw"],
+  ] as const)(
+    "retains a tombstone when an active %s delete and its replacement write %s",
+    async (failingLayer, failureKind) => {
+      let signalDeleteStarted!: () => void;
+      let releaseDelete!: () => void;
+      const deleteStarted = new Promise<void>((resolve) => { signalDeleteStarted = resolve; });
+      const deleteReleased = new Promise<void>((resolve) => { releaseDelete = resolve; });
+      const identity = victimIdentity();
+      const key = sessionStoreKey(identity);
+      let replacementPhase = false;
+      const durable: {
+        state: SessionInitState | null;
+        binding: SessionBinding | null;
+      } = { state: null, binding: null };
+      const failReplacement = (): boolean => {
+        if (failureKind === "throw") throw new Error("replacement-write-detail");
+        return false;
+      };
+      const upsert = vi.fn(async (_space, _user, _source, _session, state) => {
+        if (replacementPhase && failingLayer === "l2a") return failReplacement();
+        durable.state = structuredClone(state);
+        return true;
+      });
+      const putBinding = vi.fn(async (_space, _user, _source, _session, binding) => {
+        if (replacementPhase && failingLayer === "l2b") return failReplacement();
+        durable.binding = structuredClone(binding);
+        return true;
+      });
+      const repo: SessionRepo = {
+        upsert,
+        getBySessionId: vi.fn(async () => structuredClone(durable.state)),
+        deleteBySessionId: vi.fn(async () => {
+          if (failingLayer === "l2a") {
+            signalDeleteStarted();
+            await deleteReleased;
+            return false;
+          }
+          durable.state = null;
+          return true;
+        }),
+        loadAllInitialized: async () => [],
+      };
+      const touchLastSeen = vi.fn(async () => undefined);
+      const bindingRepo: BindingRepo = {
+        getBinding: vi.fn(async () => structuredClone(durable.binding)),
+        putBinding,
+        deleteBinding: vi.fn(async () => {
+          if (failingLayer === "l2b") {
+            signalDeleteStarted();
+            await deleteReleased;
+            return false;
+          }
+          durable.binding = null;
+          return true;
+        }),
+        touchLastSeen,
+      };
+      const getAgent = vi.fn();
+      const getTask = vi.fn();
+      const store = new SessionStore(30 * 60 * 1_000, repo, bindingRepo);
+      store.bind(key, identity);
+      await store.set(key, victimState());
+
+      store.delete(key);
+      await deleteStarted;
+      replacementPhase = true;
+      const replacement = {
+        ...victimState(),
+        agentDetail: {
+          id: VICTIM.agentId,
+          name: "Replacement",
+          description: "active-delete-replacement",
+        },
+      };
+      const write = store.set(key, replacement);
+      const writeResult = expect(write)
+        .rejects.toMatchObject({ name: "SessionIdentityConflictError" });
+      releaseDelete();
+      await writeResult;
+
+      await expect(store.getOrRecover(key, identity, {
+        metadataClient: { getAgent, getTask } as never,
+      })).rejects.toMatchObject({ name: "SessionIdentityConflictError" });
+      expect(store.get(key)).toBeUndefined();
+      if (failingLayer === "l2a") {
+        expect(durable.state?.agentDetail?.description).not.toBe("active-delete-replacement");
+      } else {
+        expect(durable.state?.agentDetail?.description).toBe("active-delete-replacement");
+      }
+      expect(durable.binding?.agentId).not.toBeUndefined();
+      expect(touchLastSeen).not.toHaveBeenCalled();
+      expect(getAgent).not.toHaveBeenCalled();
+      expect(getTask).not.toHaveBeenCalled();
+    },
+  );
+
   it("promotes a successful durable set to a persisted raw owner", async () => {
     const firstIdentity = victimIdentity();
     const secondIdentity: FullSessionIdentity = {

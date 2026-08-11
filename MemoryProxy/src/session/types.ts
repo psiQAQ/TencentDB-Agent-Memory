@@ -194,8 +194,8 @@ function isPersistedCachedTeams(value: unknown): boolean {
   });
 }
 
-/** Relaxed parser used only for an identity-owned pre-v2 legacy row. */
-export function isLegacyPersistedSessionInitState(
+/** Shallow ownership proof used only to bound deletion of a pre-v2 row. */
+export function isLegacyPersistedSessionOwnershipProof(
   value: unknown,
 ): value is SessionInitState {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
@@ -214,6 +214,18 @@ export function isLegacyPersistedSessionInitState(
       || (typeof state.sessionInfo === "object" && !Array.isArray(state.sessionInfo)))
     && (state.bypassed === undefined || typeof state.bypassed === "boolean")
     && (state.contextSuppressed === undefined || typeof state.contextSuppressed === "boolean");
+}
+
+const persistedSessionMigrations = new WeakSet<SessionInitState>();
+
+function markPersistedSessionMigration(state: SessionInitState): SessionInitState {
+  persistedSessionMigrations.add(state);
+  return state;
+}
+
+/** Non-persisted provenance consumed by SessionStore for a lazy safe rewrite. */
+export function persistedSessionNeedsMigration(state: SessionInitState): boolean {
+  return persistedSessionMigrations.has(state);
 }
 
 /** Strict runtime boundary for canonical v2 state before identity checks. */
@@ -283,9 +295,11 @@ export function normalizePersistedSessionInitState(
   ) {
     const { user_key: _credential, ...safeSessionInfo } = value.sessionInfo;
     const safeState = { ...value, sessionInfo: safeSessionInfo };
-    if (isPersistedSessionInitState(safeState)) return safeState;
+    if (isPersistedSessionInitState(safeState)) {
+      return markPersistedSessionMigration(safeState);
+    }
   }
-  if (!isLegacyPersistedSessionInitState(value)) return null;
+  if (!isLegacyPersistedSessionOwnershipProof(value)) return null;
   const state = value as SessionInitState;
   if (
     state.status !== "initialized"
@@ -310,7 +324,7 @@ export function normalizePersistedSessionInitState(
       && (!isPersistedIdentityClaimPending(state.identityClaimPending)
         || !isPersistedIdentityClaim(state.identityClaim)))
   ) return null;
-  return {
+  return markPersistedSessionMigration({
     ...state,
     startedAt: typeof state.startedAt === "number" && Number.isFinite(state.startedAt)
       ? state.startedAt
@@ -323,7 +337,7 @@ export function normalizePersistedSessionInitState(
     sessionInfo: null,
     agentDetail: null,
     taskDetail: null,
-  };
+  });
 }
 
 /**

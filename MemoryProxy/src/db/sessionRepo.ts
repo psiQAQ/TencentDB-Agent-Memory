@@ -25,7 +25,7 @@ import type Database from "better-sqlite3";
 
 import { getDb } from "./index.js";
 import {
-  isLegacyPersistedSessionInitState,
+  isLegacyPersistedSessionOwnershipProof,
   isPersistedSessionInitState,
   normalizePersistedSessionInitState,
   type SessionInitState,
@@ -103,14 +103,9 @@ function rowFromState(
 
 function parseState(
   s: string | null | undefined,
-  legacy = false,
 ): SessionInitState {
   try {
     const parsed = JSON.parse(s ?? "") as unknown;
-    if (legacy) {
-      if (!isLegacyPersistedSessionInitState(parsed)) throw new SessionRepoReadError();
-      return parsed;
-    }
     const normalized = normalizePersistedSessionInitState(parsed);
     if (!normalized) throw new SessionRepoReadError();
     return normalized;
@@ -119,10 +114,21 @@ function parseState(
   }
 }
 
-function rowToState(row: PersistedSessionRow, legacy = false): SessionInitState {
-  const state = parseState(row.state_json, legacy);
+function rowToState(row: PersistedSessionRow): SessionInitState {
+  const state = parseState(row.state_json);
   if (row.status !== state.status) throw new SessionRepoReadError();
   return state;
+}
+
+function rowToLegacyOwnershipProof(row: PersistedSessionRow): SessionInitState {
+  try {
+    const parsed = JSON.parse(row.state_json ?? "") as unknown;
+    if (!isLegacyPersistedSessionOwnershipProof(parsed)) throw new SessionRepoReadError();
+    if (row.status !== parsed.status) throw new SessionRepoReadError();
+    return parsed;
+  } catch {
+    throw new SessionRepoReadError();
+  }
 }
 
 function identityOf(
@@ -266,7 +272,7 @@ class SqliteSessionRepo implements SessionRepo {
       );
       if (!legacyId) return null;
       const legacyRow = select.get(legacyId) as PersistedSessionRow | undefined;
-      const legacyState = legacyRow ? rowToState(legacyRow, true) : null;
+      const legacyState = legacyRow ? rowToState(legacyRow) : null;
       if (
         !legacyRow
         || legacyRow.session_key !== sessionId
@@ -298,7 +304,7 @@ class SqliteSessionRepo implements SessionRepo {
       );
       if (!legacyId) return true;
       const legacyRow = select.get(legacyId) as PersistedSessionRow | undefined;
-      const legacyState = legacyRow ? rowToState(legacyRow, true) : null;
+      const legacyState = legacyRow ? rowToLegacyOwnershipProof(legacyRow) : null;
       if (
         legacyRow?.session_key === sessionId
         && legacyState

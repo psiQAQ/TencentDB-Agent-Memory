@@ -22,7 +22,13 @@ import {
   __resetSessionRepoForTests,
   getSessionRepo,
   sessionRowId,
+  type SessionRepo,
 } from "../sessionRepo.js";
+import {
+  SessionStore,
+  sessionStoreKey,
+  type SessionIdentity,
+} from "../../session/store.js";
 import type { SessionInitState } from "../../session/types.js";
 import { MemoryStorage } from "../../storage/memory-storage.js";
 
@@ -475,6 +481,44 @@ describe("collision-safe persisted session identity keys", () => {
     expect(await sessions.getBySessionId(...literalDefault)).toBeNull();
   });
 
+  it("rejects malformed nested context from unambiguous pre-v2 session rows", async () => {
+    const identity = ["space", "user", "claude-code", "legacy-malformed"] as const;
+    const detail = "legacy-malformed-context-detail-sentinel";
+    const malformed = {
+      status: "initialized",
+      keyId: identity[3],
+      startedAt: 1,
+      attemptCount: 0,
+      userId: identity[1],
+      sessionInfo: {
+        session_id: identity[3],
+        space_id: identity[0],
+        team_id: { detail },
+        agent_id: "agent-legacy",
+        user_id: identity[1],
+        user_key: detail,
+      },
+      agentDetail: { id: "agent-legacy", name: 7 },
+      taskDetail: null,
+    };
+
+    insertLegacySession(identity, malformed as unknown as SessionInitState);
+    await expect(getSessionRepo().getBySessionId(...identity)).rejects.toMatchObject({
+      name: "SessionRepoReadError",
+      message: "session repository read failed",
+    });
+
+    const redis = new FakeRedis();
+    const redisKey = `inj:sess:${legacyIdentityKey(identity)}`;
+    redis.strings.set(redisKey, JSON.stringify(malformed));
+    redis.ttls.set(redisKey, 60);
+    await expect(new RedisSessionRepo(redis as never).getBySessionId(...identity))
+      .rejects.toMatchObject({
+        name: "SessionRepoReadError",
+        message: "session repository read failed",
+      });
+  });
+
   it("reads and deletes legacy recovery-only rows with an exact source-prefixed keyId", async () => {
     const identity = ["space", "user", "claude-code", "legacy-recovery"] as const;
     const recoveryState = state(identity, "legacy-recovery-agent");
@@ -795,6 +839,94 @@ describe("collision-safe persisted session identity keys", () => {
     );
     assertCredentialFree(await redisRepo.getBySessionId(...FIRST));
     assertCredentialFree(await redisRepo.loadAllInitialized());
+  });
+
+  it("physically rewrites a canonical credential after point recovery", async () => {
+    const detail = "legacy-user-key-physical-rewrite-sentinel";
+    const legacyState = {
+      ...state(FIRST, "legacy-credential-owner"),
+      sessionInfo: {
+        ...state(FIRST, "legacy-credential-owner").sessionInfo!,
+        user_key: detail,
+      },
+    };
+    const identity: SessionIdentity = {
+      spaceId: FIRST[0],
+      userId: FIRST[1],
+      agentSource: FIRST[2],
+      sessionId: FIRST[3],
+      teamId: "team-1",
+      agentId: "legacy-credential-owner",
+    };
+    const recover = async (sessions: SessionRepo): Promise<void> => {
+      const store = new SessionStore(30_000, sessions);
+      await expect(store.getOrRecover(sessionStoreKey(identity), identity, {}))
+        .resolves.toMatchObject({ sessionInfo: { agent_id: "legacy-credential-owner" } });
+    };
+
+    const sqlite = getSessionRepo();
+    expect(await sqlite.upsert(...FIRST, state(FIRST, "seed"))).toBe(true);
+    getDb()!.prepare("UPDATE sessions SET state_json = ? WHERE session_id = ?")
+      .run(JSON.stringify(legacyState), sessionRowId(...FIRST));
+    await recover(sqlite);
+    const sqliteRow = getDb()!.prepare("SELECT state_json FROM sessions WHERE session_id = ?")
+      .get(sessionRowId(...FIRST)) as { state_json: string };
+    expect(sqliteRow.state_json).not.toContain(detail);
+
+    const storage = new MemoryStorage();
+    const kv = new KvSessionRepo(storage);
+    const kvKey = `ttl/${FIRST.join("/")}/inj-sess.json`;
+    await storage.putJSON(kvKey, legacyState);
+    await recover(kv);
+    expect(await storage.getText(kvKey)).not.toContain(detail);
+
+    const redis = new FakeRedis();
+    const redisRepo = new RedisSessionRepo(redis as never);
+    const redisKey = `inj:sess:${v2IdentityKey(FIRST)}`;
+    redis.strings.set(redisKey, JSON.stringify(legacyState));
+    await recover(redisRepo);
+    expect(redis.strings.get(redisKey)).not.toContain(detail);
+  });
+
+  it("physically normalizes a context-free canonical bypass during hydration", async () => {
+    const legacyBypass = contextFreeLegacyCanonicalBypass(FIRST);
+    const assertNormalized = (raw: string | null | undefined): void => {
+      const parsed = JSON.parse(raw ?? "null") as Record<string, unknown>;
+      expect(parsed).toMatchObject({
+        status: "initialized",
+        keyId: FIRST[3],
+        userId: FIRST[1],
+        startedAt: 0,
+        attemptCount: 0,
+        bypassed: true,
+        sessionInfo: null,
+        agentDetail: null,
+        taskDetail: null,
+      });
+    };
+
+    const sqlite = getSessionRepo();
+    expect(await sqlite.upsert(...FIRST, state(FIRST, "seed"))).toBe(true);
+    getDb()!.prepare("UPDATE sessions SET state_json = ? WHERE session_id = ?")
+      .run(JSON.stringify(legacyBypass), sessionRowId(...FIRST));
+    await expect(new SessionStore(30_000, sqlite).hydrateFromDb()).resolves.toBe(0);
+    const sqliteRow = getDb()!.prepare("SELECT state_json FROM sessions WHERE session_id = ?")
+      .get(sessionRowId(...FIRST)) as { state_json: string };
+    assertNormalized(sqliteRow.state_json);
+
+    const storage = new MemoryStorage();
+    const kv = new KvSessionRepo(storage);
+    const kvKey = `ttl/${FIRST.join("/")}/inj-sess.json`;
+    await storage.putJSON(kvKey, legacyBypass);
+    await expect(new SessionStore(30_000, kv).hydrateFromDb()).resolves.toBe(0);
+    assertNormalized(await storage.getText(kvKey));
+
+    const redis = new FakeRedis();
+    const redisRepo = new RedisSessionRepo(redis as never);
+    const redisKey = `inj:sess:${v2IdentityKey(FIRST)}`;
+    redis.strings.set(redisKey, JSON.stringify(legacyBypass));
+    await expect(new SessionStore(30_000, redisRepo).hydrateFromDb()).resolves.toBe(0);
+    assertNormalized(redis.strings.get(redisKey));
   });
 
   it("rejects present malformed and mismatched canonical KV sessions", async () => {

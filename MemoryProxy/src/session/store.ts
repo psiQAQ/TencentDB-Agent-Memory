@@ -24,7 +24,14 @@
  * entry point on every turn, so binding-through-that-path is guaranteed.
  */
 
-import type { SessionInitState, SessionInitStatus, SessionInfo, AgentDetail, TaskDetail } from "./types.js";
+import {
+  persistedSessionNeedsMigration,
+  type SessionInitState,
+  type SessionInitStatus,
+  type SessionInfo,
+  type AgentDetail,
+  type TaskDetail,
+} from "./types.js";
 import { getSessionRepo, type SessionRepo } from "../db/sessionRepo.js";
 import type { BindingRepo, SessionBinding } from "../db/binding-repo.js";
 import type { MetadataClient } from "../meta/client.js";
@@ -443,6 +450,7 @@ interface ClaimMutationSnapshot {
   deleteEpoch: number;
   deleteIntent?: number;
   blockedDeleteIntent?: number;
+  pendingDeleteReplacement?: number;
 }
 
 export class SessionStore {
@@ -453,6 +461,8 @@ export class SessionStore {
   private deleteIntents = new Map<string, number>();
   /** Durable delete failed; this identity stays fail-closed until a full replacement persists. */
   private blockedDeleteIntents = new Map<string, number>();
+  /** A newer L1 state is waiting behind this delete and is not authoritative yet. */
+  private pendingDeleteReplacements = new Map<string, number>();
   private mutatedKeys = new Set<string>();
   private durableLayersByKey = new Map<string, DurableClaimLayers>();
   /** keyId → identity map — populated via {@link bind} to keep repo/binding writes user-namespaced. */
@@ -526,6 +536,7 @@ export class SessionStore {
       deleteEpoch: this.deleteEpochs.get(keyId) ?? 0,
       deleteIntent: this.deleteIntents.get(keyId),
       blockedDeleteIntent: this.blockedDeleteIntents.get(keyId),
+      pendingDeleteReplacement: this.pendingDeleteReplacements.get(keyId),
     };
   }
 
@@ -557,15 +568,21 @@ export class SessionStore {
     } else {
       this.durableLayersByKey.delete(keyId);
     }
-    if (
-      snapshot.deleteIntent !== undefined
-      && snapshot.blockedDeleteIntent === snapshot.deleteIntent
-    ) {
-      this.deleteIntents.set(keyId, snapshot.deleteIntent);
-      this.blockedDeleteIntents.set(keyId, snapshot.deleteIntent);
+    const failedDuringMutation = snapshot.deleteIntent !== undefined
+      && this.blockedDeleteIntents.get(keyId) === snapshot.deleteIntent;
+    const blockedDeleteIntent = snapshot.blockedDeleteIntent
+      ?? (failedDuringMutation ? snapshot.deleteIntent : undefined);
+    if (blockedDeleteIntent !== undefined) {
+      this.deleteIntents.set(keyId, blockedDeleteIntent);
+      this.blockedDeleteIntents.set(keyId, blockedDeleteIntent);
     } else {
       this.deleteIntents.delete(keyId);
       this.blockedDeleteIntents.delete(keyId);
+    }
+    if (snapshot.pendingDeleteReplacement !== undefined) {
+      this.pendingDeleteReplacements.set(keyId, snapshot.pendingDeleteReplacement);
+    } else {
+      this.pendingDeleteReplacements.delete(keyId);
     }
   }
 
@@ -627,6 +644,9 @@ export class SessionStore {
     before: StateSnapshot,
     identity: SessionIdentity,
   ): AwaitedStateResult {
+    if (this.pendingDeleteReplacements.has(keyId)) {
+      throw new SessionIdentityConflictError();
+    }
     if (this.deleteIntents.has(keyId)) return { changed: true };
     if (
       (this.stateGenerations.get(keyId) ?? 0) === before.generation
@@ -749,10 +769,7 @@ export class SessionStore {
     let id = this.identities.get(keyId);
     const rollbackSnapshot = claimSnapshot
       ?? (id ? this.snapshotClaimMutation(keyId, id) : undefined);
-    const replacementDeleteIntent = rollbackSnapshot?.deleteIntent !== undefined
-      && rollbackSnapshot.blockedDeleteIntent === rollbackSnapshot.deleteIntent
-      ? rollbackSnapshot.deleteIntent
-      : undefined;
+    const replacementDeleteIntent = rollbackSnapshot?.deleteIntent;
     if (id) {
       id = this.claimIdentity(
         keyId,
@@ -768,9 +785,12 @@ export class SessionStore {
       : credentialSafeState;
     // Only a validated state commit supersedes an in-flight delete. Clearing
     // the token before identity validation would let a rejected set cancel it.
-    if (replacementDeleteIntent === undefined) {
+    if (replacementDeleteIntent !== undefined) {
+      this.pendingDeleteReplacements.set(keyId, replacementDeleteIntent);
+    } else {
       this.deleteIntents.delete(keyId);
       this.blockedDeleteIntents.delete(keyId);
+      this.pendingDeleteReplacements.delete(keyId);
     }
     const writeGeneration = this.commitState(keyId, normalizedState);
     let rollbackState = normalizedState;
@@ -904,6 +924,7 @@ export class SessionStore {
           }
           if (
             replacementDeleteIntent !== undefined
+            && this.blockedDeleteIntents.get(keyId) === replacementDeleteIntent
             && (
               (Boolean(this.repo) && !l2aPersisted)
               || (Boolean(this.bindingRepo) && (!writesBinding || !l2bPersisted))
@@ -963,12 +984,14 @@ export class SessionStore {
             this.claimIdentity(keyId, durableIdentity, "persisted");
           }
           if (replacementDeleteIntent !== undefined) {
-            if (
-              this.deleteIntents.get(keyId) !== replacementDeleteIntent
-              || this.blockedDeleteIntents.get(keyId) !== replacementDeleteIntent
-            ) return;
-            this.deleteIntents.delete(keyId);
-            this.blockedDeleteIntents.delete(keyId);
+            if (this.pendingDeleteReplacements.get(keyId) !== replacementDeleteIntent) return;
+            if (this.blockedDeleteIntents.get(keyId) === replacementDeleteIntent) {
+              if (this.deleteIntents.get(keyId) !== replacementDeleteIntent) return;
+              this.deleteIntents.delete(keyId);
+              this.blockedDeleteIntents.delete(keyId);
+            }
+            this.pendingDeleteReplacements.delete(keyId);
+            this.bumpDeleteEpoch(keyId);
           }
           return;
         }
@@ -977,6 +1000,10 @@ export class SessionStore {
       const keepsPromotedClaim = Boolean(
         rollbackSnapshot
         && rollbackSnapshot.blockedDeleteIntent === undefined
+        && (
+          rollbackSnapshot.deleteIntent === undefined
+          || this.blockedDeleteIntents.get(keyId) !== rollbackSnapshot.deleteIntent
+        )
         && promotedClaimPersisted
         && hasPromotedPendingBypassClaim(rollbackState),
       );
@@ -999,6 +1026,7 @@ export class SessionStore {
       && this.blockedDeleteIntents.get(keyId) === previousDeleteIntent;
     const deleteToken = this.bumpDeleteEpoch(keyId);
     this.deleteIntents.set(keyId, deleteToken);
+    this.pendingDeleteReplacements.delete(keyId);
     if (wasBlocked) this.blockedDeleteIntents.set(keyId, deleteToken);
     else this.blockedDeleteIntents.delete(keyId);
     this.removeState(keyId);
@@ -1007,6 +1035,7 @@ export class SessionStore {
     if (!id) {
       this.deleteIntents.delete(keyId);
       this.blockedDeleteIntents.delete(keyId);
+      this.pendingDeleteReplacements.delete(keyId);
       this.bumpDeleteEpoch(keyId);
       return;
     }
@@ -1039,18 +1068,21 @@ export class SessionStore {
         l2bDeleted = false;
       }
       if (this.deleteIntents.get(keyId) !== deleteToken) return;
+      const hasPendingReplacement = this.pendingDeleteReplacements.get(keyId) === deleteToken;
       // A stale L2 read may have completed before the durable delete. Remove it
-      // again at finalization, but never erase a newer set that cleared token.
-      this.removeState(keyId);
-      this.durableLayersByKey.delete(keyId);
-      this.releaseRawSessionClaim(keyId);
+      // unless a queued replacement owns this token and remains fail-closed.
+      if (!hasPendingReplacement) {
+        this.removeState(keyId);
+        this.durableLayersByKey.delete(keyId);
+        this.releaseRawSessionClaim(keyId);
+      }
       if (!l2aDeleted || !l2bDeleted) {
         this.blockedDeleteIntents.set(keyId, deleteToken);
         return;
       }
       this.deleteIntents.delete(keyId);
       this.blockedDeleteIntents.delete(keyId);
-      this.bumpDeleteEpoch(keyId);
+      if (!hasPendingReplacement) this.bumpDeleteEpoch(keyId);
     }).catch(() => {});
   }
 
@@ -1119,6 +1151,7 @@ export class SessionStore {
         // L1 keys use the same full identity tuple as handler/init entry sites.
         // Also bind full identity so subsequent set() persists back through
         // the correct (userId, agentSource, sessionId) key path.
+        const adapterNormalized = persistedSessionNeedsMigration(row.state);
         const safeState = withoutPersistedCredential(row.state);
         const normalizedState = safeState.keyId === row.sessionId
           ? safeState
@@ -1143,12 +1176,23 @@ export class SessionStore {
           console.warn("[session-db] skipped session with identity conflict");
           continue;
         }
+        const keyId = sessionStoreKey(identity);
         // A legacy bypass with an incomplete optional owner is not sufficient
         // startup authority: a stronger L2b binding may already own the tuple.
         // Leave it out of L1 so the first request performs normal L2a/L2b
         // corroboration before any claim or durable rewrite.
-        if (hasWeakBypassClaim(normalizedState)) continue;
-        const keyId = sessionStoreKey(identity);
+        if (hasWeakBypassClaim(normalizedState)) {
+          if (adapterNormalized || normalizedState !== row.state) {
+            try {
+              await this.enqueuePersistence(keyId, () => this.repo!.upsert(
+                row.spaceId, row.userId, row.agentSource, row.sessionId, normalizedState,
+              ));
+            } catch {
+              // Best-effort schema rewrite; weak identity remains out of L1.
+            }
+          }
+          continue;
+        }
         if (
           !this.mutatedKeys.has(keyId)
           && !this.states.has(keyId)
@@ -1156,7 +1200,7 @@ export class SessionStore {
           this.claimIdentity(keyId, identity, "persisted");
           this.commitState(keyId, normalizedState);
           this.markDurableLayer(keyId, "l2a");
-          if (normalizedState !== row.state) {
+          if (adapterNormalized || normalizedState !== row.state) {
             try {
               await this.enqueuePersistence(keyId, () => this.repo!.upsert(
                 row.spaceId, row.userId, row.agentSource, row.sessionId, normalizedState,
@@ -1197,7 +1241,10 @@ export class SessionStore {
     // source/session key here would let one authenticated user receive another
     // user's terminal state and would redirect later write-through persistence.
     assertIdentityScopedKey(keyId, identity);
-    if (this.blockedDeleteIntents.has(keyId)) throw new SessionIdentityConflictError();
+    if (
+      this.blockedDeleteIntents.has(keyId)
+      || this.pendingDeleteReplacements.has(keyId)
+    ) throw new SessionIdentityConflictError();
     // Step 1: L1
     //
     // ⚠ Terminal 状态（`initialized`，含 `bypassed`）L1 才权威 —— 一旦定型
@@ -1461,6 +1508,7 @@ export class SessionStore {
     }
     if (!row) return {};
     const persistedRow = row;
+    const adapterNormalized = persistedSessionNeedsMigration(persistedRow);
     row = withoutPersistedCredential(row);
 
     if (!persistedStateMatchesIdentity(row, identity)) {
@@ -1487,7 +1535,10 @@ export class SessionStore {
     console.log(
       `[session-recover] session=<redacted> L2a hit status=${row.status} agent=${row.sessionInfo?.agent_id ? "present" : "none"} task=${row.sessionInfo?.task_id ? "present" : "none"}`,
     );
-    return { state: normalizedRow, needsMigration: normalizedRow !== persistedRow };
+    return {
+      state: normalizedRow,
+      needsMigration: adapterNormalized || normalizedRow !== persistedRow,
+    };
   }
 
   /** In-flight promise deduplication: same keyId → same rebuild promise. */

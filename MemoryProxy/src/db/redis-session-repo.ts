@@ -18,7 +18,7 @@ import {
   type HydratedSessionRow,
 } from "./sessionRepo.js";
 import {
-  isLegacyPersistedSessionInitState,
+  isLegacyPersistedSessionOwnershipProof,
   isPersistedSessionInitState,
   normalizePersistedSessionInitState,
   type SessionInitState,
@@ -116,8 +116,9 @@ export class RedisSessionRepo implements SessionRepo {
       const legacyRaw = await this.redis.get(legacyKey);
       if (!legacyRaw) return null;
       if (await this.redis.ttl(legacyKey) <= 0) return null;
-      const legacyState = JSON.parse(legacyRaw) as unknown;
-      if (!isLegacyPersistedSessionInitState(legacyState)) return null;
+      const parsedLegacyState = JSON.parse(legacyRaw) as unknown;
+      const legacyState = normalizePersistedSessionInitState(parsedLegacyState);
+      if (!legacyState) throw new SessionRepoReadError();
       if (!persistedStateOwnsIdentity(legacyState, identity, spaceId === "")) return null;
       return legacyState;
     } catch {
@@ -146,7 +147,7 @@ export class RedisSessionRepo implements SessionRepo {
       const raw = await this.redis.get(legacyKey);
       if (!raw) return true;
       const state = JSON.parse(raw) as unknown;
-      if (!isLegacyPersistedSessionInitState(state)) return false;
+      if (!isLegacyPersistedSessionOwnershipProof(state)) return false;
       if (persistedStateOwnsIdentity(state, identity, spaceId === "")) {
         await this.redis.del(legacyKey);
       }
