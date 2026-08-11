@@ -324,8 +324,8 @@ export interface SkillRuntimeConfig {
  * prefix like "claude-code") needs a different upstream than the global
  * default, this struct provides the replacement `url` (and optional `apiKey`).
  *
- * Anthropic fallback semantics — caller credentials terminate at MemoryProxy
- * and are never forwarded upstream:
+ * Shared OpenAI / Anthropic fallback semantics — caller credentials terminate
+ * at MemoryProxy and are never forwarded upstream:
  *
  *   ┌──────────────────────────────┬────────────┬──────────────────────────┐
  *   │ agent config                 │ url used   │ apiKey used              │
@@ -336,14 +336,14 @@ export interface SkillRuntimeConfig {
  *   └──────────────────────────────┴────────────┴──────────────────────────┘
  *
  * If neither the selected agent entry nor the global config has a server key,
- * Anthropic forwarding rejects the request before any upstream fetch. A
+ * the proxy rejects the request before any upstream fetch. A
  * configured key is bound to the selected configured URL origin; an extension
  * that returns another origin must supply explicit server-side auth headers.
  *
  * Priority order (high → low):
  *   1. `costGuard`-provided `target.authHeaders`（cheap-model 兜底路由自带凭据）
- *   2. `upstream.agents[agent].url` + `upstream.agents[agent].apiKey`
- *   3. `costGuard.anthropicUpstream.url`（仅 Anthropic 协议）
+ *   2. `upstream.agents[agent].url` + agent key (or global server key)
+ *   3. `costGuard.anthropicUpstream.url` + global server key (Anthropic only)
  *   4. `upstream.url` + `upstream.apiKey`（未命中 agent 时的默认）
  *
  * The same map serves both Anthropic and OpenAI protocols — the agent name
@@ -357,10 +357,11 @@ export interface AgentUpstreamEntry {
    * Per-agent apiKey. When set (non-empty):
    *   - OpenAI: `Authorization: Bearer <apiKey>` is injected
    *   - Anthropic: `x-api-key: <apiKey>` is injected
-   * When absent / empty on an Anthropic route, `upstream.apiKey` is used for
-   * the configured URL origin only. If that is also empty, or an extension
-   * redirects to another origin without explicit server auth, the request
-   * fails closed before upstream fetch.
+   * When absent / empty, `upstream.apiKey` is used for the selected configured
+   * URL origin for both OpenAI and Anthropic routes. Caller Authorization /
+   * x-api-key values are never used as upstream credentials. If no server key
+   * exists, or an extension redirects to another origin without explicit
+   * server auth, the request fails closed before upstream fetch.
    */
   apiKey?: string;
 }

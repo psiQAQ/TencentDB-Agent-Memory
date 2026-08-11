@@ -2,7 +2,7 @@
 
 MemoryProxy 是一个**透明的 LLM 请求代理**：把编码 Agent（Claude Code / CodeBuddy 等）原本直连大模型的请求，改为先经过它中转。它在转发前后自动完成会话初始化、记忆注入、对话回流等动作，让 Agent **无需改动一行代码**就能用上 [MemoryCore](../MemoryCore/README_CN.md) 提供的团队记忆、Skill 和 Knowledge。
 
-对客户端和上游模型来说，它是“透明”的——不改变任何协议，原样转发 OpenAI `/v1/chat/completions` 和 Anthropic `/v1/messages`，只是在中转的这一进一出里，顺手做了这些事：**会话初始化、上下文注入、对话回流、鉴权与用量上报**。
+对客户端和上游模型来说，它保持协议透明：保留 OpenAI `/v1/chat/completions` 和 Anthropic `/v1/messages` 的协议格式，不在两者之间转换；转发过程中完成**会话初始化、上下文注入、对话回流、鉴权与用量上报**。
 
 > 一句话分工：MemoryProxy 管“接入与转发”，MemoryCore 管“记忆的存储与处理”。Proxy 自身不落记忆数据，所有 Memory / Skill / Knowledge 读写都经 MemoryCore Gateway（默认 `:8420`）完成。整体产品定位见仓库根 [README_CN.md](../README_CN.md)。
 
@@ -99,7 +99,7 @@ cp config.example.yaml config.yaml
 
 至少需要确认这几项：
 
-- `upstream.url` / `upstream.apiKey` —— 上游 LLM 地址与凭据
+- `upstream.url` / `upstream.apiKey` —— 上游 LLM 地址与服务端凭据
 - `auth.url` / `tdai.endpoint` / `skill.endpoint` —— 指向你的 MemoryCore Gateway（默认 `http://127.0.0.1:8420`）
 
 > **本地无 Redis 快速跑通**：示例配置默认 `redis.enabled: true`，本机没起 Redis 时会持续刷 `ECONNREFUSED 127.0.0.1:6379`。纯本地开发建议改为 `redis.enabled: false` + `storage.enabled: true`（`storage.backend: sqlite`），会话/注入/Skill 状态改走本地 SQLite，启动即干净。
@@ -163,7 +163,7 @@ npm run dev:config
 
 ## 客户端配置
 
-把编码 Agent 的上游地址指向本代理，其余字段（`apiKey`、`model` 等）保持不变。请求路径推荐带上 `spaceId`（memory 实例 id），proxy 会自动提取用于鉴权、注入与计费。
+把编码 Agent 的上游地址指向本代理，将其 Memory user key 填为客户端 `apiKey`，`model` 等字段保持不变。请求路径推荐带上 `spaceId`（memory 实例 id），proxy 会自动提取用于鉴权、注入与计费。客户端的 `Authorization` / `x-api-key` 在 MemoryProxy 终止，绝不发送到上游；上游模型凭据必须在服务端的 `upstream.apiKey` 或 `upstream.agents.<agent>.apiKey` 中配置。
 
 OpenAI 兼容客户端：
 
@@ -207,13 +207,13 @@ Anthropic Messages 客户端：
 | 段 | 作用 |
 | --- | --- |
 | `server` | 监听 host / port、上游转发超时 |
-| `upstream` | 默认上游 URL 与全局 `apiKey`（非空则替换转发请求鉴权） |
+| `upstream` | 默认上游 URL 与服务端全局 `apiKey`；缺少服务端凭据时在 fetch 前失败关闭 |
 | `log` | 日志目录、级别、后端与轮转策略 |
 | `redis` | 会话 / 注入 / Skill 状态默认后端；不启用 `storage.enabled` 时使用 |
 | `storage` | 统一存储抽象（`cos` / `sqlite` / `fs` / `memory`），多节点部署首选 `cos` |
 | `auth` | `x-tdai-user-key` → `user_id` 校验（调用 MemoryCore `/v3/meta/auth/verify`） |
 | `admin` | 运维端点（如 `/v3/instance/proxy-destroy`）的 shared secret |
-| `systemUsers` | 内部服务账号，命中后短路透传 |
+| `systemUsers` | 内部服务账号，命中后跳过记忆流程，并以清洗后的服务端鉴权转发 |
 | `injection` | 上下文注入总开关与 injector 列表（`skill` / `knowledge` / `tdai-memory`） |
 | `extraction` | 对话回流总开关（skill 归档 + L0 写入） |
 | `sessionInit` | 会话初始化表单流程、header 自动预选策略 |
@@ -224,7 +224,7 @@ Anthropic Messages 客户端：
 | `rateLimit` | Memory 实例 × 实际模型的 Input TPM / QPM 限流 |
 | `clickhouse` | 聚合/分类用量上报（计费总量；不支持原始身份/模型分组） |
 | `creditReport` / `creditPricing` | Credit 计费上报与定价表 |
-| `upstream.agents` | 按 agent name 覆盖上游 URL + apiKey（如 `claude-code` 单独走 CCR） |
+| `upstream.agents` | 按 agent name 覆盖上游 URL + 可选服务端 key；URL-only 条目继承全局服务端 key |
 
 > `injection`、`extraction`、`sessionInit`、`tdai`、`skill`、`knowledge`、`skillRuntime` 是与“记忆”直接相关的配置段，接入时优先关注它们。
 

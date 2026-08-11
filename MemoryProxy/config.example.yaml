@@ -32,40 +32,41 @@ upstream:
   # 上游 OpenAI-compatible API 地址（/v1/chat/completions 会由 proxy 自动拼接）
   # 也支持完整路径如 https://llm-upstream.example.com/v2/
   url: https://tokenhub.example.com/v1
-  # 若非空，则替换所有转发请求中的 Authorization: Bearer <apiKey>。
-  # 留空则透传客户端原始 API Key。
+  # 服务端上游凭据；按目标协议注入 Authorization Bearer 或 x-api-key。
+  # 客户端的 Authorization / x-api-key 只用于 MemoryProxy 鉴权，绝不转发。
+  # 若这里和选中的 per-agent 配置都没有服务端 key，请求会在 fetch 前失败关闭。
   apiKey: "<YOUR_TOKENHUB_API_KEY>"
 
   # ── Per-Agent 覆盖 ─────────────────────────────────────────────────────────
   # 按 agent 名（URL 路径前缀 /{agent}/...）覆盖 url + apiKey。
   # Anthropic 和 OpenAI 协议共用同一张表。
   #
-  # 兜底规则（重要）——只有"没配这个 agent"才会走外层 upstream 兜底：
+  # 凭据规则（OpenAI / Anthropic 共用）：
   #
   #   ┌────────────────────────────────┬────────────┬───────────────────────┐
   #   │ 该 agent 的配置                │ 用的 url   │ 用的 apiKey           │
   #   ├────────────────────────────────┼────────────┼───────────────────────┤
   #   │ 不在 agents 里                 │ upstream.url│ upstream.apiKey (兜底)│
-  #   │ 在 agents 里，只有 url         │ agent.url  │ 透传客户端请求的 key  │
+  #   │ 在 agents 里，只有 url         │ agent.url  │ upstream.apiKey (兜底)│
   #   │ 在 agents 里，url + apiKey     │ agent.url  │ agent.apiKey          │
   #   └────────────────────────────────┴────────────┴───────────────────────┘
   #
-  # 中间一行是设计上刻意留的口子：一旦 agent 出现在这张表里，外层
-  # upstream.apiKey 的兜底就被切断，允许运营方在同一个 proxy 里让
-  # 一部分 agent 走服务端 key、另一部分透传客户端自己的 key。
+  # URL-only agent 继承全局服务端 key，并将该 key 绑定到 agent.url 的 origin。
+  # 若没有任何服务端 key，或扩展路由跨 origin 且未提供显式服务端凭据，
+  # 请求会在上游 fetch 前失败关闭；不会回退到客户端凭据。
   #
   # 完整优先级（高→低）：
   #   1. costGuard 内部路由自带的凭据（cheap-model 兜底）
-  #   2. upstream.agents[agent].url + upstream.agents[agent].apiKey
-  #   3. costGuard.anthropicUpstream.url（仅 Anthropic 协议）
+  #   2. upstream.agents[agent].url + agent.apiKey（未配时用 upstream.apiKey）
+  #   3. costGuard.anthropicUpstream.url + upstream.apiKey（仅 Anthropic 协议）
   #   4. upstream.url + upstream.apiKey（未命中 agent 时的默认）
   agents: {}
     # claude-code:                                        # 服务端 key 模式
     #   url: "https://claude-upstream.example.com/v1"
     #   apiKey: "sk-ant-agent-key"
-    # codex:                                              # 客户端 key 透传模式
+    # codex:                                              # URL-only，继承全局服务端 key
     #   url: "https://codex-upstream.example.com/v1"
-    #   # 不写 apiKey → 透传客户端自己带上来的 key，不走外层兜底
+    #   # 不写 apiKey → 使用 upstream.apiKey；缺失则 fail closed
 
 
 # ── 日志 ─────────────────────────────────────────────────────────────────────
@@ -323,10 +324,11 @@ admin:
                            # env TDAI_PROXY_ADMIN_API_KEY 注入，避免落 git
 
 
-# ── System users（内部服务账号：命中即全链路透传） ─────────────────────────────
+# ── System users（内部服务账号：命中即短路记忆处理） ───────────────────────────
 # 命中流程：先用 apiKey 走 auth/verify 拿到 user_id → user_id 在下方 systemUsers
-# 列表里 → 命中，短路透传。命中后 proxy 将请求原样转发到
-# config.upstream.url，跳过会话初始化和上下文注入。
+# 列表里 → 命中，跳过会话初始化和上下文注入，并将 body 按原协议转发到
+# config.upstream.url。客户端 Authorization / x-api-key 不会转发；proxy 按协议
+# 注入全局服务端 upstream.apiKey，缺失时在 fetch 前失败关闭。
 # 仍会在进程内计算 usage/credit；最终遥测身份/space/model 列固定脱敏。
 # 依赖 auth.enabled=true —— auth 关掉时 verify 返回空 user_id，短路永远不会触发。
 # userKey 字段保留仅用作运维参考（曾经是匹配键，现在只在日志/注释里出现），

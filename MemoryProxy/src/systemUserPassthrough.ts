@@ -33,11 +33,13 @@
  *     raw ArrayBuffer and forward it untouched. Aux endpoints do not go
  *     through the alias-gate today.
  *
- * The one header we rewrite in both paths is `Authorization`: the caller's
- * proxy-auth key is swapped for `config.upstream.apiKey` so TokenHub accepts
- * the request (see `buildPassthroughHeaders`). Trace payloads use whatever
- * we can JSON-parse from the raw body/response as-is, then each exporter reduces
- * it to fixed type/count summaries before data leaves the process.
+ * Caller `Authorization` / `x-api-key` values terminate at MemoryProxy and are
+ * never forwarded. `buildPassthroughHeaders` drops them with internal identity
+ * headers, then injects the global server-configured upstream key in the
+ * selected protocol's auth format; a missing server key fails closed. Trace
+ * payloads use whatever we can JSON-parse from the raw body/response as-is,
+ * then each exporter reduces it to fixed type/count summaries before data
+ * leaves the process.
  */
 
 import type { Context } from "hono";

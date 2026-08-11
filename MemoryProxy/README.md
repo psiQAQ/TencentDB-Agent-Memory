@@ -2,7 +2,7 @@
 
 MemoryProxy is a **transparent LLM request proxy**: instead of having a coding agent (Claude Code / CodeBuddy / ...) talk to the LLM directly, requests are routed through the proxy first. Around each forward it automatically runs session initialization, memory injection, conversation write-back and more, so an agent can tap into the team memory, Skills and Knowledge provided by [MemoryCore](../MemoryCore/README.md) **without changing a single line of code**.
 
-It is "transparent" to both the client and the upstream model — it changes no protocol and forwards OpenAI `/v1/chat/completions` and Anthropic `/v1/messages` verbatim. It just does a few extra things on the way in and out: **session initialization, context injection, conversation write-back, authentication and usage reporting**.
+It is protocol-transparent to both the client and the upstream model: it preserves the OpenAI `/v1/chat/completions` and Anthropic `/v1/messages` wire formats instead of translating between them. Along the way it performs **session initialization, context injection, conversation write-back, authentication and usage reporting**.
 
 > In one line: MemoryProxy handles "access & forwarding"; MemoryCore handles "storage & processing" of memory. The proxy itself persists no memory data — all Memory / Skill / Knowledge reads and writes go through the MemoryCore Gateway (default `:8420`). For the overall product positioning, see the repo root [README.md](../README.md).
 
@@ -99,7 +99,7 @@ cp config.example.yaml config.yaml
 
 At minimum confirm:
 
-- `upstream.url` / `upstream.apiKey` — upstream LLM address and credentials
+- `upstream.url` / `upstream.apiKey` — upstream LLM address and server-side credentials
 - `auth.url` / `tdai.endpoint` / `skill.endpoint` — point to your MemoryCore Gateway (default `http://127.0.0.1:8420`)
 
 > **Run locally without Redis**: the example config defaults to `redis.enabled: true`, which spams `ECONNREFUSED 127.0.0.1:6379` when no Redis is running locally. For pure local development, set `redis.enabled: false` + `storage.enabled: true` (`storage.backend: sqlite`); session/injection/Skill state then goes to local SQLite and the process starts up cleanly.
@@ -163,7 +163,7 @@ Always uses `./config.yaml`, auto-detects the `node` path (nvm / fnm compatible)
 
 ## Client configuration
 
-Point the coding agent's upstream address at this proxy and keep the rest (`apiKey`, `model`, ...) unchanged. Include `spaceId` (memory instance id) in the path — the proxy auto-extracts it for auth, injection and billing.
+Point the coding agent's upstream address at this proxy and use its Memory user key as the client `apiKey`; keep fields such as `model` unchanged. Include `spaceId` (memory instance id) in the path — the proxy auto-extracts it for auth, injection and billing. Client `Authorization` / `x-api-key` values terminate at MemoryProxy and are never sent upstream; configure the upstream model credential server-side under `upstream.apiKey` or `upstream.agents.<agent>.apiKey`.
 
 OpenAI-compatible client:
 
@@ -207,13 +207,13 @@ Config sections at a glance:
 | Section | Purpose |
 | --- | --- |
 | `server` | listen host / port, upstream forward timeout |
-| `upstream` | default upstream URL and global `apiKey` (replaces forward auth when non-empty) |
+| `upstream` | default upstream URL and server-side global `apiKey`; missing server credentials fail closed before fetch |
 | `log` | log directory, level, backend and rotation policy |
 | `redis` | default backend for session / injection / Skill state (used when `storage.enabled` is off) |
 | `storage` | unified storage abstraction (`cos` / `sqlite` / `fs` / `memory`); `cos` preferred for multi-node |
 | `auth` | `x-tdai-user-key` → `user_id` validation (calls MemoryCore `/v3/meta/auth/verify`) |
 | `admin` | shared secret for ops endpoints (e.g. `/v3/instance/proxy-destroy`) |
-| `systemUsers` | internal service accounts; short-circuit passthrough on match |
+| `systemUsers` | internal service accounts; skip the memory pipeline and forward with sanitized server auth on match |
 | `injection` | master switch and injector list (`skill` / `knowledge` / `tdai-memory`) |
 | `extraction` | conversation write-back master switch (skill archival + L0 write) |
 | `sessionInit` | session init form flow and header auto pre-select policy |
@@ -224,7 +224,7 @@ Config sections at a glance:
 | `rateLimit` | Input TPM / QPM limiting per memory instance × actual model |
 | `clickhouse` | aggregate/categorical usage reporting (billing totals; no raw identity/model grouping) |
 | `creditReport` / `creditPricing` | Credit billing report and pricing table |
-| `upstream.agents` | override upstream URL + apiKey per agent name (e.g. route `claude-code` through CCR) |
+| `upstream.agents` | override upstream URL + optional server key per agent name; URL-only entries inherit the global server key |
 
 > `injection`, `extraction`, `sessionInit`, `tdai`, `skill`, `knowledge`, `skillRuntime` are the memory-related sections — focus on them first when integrating.
 
