@@ -350,6 +350,74 @@ describe("session cache identity isolation", () => {
   });
 
   it.each([
+    ["anthropic", VICTIM.source, `/${VICTIM.source}/${VICTIM.spaceId}/v1/messages`, "agent-missing"],
+    ["openai", "codebuddy", `/codebuddy/${VICTIM.spaceId}/v1/chat/completions`, "task-missing"],
+  ] as const)("rejects mixed authoritative-missing %s recovery before the model", async (
+    protocol,
+    agentSource,
+    path,
+    missingSide,
+  ) => {
+    const config = configForTest();
+    config.upstream.agents!.codebuddy = {
+      url: "https://codebuddy.upstream.invalid/v1",
+      apiKey: "codebuddy-server-key",
+    };
+    const fetchCategories: string[] = [];
+    const upstreamBodies: Record<string, unknown>[] = [];
+    const metadataClient = {
+      getAgent: vi.fn(async () => {
+        if (missingSide === "agent-missing") return null;
+        throw new Error("metadata transient sentinel");
+      }),
+      getTask: vi.fn(async () => {
+        if (missingSide === "task-missing") return null;
+        throw new Error("metadata transient sentinel");
+      }),
+    };
+    const bindingRepo: BindingRepo = {
+      getBinding: vi.fn(async (): Promise<SessionBinding> => ({
+        outcome: "initialized",
+        userId: VICTIM.userId,
+        teamId: VICTIM.teamId,
+        agentId: VICTIM.agentId,
+        taskId: VICTIM.taskId,
+      })),
+      putBinding: vi.fn(async () => true),
+      deleteBinding: vi.fn(async () => undefined),
+      touchLastSeen: vi.fn(async () => undefined),
+    };
+    setMetadataClient(metadataClient as never);
+    getSessionStore().setBindingRepo(bindingRepo);
+    initAuth(config.auth);
+    vi.stubGlobal("fetch", fetchStub(fetchCategories, upstreamBodies));
+    const app = createApp(config);
+    const request = mainRequest(VICTIM.key, VICTIM.userId, VICTIM);
+    if (protocol === "openai") {
+      const headers = new Headers(request.headers);
+      headers.delete("x-api-key");
+      headers.set("authorization", `Bearer ${VICTIM.key}`);
+      request.headers = headers;
+    }
+
+    const response = await app.request(`http://proxy${path}`, request);
+
+    expect(response.status).toBe(409);
+    await expect(response.json()).resolves.toEqual({ error: "session_context_unavailable" });
+    expect(fetchCategories).toEqual(["auth"]);
+    expect(upstreamBodies).toHaveLength(0);
+
+    vi.clearAllMocks();
+    fetchCategories.length = 0;
+    const secondResponse = await app.request(`http://proxy${path}`, request);
+    expect(secondResponse.status).toBe(409);
+    expect(fetchCategories).toEqual(["auth"]);
+    expect(upstreamBodies).toHaveLength(0);
+    expect(metadataClient.getAgent).not.toHaveBeenCalled();
+    expect(metadataClient.getTask).not.toHaveBeenCalled();
+  });
+
+  it.each([
     ["sidequery", {
       model: "test-model",
       max_tokens: 32,
@@ -1285,6 +1353,89 @@ describe("session cache identity isolation", () => {
       });
     },
   );
+
+  it.each(["agent-missing", "task-missing"] as const)(
+    "prioritizes authoritative %s over a concurrent metadata error",
+    async (missingSide) => {
+      const identity = victimIdentity();
+      const key = sessionStoreKey(identity);
+      const bindingRepo: BindingRepo = {
+        getBinding: vi.fn(async (): Promise<SessionBinding> => ({
+          outcome: "initialized",
+          userId: identity.userId,
+          teamId: identity.teamId,
+          agentId: identity.agentId,
+          taskId: identity.taskId,
+        })),
+        putBinding: vi.fn(async () => true),
+        deleteBinding: vi.fn(async () => undefined),
+        touchLastSeen: vi.fn(async () => undefined),
+      };
+      const metadataClient = {
+        getAgent: vi.fn(async () => {
+          if (missingSide === "agent-missing") return null;
+          throw new Error("metadata transient sentinel");
+        }),
+        getTask: vi.fn(async () => {
+          if (missingSide === "task-missing") return null;
+          throw new Error("metadata transient sentinel");
+        }),
+      };
+      const store = new SessionStore(30 * 60 * 1_000, undefined, bindingRepo);
+
+      const first = await store.getOrRecover(key, identity, {
+        metadataClient: metadataClient as never,
+      });
+      expect(first).toMatchObject({
+        status: "initialized",
+        bypassed: false,
+        contextSuppressed: true,
+        sessionInfo: { agent_id: identity.agentId, task_id: identity.taskId },
+      });
+      await expect(store.getOrRecover(key, identity, {})).resolves.toBe(first);
+
+      const restarted = new SessionStore(30 * 60 * 1_000, undefined, bindingRepo);
+      await expect(restarted.getOrRecover(key, identity, {
+        metadataClient: metadataClient as never,
+      })).resolves.toMatchObject({
+        status: "initialized",
+        bypassed: false,
+        contextSuppressed: true,
+        sessionInfo: { agent_id: identity.agentId, task_id: identity.taskId },
+      });
+    },
+  );
+
+  it("retains the one-shot bypass when both metadata lookups fail transiently", async () => {
+    const identity = victimIdentity();
+    const key = sessionStoreKey(identity);
+    const bindingRepo: BindingRepo = {
+      getBinding: vi.fn(async (): Promise<SessionBinding> => ({
+        outcome: "initialized",
+        userId: identity.userId,
+        teamId: identity.teamId,
+        agentId: identity.agentId,
+        taskId: identity.taskId,
+      })),
+      putBinding: vi.fn(async () => true),
+      deleteBinding: vi.fn(async () => undefined),
+      touchLastSeen: vi.fn(async () => undefined),
+    };
+    const metadataClient = {
+      getAgent: vi.fn(async () => { throw new Error("metadata transient sentinel"); }),
+      getTask: vi.fn(async () => { throw new Error("metadata transient sentinel"); }),
+    };
+    const store = new SessionStore(30 * 60 * 1_000, undefined, bindingRepo);
+
+    await expect(store.getOrRecover(key, identity, {
+      metadataClient: metadataClient as never,
+    })).resolves.toMatchObject({
+      status: "initialized",
+      bypassed: true,
+      sessionInfo: null,
+    });
+    expect(store.get(key)).toBeUndefined();
+  });
 
   it("serializes concurrent set persistence so the latest L1 state wins L2", async () => {
     let signalOldWrite!: () => void;

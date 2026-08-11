@@ -1027,7 +1027,7 @@ export class SessionStore {
       agentDetail = null;
       taskDetail = null;
     }
-    if (anyKernelError) {
+    if (anyKernelError && !agentNotFound && !taskNotFound) {
       console.warn("[session-recover] session=<redacted> kernel unavailable, one-shot bypass");
       // Don't delete binding; return one-shot bypass to serve this request
       return {
