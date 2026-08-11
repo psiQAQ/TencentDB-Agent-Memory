@@ -108,12 +108,12 @@ export class RedisSessionRepo implements SessionRepo {
     }
   }
 
-  deleteBySessionId(
+  async deleteBySessionId(
     spaceId: string,
     userId: string,
     agentSource: string,
     sessionId: string,
-  ): void {
+  ): Promise<void> {
     const identity = identityOf(spaceId, userId, agentSource, sessionId);
     const currentKey = KEY_PREFIX + compositeKey(spaceId, userId, agentSource, sessionId);
     const legacyTail = legacyPersistedSessionIdentityKey(
@@ -122,21 +122,19 @@ export class RedisSessionRepo implements SessionRepo {
       agentSource,
       sessionId,
     );
-    void (async () => {
-      try {
-        await this.redis.del(currentKey);
-        if (!legacyTail) return;
-        const legacyKey = KEY_PREFIX + legacyTail;
-        const raw = await this.redis.get(legacyKey);
-        if (!raw) return;
-        const state = JSON.parse(raw) as SessionInitState;
-        if (persistedStateOwnsIdentity(state, identity, spaceId === "")) {
-          await this.redis.del(legacyKey);
-        }
-      } catch {
-        // silent
+    try {
+      await this.redis.del(currentKey);
+      if (!legacyTail) return;
+      const legacyKey = KEY_PREFIX + legacyTail;
+      const raw = await this.redis.get(legacyKey);
+      if (!raw) return;
+      const state = JSON.parse(raw) as SessionInitState;
+      if (persistedStateOwnsIdentity(state, identity, spaceId === "")) {
+        await this.redis.del(legacyKey);
       }
-    })();
+    } catch {
+      // silent
+    }
   }
 
   async loadAllInitialized(): Promise<HydratedSessionRow[]> {

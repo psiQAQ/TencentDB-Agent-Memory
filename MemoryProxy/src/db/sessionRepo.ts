@@ -185,7 +185,7 @@ export interface SessionRepo {
     userId: string,
     agentSource: string,
     sessionId: string,
-  ): void;
+  ): void | Promise<void>;
   loadAllInitialized(): Promise<HydratedSessionRow[]>;
 }
 

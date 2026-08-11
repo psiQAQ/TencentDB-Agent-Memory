@@ -66,6 +66,13 @@ function mergeOptionalIdentity(bound?: string, incoming?: string): string | unde
   return bound || incoming;
 }
 
+function mergeIdentityValues(...values: Array<string | undefined>): string | undefined {
+  return values.reduce<string | undefined>(
+    (merged, value) => mergeOptionalIdentity(merged, value),
+    undefined,
+  );
+}
+
 function mergeIdentityClaim(
   bound: SessionIdentity | undefined,
   incoming: SessionIdentity,
@@ -168,6 +175,53 @@ function bindingMatchesIdentity(binding: SessionBinding, identity: SessionIdenti
     && optionalClaimMatches(identity.taskId, binding.taskId);
 }
 
+function identityClaimFromBinding(
+  identity: SessionIdentity,
+  binding: SessionBinding,
+): SessionIdentity {
+  if (binding.userId && binding.userId !== identity.userId) {
+    throw new SessionIdentityConflictError();
+  }
+  return {
+    ...identity,
+    teamId: mergeIdentityValues(identity.teamId, binding.teamId),
+    agentId: mergeIdentityValues(identity.agentId, binding.agentId),
+    taskId: mergeIdentityValues(identity.taskId, binding.taskId),
+  };
+}
+
+/** Merge every identity field proved by a state before it can enter L1. */
+function identityClaimFromState(
+  identity: SessionIdentity,
+  state: SessionInitState,
+): SessionIdentity {
+  const session = state.sessionInfo;
+  if (
+    (state.userId && state.userId !== identity.userId)
+    || (
+      state.keyId
+      && state.keyId !== identity.sessionId
+      && state.keyId !== `${identity.agentSource}:${identity.sessionId}`
+    )
+    || (session?.user_id && session.user_id !== identity.userId)
+    || (session?.session_id && session.session_id !== identity.sessionId)
+    || (session?.space_id && session.space_id !== spaceOf(identity))
+  ) {
+    throw new SessionIdentityConflictError();
+  }
+  return {
+    ...identity,
+    teamId: mergeIdentityValues(identity.teamId, session?.team_id, state.selectedTeamId),
+    agentId: mergeIdentityValues(
+      identity.agentId,
+      session?.agent_id,
+      state.selectedAgentId,
+      state.agentDetail?.id,
+    ),
+    taskId: mergeIdentityValues(identity.taskId, session?.task_id, state.taskDetail?.id),
+  };
+}
+
 function recoveryIdentityKey(keyId: string, identity: SessionIdentity): string {
   return JSON.stringify([
     keyId,
@@ -203,10 +257,21 @@ interface L2aProbeResult {
   needsMigration?: boolean;
 }
 
+interface StateSnapshot {
+  generation: number;
+  state?: SessionInitState;
+}
+
+interface AwaitedStateResult {
+  changed: boolean;
+  state?: SessionInitState;
+}
+
 type RawSessionClaim = "exclusive" | "persisted";
 
 export class SessionStore {
   private states = new Map<string, SessionInitState>();
+  private stateGenerations = new Map<string, number>();
   /** keyId → identity map — populated via {@link bind} to keep repo/binding writes user-namespaced. */
   private identities = new Map<string, SessionIdentity>();
   /** Raw source/session ownership: new sessions are exclusive; persisted owners may coexist. */
@@ -215,6 +280,7 @@ export class SessionStore {
   private repo?: SessionRepo;
   private bindingRepo?: BindingRepo;
   private recoveryInFlight = new Map<string, Promise<SessionInitState | undefined>>();
+  private persistenceTails = new Map<string, Promise<void>>();
 
   constructor(
     ttlMs: number = DEFAULT_TTL_MS,
@@ -242,12 +308,67 @@ export class SessionStore {
    * silently degrades to memory-only for such keys.
    */
   bind(keyId: string, identity: SessionIdentity): void {
-    this.claimIdentity(keyId, identity, "exclusive");
+    const current = this.states.get(keyId);
+    const claim = current && !this.isExpired(current)
+      ? identityClaimFromState(identity, current)
+      : identity;
+    this.claimIdentity(keyId, claim, "exclusive");
   }
 
   /** Test-only helper: expose the identity map for assertions. */
   getBoundIdentity(keyId: string): SessionIdentity | undefined {
     return this.identities.get(keyId);
+  }
+
+  private snapshotState(keyId: string): StateSnapshot {
+    return {
+      generation: this.stateGenerations.get(keyId) ?? 0,
+      state: this.states.get(keyId),
+    };
+  }
+
+  private commitState(keyId: string, state: SessionInitState): number {
+    const generation = (this.stateGenerations.get(keyId) ?? 0) + 1;
+    this.states.set(keyId, state);
+    this.stateGenerations.set(keyId, generation);
+    return generation;
+  }
+
+  private removeState(keyId: string, expected?: SessionInitState): boolean {
+    const current = this.states.get(keyId);
+    if (expected && current !== expected) return false;
+    if (current) this.states.delete(keyId);
+    this.stateGenerations.set(keyId, (this.stateGenerations.get(keyId) ?? 0) + 1);
+    return true;
+  }
+
+  private stateAfterAwait(
+    keyId: string,
+    before: StateSnapshot,
+    identity: SessionIdentity,
+  ): AwaitedStateResult {
+    if ((this.stateGenerations.get(keyId) ?? 0) === before.generation) {
+      return { changed: false };
+    }
+    const current = this.states.get(keyId);
+    if (!current || this.isExpired(current)) return { changed: true };
+    const merged = identityClaimFromState(this.previewIdentityClaim(keyId, identity), current);
+    // A concurrent L1 winner is not itself durable proof. Preserve an existing
+    // persisted claim, but do not upgrade an exclusive claim until its writer
+    // completes a SessionRepo or BindingRepo operation successfully.
+    this.claimIdentity(keyId, merged, "exclusive");
+    return { changed: true, state: current };
+  }
+
+  private enqueuePersistence<T>(keyId: string, work: () => Promise<T>): Promise<T> {
+    const previous = this.persistenceTails.get(keyId) ?? Promise.resolve();
+    const current = previous.then(work);
+    const tail = current.then(() => undefined, () => undefined);
+    this.persistenceTails.set(keyId, tail);
+    void tail.then(() => {
+      if (this.persistenceTails.get(keyId) === tail) this.persistenceTails.delete(keyId);
+    });
+    return current;
   }
 
   private previewIdentityClaim(keyId: string, identity: SessionIdentity): SessionIdentity {
@@ -305,22 +426,6 @@ export class SessionStore {
     if (claims.size === 0) this.rawSessionClaims.delete(rawKey);
   }
 
-  /** Return a fresh state installed while an L2 await was in flight. */
-  private claimNewerState(
-    keyId: string,
-    previousState: SessionInitState | undefined,
-    identity: SessionIdentity,
-  ): SessionInitState | undefined {
-    const current = this.states.get(keyId);
-    if (!current || current === previousState || this.isExpired(current)) return undefined;
-    const merged = this.previewIdentityClaim(keyId, identity);
-    if (!persistedStateMatchesIdentity(current, merged)) {
-      throw new SessionIdentityConflictError();
-    }
-    this.claimIdentity(keyId, merged, "persisted");
-    return current;
-  }
-
   get(keyId: string): SessionInitState | undefined {
     const state = this.states.get(keyId);
     if (!state) return undefined;
@@ -341,40 +446,36 @@ export class SessionStore {
    * 关流时 COS PUT 还在飞，pod B 的 turn-2 因 L2a miss 直接掉进 tryHistoryScan
    * 兜底 → bypass → 请求透传 LLM。
    *
-   * L2b binding 仍是 fire-and-forget —— 只在 `initialized` 状态写入，属于
-   * "小纸条"型持久化，用于长睡对话唤醒；写延迟不影响 pending 状态跨节点恢复。
+   * L2a/L2b writes for one full identity are serialized in invocation order,
+   * so an older await cannot become the final durable writer after a newer L1.
    */
   async set(keyId: string, state: SessionInitState): Promise<void> {
-    const id = this.identities.get(keyId);
     const credentialSafeState = withoutPersistedCredential(state);
+    let id = this.identities.get(keyId);
+    if (id) {
+      id = this.claimIdentity(
+        keyId,
+        identityClaimFromState(id, credentialSafeState),
+        "exclusive",
+      );
+    }
     const normalizedState = id
       ? { ...credentialSafeState, keyId: id.sessionId, userId: id.userId }
       : credentialSafeState;
-    this.states.set(keyId, normalizedState);
+    this.commitState(keyId, normalizedState);
     if (!id) {
       // No identity bound → this keyId is L1-only (anonymous session, tests
       // that bypass bind, etc.). Skip repo/binding persistence rather than
       // fabricating a partial identity.
       return;
     }
-    // L2a write-through —— MUST await；见方法头注释。
-    // 二次防御性 catch：契约要求实现方（KvSessionRepo / RedisSessionRepo /
-    // SqliteSessionRepo）内部静默降级不抛，但接口层再兜一层，保证任何后来
-    // 新增的 repo 或 test-mock 都不会把异常泄给 44 处 `await store.set(...)`
-    // caller —— L1 已成功写入，主流程不因 L2a 写失败挂掉。
-    if (this.repo) {
-      try {
-        await this.repo.upsert(spaceOf(id), id.userId, id.agentSource, id.sessionId, normalizedState);
-      } catch {
-        console.warn("[session] L2a upsert failed");
-      }
-    }
     // L2b: only write binding on terminal states
     // await 而非 fire-and-forget，保持与 L2a 一致的契约：
     // `await store.set(...)` return 时，L1 / L2a / L2b 三层都已 durable。
     // 每个 session 只会在初始化终态触发一次，成本可控。
-    if (normalizedState.status === "initialized" && this.bindingRepo) {
-      const binding: SessionBinding = normalizedState.bypassed
+    const binding: SessionBinding | undefined = normalizedState.status === "initialized"
+      && this.bindingRepo
+      ? normalizedState.bypassed
         ? { outcome: "bypassed", userId: normalizedState.userId, teamId: normalizedState.sessionInfo?.team_id, agentId: normalizedState.sessionInfo?.agent_id, taskId: normalizedState.sessionInfo?.task_id }
         : {
             outcome: "initialized",
@@ -382,24 +483,62 @@ export class SessionStore {
             teamId: normalizedState.sessionInfo?.team_id,
             agentId: normalizedState.sessionInfo?.agent_id,
             taskId: normalizedState.sessionInfo?.task_id,
-          };
-      try {
-        await this.bindingRepo.putBinding(spaceOf(id), id.userId, id.agentSource, id.sessionId, binding);
-      } catch {
-        console.warn("[session] L2b binding write failed");
+          }
+      : undefined;
+    if (!this.repo && !binding) return;
+
+    // Serialize every state-backed durable write for this full identity. L1 is
+    // still updated synchronously, while L2 observes the same invocation order.
+    await this.enqueuePersistence(keyId, async () => {
+      let durableIdentity = id!;
+      if (this.repo) {
+        let persisted = false;
+        try {
+          await this.repo.upsert(
+            spaceOf(durableIdentity),
+            durableIdentity.userId,
+            durableIdentity.agentSource,
+            durableIdentity.sessionId,
+            normalizedState,
+          );
+          persisted = true;
+        } catch {
+          console.warn("[session] L2a upsert failed");
+        }
+        if (persisted) {
+          durableIdentity = this.claimIdentity(keyId, durableIdentity, "persisted");
+        }
       }
-    }
+      if (binding && this.bindingRepo) {
+        let persisted = false;
+        try {
+          await this.bindingRepo.putBinding(
+            spaceOf(durableIdentity),
+            durableIdentity.userId,
+            durableIdentity.agentSource,
+            durableIdentity.sessionId,
+            binding,
+          );
+          persisted = true;
+        } catch {
+          console.warn("[session] L2b binding write failed");
+        }
+        if (persisted) this.claimIdentity(keyId, durableIdentity, "persisted");
+      }
+    });
   }
 
   delete(keyId: string): void {
-    this.states.delete(keyId);
+    this.removeState(keyId);
     const id = this.identities.get(keyId);
     if (!id) return;
     this.releaseRawSessionClaim(keyId);
-    this.repo?.deleteBySessionId(spaceOf(id), id.userId, id.agentSource, id.sessionId);
-    void this.bindingRepo
-      ?.deleteBinding(spaceOf(id), id.userId, id.agentSource, id.sessionId)
-      .catch(() => {});
+    void this.enqueuePersistence(keyId, async () => {
+      await this.repo?.deleteBySessionId(spaceOf(id), id.userId, id.agentSource, id.sessionId);
+      await this.bindingRepo
+        ?.deleteBinding(spaceOf(id), id.userId, id.agentSource, id.sessionId)
+        .catch(() => {});
+    }).catch(() => {});
   }
 
   getStatus(keyId: string): SessionInitStatus {
@@ -435,7 +574,7 @@ export class SessionStore {
     // Recovery can await L2 reads before reaching this point. Do not delete a
     // newer state installed by another request while those reads were in flight.
     if (this.states.get(keyId) !== state || !this.isExpired(state)) return;
-    this.states.delete(keyId);
+    this.removeState(keyId, state);
     this.releaseRawSessionClaim(keyId);
   }
 
@@ -452,7 +591,7 @@ export class SessionStore {
     const now = Date.now();
     for (const [keyId, state] of this.states) {
       if (state.status !== "initialized" && now - state.startedAt > this.ttlMs) {
-        this.states.delete(keyId);
+        this.removeState(keyId, state);
         this.releaseRawSessionClaim(keyId);
       }
     }
@@ -489,16 +628,12 @@ export class SessionStore {
         const keyId = sessionStoreKey(identity);
         if (!this.states.has(keyId)) {
           this.claimIdentity(keyId, identity, "persisted");
-          this.states.set(keyId, normalizedState);
+          this.commitState(keyId, normalizedState);
           if (normalizedState !== row.state) {
             try {
-              await this.repo.upsert(
-                row.spaceId,
-                row.userId,
-                row.agentSource,
-                row.sessionId,
-                normalizedState,
-              );
+              await this.enqueuePersistence(keyId, () => this.repo!.upsert(
+                row.spaceId, row.userId, row.agentSource, row.sessionId, normalizedState,
+              ));
             } catch {
               // Best-effort lazy migration; L1 is already credential-free.
             }
@@ -558,7 +693,8 @@ export class SessionStore {
     // 代价：pending_* 每轮多一次 storage GET（~1-2ms Redis / ~50ms COS）。
     // pending 轮次只在初始化 form 阶段出现，每个 session 顶多 2-4 次，可接受；
     // initialized 快路径仍是纯内存零 IO。
-    const cachedState = this.states.get(keyId);
+    const initialSnapshot = this.snapshotState(keyId);
+    const cachedState = initialSnapshot.state;
     const boundIdentity = this.identities.get(keyId);
     if (
       (boundIdentity && !boundIdentityMatchesIdentity(boundIdentity, identity))
@@ -571,11 +707,11 @@ export class SessionStore {
     // cache entry as a side effect of the conflict check.
     const l1 = cachedState && !this.isExpired(cachedState) ? cachedState : undefined;
     if (l1 && l1.status === "initialized") {
-      const merged = this.previewIdentityClaim(keyId, identity);
+      const merged = identityClaimFromState(this.previewIdentityClaim(keyId, identity), l1);
       if (!persistedStateMatchesIdentity(l1, merged)) {
         throw new SessionIdentityConflictError();
       }
-      this.claimIdentity(keyId, merged, "persisted");
+      this.claimIdentity(keyId, merged, "exclusive");
       console.log("[cache] session=<redacted> L1 hit (terminal)");
       return l1;
     }
@@ -588,30 +724,31 @@ export class SessionStore {
     // agentDetail/taskDetail is sitting in the storage layer. Pending 状态也
     // 必须命中就返回 —— 见上面 Step 1 的多节点陈旧 L1 注释。
     if (this.repo) {
+      const beforeL2a = this.snapshotState(keyId);
       const l2a = await this.probeL2a(identity);
-      const newerState = this.claimNewerState(keyId, cachedState, identity);
-      if (newerState) return newerState;
+      const afterL2a = this.stateAfterAwait(keyId, beforeL2a, identity);
+      if (afterL2a.changed) return afterL2a.state;
       if (l2a.state) {
-        const merged = this.previewIdentityClaim(keyId, identity);
+        const merged = identityClaimFromState(
+          this.previewIdentityClaim(keyId, identity),
+          l2a.state,
+        );
         if (!persistedStateMatchesIdentity(l2a.state, merged)) {
           throw new SessionIdentityConflictError();
         }
         const claimed = this.claimIdentity(keyId, merged, "persisted");
-        this.states.set(keyId, l2a.state);
+        this.commitState(keyId, l2a.state);
         if (l2a.needsMigration) {
+          const beforeMigration = this.snapshotState(keyId);
           try {
-            await this.repo.upsert(
-              spaceOf(claimed),
-              claimed.userId,
-              claimed.agentSource,
-              claimed.sessionId,
-              l2a.state,
-            );
+            await this.enqueuePersistence(keyId, () => this.repo!.upsert(
+              spaceOf(claimed), claimed.userId, claimed.agentSource, claimed.sessionId, l2a.state!,
+            ));
           } catch {
             // Best-effort lazy migration; L1 is already credential-free.
           }
-          const stateAfterMigration = this.claimNewerState(keyId, l2a.state, claimed);
-          if (stateAfterMigration) return stateAfterMigration;
+          const stateAfterMigration = this.stateAfterAwait(keyId, beforeMigration, claimed);
+          if (stateAfterMigration.changed) return stateAfterMigration.state;
           this.claimIdentity(keyId, claimed, "persisted");
         }
         console.log(`[cache] session=<redacted> L2a hit → promote L1${l1 ? " (override stale L1)" : ""}`);
@@ -630,11 +767,11 @@ export class SessionStore {
     // zombie / user-mismatch 已在 `this.get()` 与 `probeL2a` 内部各自 invalidate，
     // 走到这里的 l1 一定是 fresh + user 匹配的。
     if (l1) {
-      const merged = this.previewIdentityClaim(keyId, identity);
+      const merged = identityClaimFromState(this.previewIdentityClaim(keyId, identity), l1);
       if (!persistedStateMatchesIdentity(l1, merged)) {
         throw new SessionIdentityConflictError();
       }
-      this.claimIdentity(keyId, merged, "persisted");
+      this.claimIdentity(keyId, merged, "exclusive");
       console.log("[cache] session=<redacted> L1 hit (pending, L2a miss fallback)");
       return l1;
     }
@@ -647,7 +784,7 @@ export class SessionStore {
       console.log("[cache] session=<redacted> miss (no bindingRepo) → history-scan");
       return this.tryHistoryScan(keyId, claimed, ctx);
     }
-    const stateBeforeBinding = this.states.get(keyId);
+    const stateBeforeBinding = this.snapshotState(keyId);
     let binding: SessionBinding | null;
     try {
       binding = await this.bindingRepo.getBinding(
@@ -659,8 +796,8 @@ export class SessionStore {
     } catch {
       binding = null;
     }
-    const newerState = this.claimNewerState(keyId, stateBeforeBinding, identity);
-    if (newerState) return newerState;
+    const stateAfterBinding = this.stateAfterAwait(keyId, stateBeforeBinding, identity);
+    if (stateAfterBinding.changed) return stateAfterBinding.state;
     if (!binding) {
       let claimed = this.claimIdentity(keyId, identity, "exclusive");
       this.discardExpiredRecovery(keyId, this.states.get(keyId));
@@ -672,7 +809,11 @@ export class SessionStore {
     if (!bindingMatchesIdentity(binding, merged)) {
       throw new SessionIdentityConflictError();
     }
-    let claimed = this.claimIdentity(keyId, merged, "persisted");
+    let claimed = this.claimIdentity(
+      keyId,
+      identityClaimFromBinding(merged, binding),
+      "persisted",
+    );
     this.discardExpiredRecovery(keyId, this.states.get(keyId));
     claimed = this.claimIdentity(keyId, claimed, "persisted");
     // Bind only after all applicable L1, L2a, raw-session and L2b identity
@@ -793,7 +934,7 @@ export class SessionStore {
     if (!bindingMatchesIdentity(binding, claimed)) {
       throw new SessionIdentityConflictError();
     }
-    claimed = this.claimIdentity(keyId, claimed, "persisted");
+    claimed = this.claimIdentity(keyId, identityClaimFromBinding(claimed, binding), "persisted");
 
     if (!ctx.metadataClient) {
       // No client → can't recover, degrade to one-shot bypass
@@ -806,15 +947,18 @@ export class SessionStore {
     }
 
     // Step 4.2: fetch details in parallel
+    const beforeMetadata = this.snapshotState(keyId);
     const [agentR, taskR] = await Promise.allSettled([
       binding.agentId ? ctx.metadataClient.getAgent(binding.agentId) : Promise.resolve(null),
       binding.taskId ? ctx.metadataClient.getTask(binding.taskId) : Promise.resolve(null),
     ]);
+    const stateAfterMetadata = this.stateAfterAwait(keyId, beforeMetadata, claimed);
+    if (stateAfterMetadata.changed) return stateAfterMetadata.state;
     claimed = this.previewIdentityClaim(keyId, claimed);
     if (!bindingMatchesIdentity(binding, claimed)) {
       throw new SessionIdentityConflictError();
     }
-    claimed = this.claimIdentity(keyId, claimed, "persisted");
+    claimed = this.claimIdentity(keyId, identityClaimFromBinding(claimed, binding), "persisted");
 
     const isNotFound = (e: unknown): boolean =>
       typeof e === "object" && e !== null && (e as { notFound?: boolean }).notFound === true;
@@ -854,7 +998,14 @@ export class SessionStore {
     // Step 4.3: dispatch
     if (agentNotFound) {
       console.log("[session-recover] session=<redacted> agent not found, deleting binding");
-      await this.bindingRepo?.deleteBinding(spaceOf(claimed), claimed.userId, claimed.agentSource, claimed.sessionId);
+      const beforeBindingDelete = this.snapshotState(keyId);
+      await this.enqueuePersistence(keyId, async () => {
+        await this.bindingRepo?.deleteBinding(
+          spaceOf(claimed), claimed.userId, claimed.agentSource, claimed.sessionId,
+        );
+      });
+      const stateAfterBindingDelete = this.stateAfterAwait(keyId, beforeBindingDelete, claimed);
+      if (stateAfterBindingDelete.changed) return stateAfterBindingDelete.state;
       return undefined;
     }
     if (anyKernelError) {
@@ -869,13 +1020,18 @@ export class SessionStore {
     if (taskNotFound) {
       console.log("[session-recover] session=<redacted> task not found, keeping agent");
       // Update binding to drop taskId
-      await this.bindingRepo?.putBinding(
-        spaceOf(claimed),
-        claimed.userId,
-        claimed.agentSource,
-        claimed.sessionId,
-        { ...binding, taskId: undefined },
-      );
+      const beforeBindingUpdate = this.snapshotState(keyId);
+      await this.enqueuePersistence(keyId, async () => {
+        await this.bindingRepo?.putBinding(
+          spaceOf(claimed),
+          claimed.userId,
+          claimed.agentSource,
+          claimed.sessionId,
+          { ...binding, taskId: undefined },
+        );
+      });
+      const stateAfterBindingUpdate = this.stateAfterAwait(keyId, beforeBindingUpdate, claimed);
+      if (stateAfterBindingUpdate.changed) return stateAfterBindingUpdate.state;
       claimed = this.claimIdentity(keyId, claimed, "persisted");
       taskDetail = null;
     }
@@ -904,25 +1060,22 @@ export class SessionStore {
     };
 
     // Step 4.5: write back to L1 + L2a
-    this.states.set(keyId, rebuilt);
+    this.commitState(keyId, rebuilt);
     // await write-through 与 SessionStore.set 保持一致契约（见其头注释）：
     // 让恢复出的 rebuilt 状态在返回前已落 L2a，避免同 session 后续轮次
     // 若又打到别的 pod 时再走一次 rebuildFromBinding 的开销。
     // 防御性 catch 见 `set()` 头注释。
     if (this.repo) {
+      const beforePersist = this.snapshotState(keyId);
       try {
-        await this.repo.upsert(
-          spaceOf(claimed),
-          claimed.userId,
-          claimed.agentSource,
-          claimed.sessionId,
-          rebuilt,
-        );
+        await this.enqueuePersistence(keyId, () => this.repo!.upsert(
+          spaceOf(claimed), claimed.userId, claimed.agentSource, claimed.sessionId, rebuilt,
+        ));
       } catch {
         console.warn("[session-recover] L2a upsert failed during rebuild");
       }
-      const stateAfterPersist = this.claimNewerState(keyId, rebuilt, claimed);
-      if (stateAfterPersist) return stateAfterPersist;
+      const stateAfterPersist = this.stateAfterAwait(keyId, beforePersist, claimed);
+      if (stateAfterPersist.changed) return stateAfterPersist.state;
       this.claimIdentity(keyId, claimed, "persisted");
     }
 
@@ -1023,7 +1176,7 @@ export class SessionStore {
         agentDetail: null,
         taskDetail: null,
       };
-      this.states.set(keyId, state);
+      this.commitState(keyId, state);
       console.log("[session-recover] session=<redacted> history scan → bypass (form found, no agent selected)");
       return state;
     }

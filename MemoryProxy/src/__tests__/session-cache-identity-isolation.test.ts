@@ -401,6 +401,33 @@ describe("session cache identity isolation", () => {
     expect(store.get(key)).toEqual(state);
   });
 
+  it("promotes optional identity from initialized state before a later bind", async () => {
+    const fullIdentity = victimIdentity();
+    const partialIdentity: FullSessionIdentity = {
+      userId: fullIdentity.userId,
+      agentSource: fullIdentity.agentSource,
+      sessionId: fullIdentity.sessionId,
+      spaceId: fullIdentity.spaceId,
+    };
+    const conflictingIdentity: FullSessionIdentity = {
+      ...fullIdentity,
+      taskId: OUTSIDER.taskId,
+    };
+    const key = sessionStoreKey(partialIdentity);
+    const state = victimState();
+    const store = new SessionStore();
+
+    store.bind(key, partialIdentity);
+    await store.set(key, state);
+
+    expect(store.getBoundIdentity(key)).toEqual(fullIdentity);
+    expect(() => store.bind(key, conflictingIdentity))
+      .toThrowError(expect.objectContaining({ name: "SessionIdentityConflictError" }));
+    expect(store.getBoundIdentity(key)).toEqual(fullIdentity);
+    expect(store.get(key)).toEqual(state);
+    await expect(store.getOrRecover(key, fullIdentity, {})).resolves.toEqual(state);
+  });
+
   it("does not expire a stale L1 entry before rejecting a bound identity conflict", async () => {
     let persisted: SessionInitState | null = null;
     const deleteBySessionId = vi.fn(() => { persisted = null; });
@@ -656,11 +683,18 @@ describe("session cache identity isolation", () => {
 
   it("scans raw-session conflicts without expiring another identity's state", async () => {
     const deleteBySessionId = vi.fn(() => undefined);
+    const hydratedRows: Array<{
+      spaceId: string;
+      userId: string;
+      agentSource: string;
+      sessionId: string;
+      state: SessionInitState;
+    }> = [];
     const repo: SessionRepo = {
       upsert: vi.fn(async () => undefined),
       getBySessionId: vi.fn(async () => null),
       deleteBySessionId,
-      loadAllInitialized: async () => [],
+      loadAllInitialized: async () => hydratedRows,
     };
     const store = new SessionStore(1, repo);
     const expiredIdentity = victimIdentity();
@@ -692,9 +726,17 @@ describe("session cache identity isolation", () => {
         agent_id: liveIdentity.agentId!,
         task_id: liveIdentity.taskId,
       },
+      agentDetail: { id: liveIdentity.agentId!, name: "Live Agent" },
+      taskDetail: { id: liveIdentity.taskId!, name: "Live Task" },
     };
-    store.bind(liveKey, liveIdentity);
-    await store.set(liveKey, liveState);
+    hydratedRows.push({
+      spaceId: liveIdentity.spaceId!,
+      userId: liveIdentity.userId,
+      agentSource: liveIdentity.agentSource,
+      sessionId: liveIdentity.sessionId,
+      state: liveState,
+    });
+    await expect(store.hydrateFromDb()).resolves.toBe(1);
     vi.clearAllMocks();
 
     const rejectedIdentity: FullSessionIdentity = {
@@ -770,6 +812,367 @@ describe("session cache identity isolation", () => {
     expect(store.get(sessionStoreKey(outsiderIdentity))?.sessionInfo?.user_id)
       .toBe(OUTSIDER.userId);
   });
+
+  it("promotes a successful durable set to a persisted raw owner", async () => {
+    const firstIdentity = victimIdentity();
+    const secondIdentity: FullSessionIdentity = {
+      userId: OUTSIDER.userId,
+      agentSource: VICTIM.source,
+      sessionId: VICTIM.sessionId,
+      spaceId: OUTSIDER.spaceId,
+      teamId: OUTSIDER.teamId,
+      agentId: OUTSIDER.agentId,
+      taskId: OUTSIDER.taskId,
+    };
+    const secondState: SessionInitState = {
+      ...victimState(),
+      userId: secondIdentity.userId,
+      sessionInfo: {
+        ...victimState().sessionInfo!,
+        user_id: secondIdentity.userId,
+        space_id: secondIdentity.spaceId,
+        team_id: secondIdentity.teamId!,
+        agent_id: secondIdentity.agentId!,
+        task_id: secondIdentity.taskId,
+      },
+      agentDetail: { id: secondIdentity.agentId!, name: "Second Agent" },
+      taskDetail: { id: secondIdentity.taskId!, name: "Second Task" },
+    };
+    const upsert = vi.fn(async () => undefined);
+    const repo: SessionRepo = {
+      upsert,
+      getBySessionId: vi.fn(async (_space, userId) => userId === secondIdentity.userId
+        ? secondState
+        : null),
+      deleteBySessionId: vi.fn(() => undefined),
+      loadAllInitialized: async () => [],
+    };
+    const store = new SessionStore(30 * 60 * 1_000, repo);
+    const firstKey = sessionStoreKey(firstIdentity);
+    const secondKey = sessionStoreKey(secondIdentity);
+
+    store.bind(firstKey, firstIdentity);
+    await store.set(firstKey, victimState());
+    await expect(store.getOrRecover(secondKey, secondIdentity, {})).resolves.toEqual(secondState);
+
+    expect(upsert).toHaveBeenCalledTimes(1);
+    expect(store.getBoundIdentity(firstKey)).toEqual(firstIdentity);
+    expect(store.getBoundIdentity(secondKey)).toEqual(secondIdentity);
+    expect(store.get(firstKey)).toMatchObject({ userId: firstIdentity.userId });
+    expect(store.get(secondKey)).toEqual(secondState);
+  });
+
+  it("does not promote a raw owner when its durable set fails", async () => {
+    const firstIdentity = victimIdentity();
+    const secondIdentity: FullSessionIdentity = {
+      userId: OUTSIDER.userId,
+      agentSource: VICTIM.source,
+      sessionId: VICTIM.sessionId,
+      spaceId: OUTSIDER.spaceId,
+      teamId: OUTSIDER.teamId,
+      agentId: OUTSIDER.agentId,
+      taskId: OUTSIDER.taskId,
+    };
+    const secondState: SessionInitState = {
+      ...victimState(),
+      userId: secondIdentity.userId,
+      sessionInfo: {
+        ...victimState().sessionInfo!,
+        user_id: secondIdentity.userId,
+        space_id: secondIdentity.spaceId,
+        team_id: secondIdentity.teamId!,
+        agent_id: secondIdentity.agentId!,
+        task_id: secondIdentity.taskId,
+      },
+    };
+    let rejectWrites = true;
+    const repo: SessionRepo = {
+      upsert: vi.fn(async () => {
+        if (rejectWrites) throw new Error("durable-write-rejected");
+      }),
+      getBySessionId: vi.fn(async (_space, userId) => userId === secondIdentity.userId
+        ? secondState
+        : null),
+      deleteBySessionId: vi.fn(() => undefined),
+      loadAllInitialized: async () => [],
+    };
+    const store = new SessionStore(30 * 60 * 1_000, repo);
+    const firstKey = sessionStoreKey(firstIdentity);
+    const secondKey = sessionStoreKey(secondIdentity);
+
+    store.bind(firstKey, firstIdentity);
+    await store.set(firstKey, victimState());
+    rejectWrites = false;
+
+    await expect(store.getOrRecover(secondKey, secondIdentity, {}))
+      .rejects.toMatchObject({ name: "SessionIdentityConflictError" });
+    expect(store.getBoundIdentity(firstKey)).toEqual(firstIdentity);
+    expect(store.getBoundIdentity(secondKey)).toBeUndefined();
+    expect(store.get(firstKey)).toMatchObject({ userId: firstIdentity.userId });
+    expect(store.get(secondKey)).toBeUndefined();
+  });
+
+  it("keeps a newer same-identity state installed while metadata recovery waits", async () => {
+    let signalMetadata!: () => void;
+    let releaseMetadata!: () => void;
+    const metadataStarted = new Promise<void>((resolve) => { signalMetadata = resolve; });
+    const metadataReleased = new Promise<void>((resolve) => { releaseMetadata = resolve; });
+    const identity = victimIdentity();
+    const key = sessionStoreKey(identity);
+    const touchLastSeen = vi.fn(async () => undefined);
+    const putBinding = vi.fn(async () => undefined);
+    const bindingRepo: BindingRepo = {
+      getBinding: vi.fn(async (): Promise<SessionBinding> => ({
+        outcome: "initialized",
+        userId: identity.userId,
+        teamId: identity.teamId,
+        agentId: identity.agentId,
+        taskId: identity.taskId,
+      })),
+      putBinding,
+      deleteBinding: vi.fn(async () => undefined),
+      touchLastSeen,
+    };
+    const metadataClient = {
+      getAgent: vi.fn(async () => {
+        signalMetadata();
+        await metadataReleased;
+        return { agent_id: identity.agentId!, name: "Recovered Agent" };
+      }),
+      getTask: vi.fn(async () => ({ task_id: identity.taskId!, title: "Recovered Task" })),
+    };
+    const store = new SessionStore(30 * 60 * 1_000, undefined, bindingRepo);
+
+    const recovery = store.getOrRecover(key, identity, { metadataClient: metadataClient as never });
+    await metadataStarted;
+    const newerState: SessionInitState = {
+      ...victimState(),
+      agentDetail: { id: identity.agentId!, name: "Newer Agent" },
+      taskDetail: { id: identity.taskId!, name: "Newer Task" },
+    };
+    await store.set(key, newerState);
+    const installed = store.get(key);
+    vi.clearAllMocks();
+    releaseMetadata();
+
+    await expect(recovery).resolves.toBe(installed);
+    expect(store.get(key)).toBe(installed);
+    expect(store.getBoundIdentity(key)).toEqual(identity);
+    expect(touchLastSeen).not.toHaveBeenCalled();
+    expect(putBinding).not.toHaveBeenCalled();
+  });
+
+  it("keeps a newer state installed while a stale task-binding update waits", async () => {
+    let signalTaskDrop!: () => void;
+    let releaseTaskDrop!: () => void;
+    const taskDropStarted = new Promise<void>((resolve) => { signalTaskDrop = resolve; });
+    const taskDropReleased = new Promise<void>((resolve) => { releaseTaskDrop = resolve; });
+    const identity = victimIdentity();
+    const key = sessionStoreKey(identity);
+    const touchLastSeen = vi.fn(async () => undefined);
+    let persistedBinding: SessionBinding | null = null;
+    const putBinding = vi.fn(async (_space, _user, _source, _session, binding: SessionBinding) => {
+      if (!binding.taskId) {
+        signalTaskDrop();
+        await taskDropReleased;
+      }
+      persistedBinding = binding;
+    });
+    const bindingRepo: BindingRepo = {
+      getBinding: vi.fn(async (): Promise<SessionBinding> => ({
+        outcome: "initialized",
+        userId: identity.userId,
+        teamId: identity.teamId,
+        agentId: identity.agentId,
+        taskId: identity.taskId,
+      })),
+      putBinding,
+      deleteBinding: vi.fn(async () => undefined),
+      touchLastSeen,
+    };
+    const metadataClient = {
+      getAgent: vi.fn(async () => ({ agent_id: identity.agentId!, name: "Recovered Agent" })),
+      getTask: vi.fn(async () => { throw { notFound: true }; }),
+    };
+    const store = new SessionStore(30 * 60 * 1_000, undefined, bindingRepo);
+
+    const recovery = store.getOrRecover(key, identity, { metadataClient: metadataClient as never });
+    await taskDropStarted;
+    const newerState: SessionInitState = {
+      ...victimState(),
+      agentDetail: { id: identity.agentId!, name: "Newer Agent" },
+      taskDetail: { id: identity.taskId!, name: "Newer Task" },
+    };
+    const newerWrite = store.set(key, newerState);
+    await Promise.resolve();
+    const installed = store.get(key);
+    releaseTaskDrop();
+
+    await expect(recovery).resolves.toBe(installed);
+    await newerWrite;
+    expect(store.get(key)).toBe(installed);
+    expect(store.getBoundIdentity(key)).toEqual(identity);
+    expect(touchLastSeen).toHaveBeenCalledTimes(1);
+    expect(putBinding).toHaveBeenCalledTimes(2);
+    expect(persistedBinding).toMatchObject({ taskId: identity.taskId });
+  });
+
+  it("serializes concurrent set persistence so the latest L1 state wins L2", async () => {
+    let signalOldWrite!: () => void;
+    let releaseOldWrite!: () => void;
+    const oldWriteStarted = new Promise<void>((resolve) => { signalOldWrite = resolve; });
+    const oldWriteReleased = new Promise<void>((resolve) => { releaseOldWrite = resolve; });
+    const identity = victimIdentity();
+    const key = sessionStoreKey(identity);
+    const oldState: SessionInitState = {
+      ...victimState(),
+      agentDetail: { id: identity.agentId!, name: "Old Agent" },
+    };
+    const newerState: SessionInitState = {
+      ...victimState(),
+      agentDetail: { id: identity.agentId!, name: "Newer Agent" },
+    };
+    const durable = { state: null as SessionInitState | null };
+    const repo: SessionRepo = {
+      upsert: vi.fn(async (_space, _user, _source, _session, state) => {
+        if (state.agentDetail?.name === "Old Agent") {
+          signalOldWrite();
+          await oldWriteReleased;
+        }
+        durable.state = state;
+      }),
+      getBySessionId: vi.fn(async () => durable.state),
+      deleteBySessionId: vi.fn(() => undefined),
+      loadAllInitialized: async () => [],
+    };
+    const store = new SessionStore(30 * 60 * 1_000, repo);
+    store.bind(key, identity);
+
+    const oldWrite = store.set(key, oldState);
+    await oldWriteStarted;
+    const newerWrite = store.set(key, newerState);
+    await Promise.resolve();
+    expect(store.get(key)?.agentDetail?.name).toBe("Newer Agent");
+    releaseOldWrite();
+    await Promise.all([oldWrite, newerWrite]);
+
+    expect(store.get(key)?.agentDetail?.name).toBe("Newer Agent");
+    expect(durable.state?.agentDetail?.name).toBe("Newer Agent");
+  });
+
+  it("serializes an asynchronous delete before a later write to the same identity", async () => {
+    let signalDelete!: () => void;
+    let releaseDelete!: () => void;
+    let signalDeleteFinished!: () => void;
+    const deleteStarted = new Promise<void>((resolve) => { signalDelete = resolve; });
+    const deleteReleased = new Promise<void>((resolve) => { releaseDelete = resolve; });
+    const deleteFinished = new Promise<void>((resolve) => { signalDeleteFinished = resolve; });
+    const identity = victimIdentity();
+    const key = sessionStoreKey(identity);
+    const newerState: SessionInitState = {
+      ...victimState(),
+      agentDetail: { id: identity.agentId!, name: "Newer Agent" },
+    };
+    const durable = { state: null as SessionInitState | null };
+    const upsert = vi.fn(async (_space, _user, _source, _session, state) => {
+      durable.state = state;
+    });
+    const repo: SessionRepo = {
+      upsert,
+      getBySessionId: vi.fn(async () => durable.state),
+      deleteBySessionId: vi.fn(async () => {
+        signalDelete();
+        await deleteReleased;
+        durable.state = null;
+        signalDeleteFinished();
+      }),
+      loadAllInitialized: async () => [],
+    };
+    const deleteBinding = vi.fn(async () => undefined);
+    const bindingRepo: BindingRepo = {
+      getBinding: vi.fn(async () => null),
+      putBinding: vi.fn(async () => undefined),
+      deleteBinding,
+      touchLastSeen: vi.fn(async () => undefined),
+    };
+    const store = new SessionStore(30 * 60 * 1_000, repo, bindingRepo);
+    store.bind(key, identity);
+    await store.set(key, victimState());
+
+    store.delete(key);
+    await deleteStarted;
+    const newerWrite = store.set(key, newerState);
+
+    expect(upsert).toHaveBeenCalledTimes(1);
+    expect(deleteBinding).not.toHaveBeenCalled();
+    releaseDelete();
+    await deleteFinished;
+    await newerWrite;
+    expect(deleteBinding).toHaveBeenCalledTimes(1);
+    expect(durable.state?.agentDetail?.name).toBe("Newer Agent");
+  });
+
+  it.each(["before-wait", "after-wait"] as const)(
+    "keeps the latest state durable when stale rebuild persistence completes %s",
+    async (oldWriteOrder) => {
+      let signalOldWrite!: () => void;
+      let releaseOldWrite!: () => void;
+      const oldWriteStarted = new Promise<void>((resolve) => { signalOldWrite = resolve; });
+      const oldWriteReleased = new Promise<void>((resolve) => { releaseOldWrite = resolve; });
+      const identity = victimIdentity();
+      const key = sessionStoreKey(identity);
+      const newerState: SessionInitState = {
+        ...victimState(),
+        agentDetail: { id: identity.agentId!, name: "Newer Agent" },
+        taskDetail: { id: identity.taskId!, name: "Newer Task" },
+      };
+      const durable = { state: null as SessionInitState | null };
+      const repo: SessionRepo = {
+        upsert: vi.fn(async (_space, _user, _source, _session, state) => {
+          const staleRebuild = state.agentDetail?.name === "Recovered Agent";
+          if (staleRebuild && oldWriteOrder === "before-wait") durable.state = state;
+          if (staleRebuild) {
+            signalOldWrite();
+            await oldWriteReleased;
+          }
+          if (!staleRebuild || oldWriteOrder === "after-wait") durable.state = state;
+        }),
+        getBySessionId: vi.fn(async () => null),
+        deleteBySessionId: vi.fn(() => undefined),
+        loadAllInitialized: async () => [],
+      };
+      const bindingRepo: BindingRepo = {
+        getBinding: vi.fn(async (): Promise<SessionBinding> => ({
+          outcome: "initialized",
+          userId: identity.userId,
+          teamId: identity.teamId,
+          agentId: identity.agentId,
+          taskId: identity.taskId,
+        })),
+        putBinding: vi.fn(async () => undefined),
+        deleteBinding: vi.fn(async () => undefined),
+        touchLastSeen: vi.fn(async () => undefined),
+      };
+      const metadataClient = {
+        getAgent: vi.fn(async () => ({ agent_id: identity.agentId!, name: "Recovered Agent" })),
+        getTask: vi.fn(async () => ({ task_id: identity.taskId!, title: "Recovered Task" })),
+      };
+      const store = new SessionStore(30 * 60 * 1_000, repo, bindingRepo);
+
+      const recovery = store.getOrRecover(key, identity, { metadataClient: metadataClient as never });
+      await oldWriteStarted;
+      const newerWrite = store.set(key, newerState);
+      await Promise.resolve();
+      const installed = store.get(key);
+      releaseOldWrite();
+
+      await expect(recovery).resolves.toBe(installed);
+      await newerWrite;
+      expect(store.get(key)).toBe(installed);
+      expect(durable.state?.agentDetail?.name).toBe("Newer Agent");
+      expect(durable.state?.taskDetail?.name).toBe("Newer Task");
+    },
+  );
 
   it("does not deduplicate concurrent recovery across user and space", async () => {
     const outsiderIdentity: FullSessionIdentity = {

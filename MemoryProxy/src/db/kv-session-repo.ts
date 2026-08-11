@@ -79,13 +79,13 @@ export class KvSessionRepo implements SessionRepo {
     }
   }
 
-  deleteBySessionId(
+  async deleteBySessionId(
     spaceId: string,
     userId: string,
     agentSource: string,
     sessionId: string,
-  ): void {
-    this.storage
+  ): Promise<void> {
+    await this.storage
       .del(mainKey(spaceId, userId, agentSource, sessionId))
       .catch(() => { /* silent */ });
   }
