@@ -59,6 +59,34 @@ function compatibleOptionalIdentity(left?: string, right?: string): boolean {
   return !left || !right || left === right;
 }
 
+function mergeOptionalIdentity(bound?: string, incoming?: string): string | undefined {
+  if (bound && incoming && bound !== incoming) {
+    throw new SessionIdentityConflictError();
+  }
+  return bound || incoming;
+}
+
+function mergeIdentityClaim(
+  bound: SessionIdentity | undefined,
+  incoming: SessionIdentity,
+): SessionIdentity {
+  if (!bound) return { ...incoming };
+  if (
+    bound.userId !== incoming.userId
+    || bound.agentSource !== incoming.agentSource
+    || bound.sessionId !== incoming.sessionId
+    || spaceOf(bound) !== spaceOf(incoming)
+  ) {
+    throw new SessionIdentityConflictError();
+  }
+  return {
+    ...bound,
+    teamId: mergeOptionalIdentity(bound.teamId, incoming.teamId),
+    agentId: mergeOptionalIdentity(bound.agentId, incoming.agentId),
+    taskId: mergeOptionalIdentity(bound.taskId, incoming.taskId),
+  };
+}
+
 function boundIdentityMatchesIdentity(
   bound: SessionIdentity,
   incoming: SessionIdentity,
@@ -66,7 +94,7 @@ function boundIdentityMatchesIdentity(
   return bound.userId === incoming.userId
     && bound.agentSource === incoming.agentSource
     && bound.sessionId === incoming.sessionId
-    && compatibleOptionalIdentity(bound.spaceId, incoming.spaceId)
+    && spaceOf(bound) === spaceOf(incoming)
     && compatibleOptionalIdentity(bound.teamId, incoming.teamId)
     && compatibleOptionalIdentity(bound.agentId, incoming.agentId)
     && compatibleOptionalIdentity(bound.taskId, incoming.taskId);
@@ -153,6 +181,10 @@ function recoveryIdentityKey(keyId: string, identity: SessionIdentity): string {
   ]);
 }
 
+function rawSessionKey(identity: SessionIdentity): string {
+  return JSON.stringify([identity.agentSource, identity.sessionId]);
+}
+
 /** Extract spaceId from identity, defaulting to `""` for repo helpers. */
 function spaceOf(id: SessionIdentity): string {
   return id.spaceId ?? "";
@@ -168,12 +200,17 @@ export interface RecoveryContext {
 
 interface L2aProbeResult {
   state?: SessionInitState;
+  needsMigration?: boolean;
 }
+
+type RawSessionClaim = "exclusive" | "persisted";
 
 export class SessionStore {
   private states = new Map<string, SessionInitState>();
   /** keyId → identity map — populated via {@link bind} to keep repo/binding writes user-namespaced. */
   private identities = new Map<string, SessionIdentity>();
+  /** Raw source/session ownership: new sessions are exclusive; persisted owners may coexist. */
+  private rawSessionClaims = new Map<string, Map<string, RawSessionClaim>>();
   private ttlMs: number;
   private repo?: SessionRepo;
   private bindingRepo?: BindingRepo;
@@ -205,17 +242,83 @@ export class SessionStore {
    * silently degrades to memory-only for such keys.
    */
   bind(keyId: string, identity: SessionIdentity): void {
-    assertIdentityScopedKey(keyId, identity);
-    const bound = this.identities.get(keyId);
-    if (bound && !boundIdentityMatchesIdentity(bound, identity)) {
-      throw new SessionIdentityConflictError();
-    }
-    this.identities.set(keyId, identity);
+    this.claimIdentity(keyId, identity, "exclusive");
   }
 
   /** Test-only helper: expose the identity map for assertions. */
   getBoundIdentity(keyId: string): SessionIdentity | undefined {
     return this.identities.get(keyId);
+  }
+
+  private previewIdentityClaim(keyId: string, identity: SessionIdentity): SessionIdentity {
+    assertIdentityScopedKey(keyId, identity);
+    return mergeIdentityClaim(this.identities.get(keyId), identity);
+  }
+
+  /**
+   * Synchronously claim the scoped identity and raw conversation ownership.
+   * Every validation completes before either map is mutated, so no competing
+   * request can observe a partial claim between JavaScript turns.
+   */
+  private claimIdentity(
+    keyId: string,
+    identity: SessionIdentity,
+    requestedRawClaim: RawSessionClaim,
+  ): SessionIdentity {
+    const merged = this.previewIdentityClaim(keyId, identity);
+    const rawKey = rawSessionKey(merged);
+    const nextRawClaims = new Map(this.rawSessionClaims.get(rawKey));
+
+    // An expired exclusive owner no longer blocks reuse. Do not evict its L1
+    // state here: rejected claim checks must remain side-effect free.
+    for (const [ownerKey, claim] of nextRawClaims) {
+      const ownerState = this.states.get(ownerKey);
+      if (claim === "exclusive" && ownerState && this.isExpired(ownerState)) {
+        nextRawClaims.delete(ownerKey);
+      }
+    }
+
+    const existingClaim = nextRawClaims.get(keyId);
+    const effectiveClaim = existingClaim === "persisted" ? "persisted" : requestedRawClaim;
+    for (const [ownerKey, claim] of nextRawClaims) {
+      if (ownerKey === keyId) continue;
+      if (effectiveClaim === "exclusive" || claim === "exclusive") {
+        throw new SessionIdentityConflictError();
+      }
+    }
+    if (effectiveClaim === "exclusive" && this.hasRawSessionConflict(keyId, merged)) {
+      throw new SessionIdentityConflictError();
+    }
+
+    nextRawClaims.set(keyId, effectiveClaim);
+    this.identities.set(keyId, merged);
+    this.rawSessionClaims.set(rawKey, nextRawClaims);
+    return merged;
+  }
+
+  private releaseRawSessionClaim(keyId: string): void {
+    const identity = this.identities.get(keyId);
+    if (!identity) return;
+    const rawKey = rawSessionKey(identity);
+    const claims = this.rawSessionClaims.get(rawKey);
+    if (!claims?.delete(keyId)) return;
+    if (claims.size === 0) this.rawSessionClaims.delete(rawKey);
+  }
+
+  /** Return a fresh state installed while an L2 await was in flight. */
+  private claimNewerState(
+    keyId: string,
+    previousState: SessionInitState | undefined,
+    identity: SessionIdentity,
+  ): SessionInitState | undefined {
+    const current = this.states.get(keyId);
+    if (!current || current === previousState || this.isExpired(current)) return undefined;
+    const merged = this.previewIdentityClaim(keyId, identity);
+    if (!persistedStateMatchesIdentity(current, merged)) {
+      throw new SessionIdentityConflictError();
+    }
+    this.claimIdentity(keyId, merged, "persisted");
+    return current;
   }
 
   get(keyId: string): SessionInitState | undefined {
@@ -292,6 +395,7 @@ export class SessionStore {
     this.states.delete(keyId);
     const id = this.identities.get(keyId);
     if (!id) return;
+    this.releaseRawSessionClaim(keyId);
     this.repo?.deleteBySessionId(spaceOf(id), id.userId, id.agentSource, id.sessionId);
     void this.bindingRepo
       ?.deleteBinding(spaceOf(id), id.userId, id.agentSource, id.sessionId)
@@ -332,6 +436,7 @@ export class SessionStore {
     // newer state installed by another request while those reads were in flight.
     if (this.states.get(keyId) !== state || !this.isExpired(state)) return;
     this.states.delete(keyId);
+    this.releaseRawSessionClaim(keyId);
   }
 
   private discardExpiredRecovery(
@@ -348,6 +453,7 @@ export class SessionStore {
     for (const [keyId, state] of this.states) {
       if (state.status !== "initialized" && now - state.startedAt > this.ttlMs) {
         this.states.delete(keyId);
+        this.releaseRawSessionClaim(keyId);
       }
     }
   }
@@ -382,8 +488,8 @@ export class SessionStore {
         }
         const keyId = sessionStoreKey(identity);
         if (!this.states.has(keyId)) {
+          this.claimIdentity(keyId, identity, "persisted");
           this.states.set(keyId, normalizedState);
-          this.identities.set(keyId, identity);
           if (normalizedState !== row.state) {
             try {
               await this.repo.upsert(
@@ -444,8 +550,8 @@ export class SessionStore {
     //                       unrecognized → session bypass → 请求原样透传给
     //                       LLM（用户观感：不选 task 就走了）。
     //
-    // 修法：pending_* 无论 L1 是否命中，都必须走 probeL2a 拿权威值；probeL2a
-    // 内部会 promote 覆盖 L1，之后 init.ts 的 `store.get(compositeKey)` 就能
+    // 修法：pending_* 无论 L1 是否命中，都必须走 probeL2a 拿权威值；caller
+    // 在同步 identity claim 后 promote 覆盖 L1，之后 init.ts 的 `store.get(compositeKey)` 就能
     // 读到最新状态。L1 pending 命中作为 L2a 失败/miss 时的 last-resort fallback
     // 保留（见 Step 2 后的分支），保证同 pod 场景下 L2a 尚未落盘时不倒退。
     //
@@ -464,10 +570,12 @@ export class SessionStore {
     // must reject without letting the caller mutate this or another identity's
     // cache entry as a side effect of the conflict check.
     const l1 = cachedState && !this.isExpired(cachedState) ? cachedState : undefined;
-    const rawSessionConflict = !l1 && this.hasRawSessionConflict(keyId, identity);
-
     if (l1 && l1.status === "initialized") {
-      this.identities.set(keyId, identity);
+      const merged = this.previewIdentityClaim(keyId, identity);
+      if (!persistedStateMatchesIdentity(l1, merged)) {
+        throw new SessionIdentityConflictError();
+      }
+      this.claimIdentity(keyId, merged, "persisted");
       console.log("[cache] session=<redacted> L1 hit (terminal)");
       return l1;
     }
@@ -480,9 +588,32 @@ export class SessionStore {
     // agentDetail/taskDetail is sitting in the storage layer. Pending 状态也
     // 必须命中就返回 —— 见上面 Step 1 的多节点陈旧 L1 注释。
     if (this.repo) {
-      const l2a = await this.probeL2a(keyId, identity);
+      const l2a = await this.probeL2a(identity);
+      const newerState = this.claimNewerState(keyId, cachedState, identity);
+      if (newerState) return newerState;
       if (l2a.state) {
-        this.identities.set(keyId, identity);
+        const merged = this.previewIdentityClaim(keyId, identity);
+        if (!persistedStateMatchesIdentity(l2a.state, merged)) {
+          throw new SessionIdentityConflictError();
+        }
+        const claimed = this.claimIdentity(keyId, merged, "persisted");
+        this.states.set(keyId, l2a.state);
+        if (l2a.needsMigration) {
+          try {
+            await this.repo.upsert(
+              spaceOf(claimed),
+              claimed.userId,
+              claimed.agentSource,
+              claimed.sessionId,
+              l2a.state,
+            );
+          } catch {
+            // Best-effort lazy migration; L1 is already credential-free.
+          }
+          const stateAfterMigration = this.claimNewerState(keyId, l2a.state, claimed);
+          if (stateAfterMigration) return stateAfterMigration;
+          this.claimIdentity(keyId, claimed, "persisted");
+        }
         console.log(`[cache] session=<redacted> L2a hit → promote L1${l1 ? " (override stale L1)" : ""}`);
         return l2a.state;
       }
@@ -499,19 +630,24 @@ export class SessionStore {
     // zombie / user-mismatch 已在 `this.get()` 与 `probeL2a` 内部各自 invalidate，
     // 走到这里的 l1 一定是 fresh + user 匹配的。
     if (l1) {
-      this.identities.set(keyId, identity);
+      const merged = this.previewIdentityClaim(keyId, identity);
+      if (!persistedStateMatchesIdentity(l1, merged)) {
+        throw new SessionIdentityConflictError();
+      }
+      this.claimIdentity(keyId, merged, "persisted");
       console.log("[cache] session=<redacted> L1 hit (pending, L2a miss fallback)");
       return l1;
     }
 
     // Step 3: L2b Binding
     if (!this.bindingRepo) {
-      if (rawSessionConflict) throw new SessionIdentityConflictError();
+      let claimed = this.claimIdentity(keyId, identity, "exclusive");
       this.discardExpiredRecovery(keyId, cachedState);
-      this.identities.set(keyId, identity);
+      claimed = this.claimIdentity(keyId, claimed, "exclusive");
       console.log("[cache] session=<redacted> miss (no bindingRepo) → history-scan");
-      return this.tryHistoryScan(keyId, identity, ctx);
+      return this.tryHistoryScan(keyId, claimed, ctx);
     }
+    const stateBeforeBinding = this.states.get(keyId);
     let binding: SessionBinding | null;
     try {
       binding = await this.bindingRepo.getBinding(
@@ -523,35 +659,39 @@ export class SessionStore {
     } catch {
       binding = null;
     }
+    const newerState = this.claimNewerState(keyId, stateBeforeBinding, identity);
+    if (newerState) return newerState;
     if (!binding) {
-      if (rawSessionConflict) throw new SessionIdentityConflictError();
-      this.discardExpiredRecovery(keyId, cachedState);
-      this.identities.set(keyId, identity);
+      let claimed = this.claimIdentity(keyId, identity, "exclusive");
+      this.discardExpiredRecovery(keyId, this.states.get(keyId));
+      claimed = this.claimIdentity(keyId, claimed, "exclusive");
       console.log("[cache] session=<redacted> miss (no binding) → history-scan");
-      return this.tryHistoryScan(keyId, identity, ctx);
+      return this.tryHistoryScan(keyId, claimed, ctx);
     }
-    if (!bindingMatchesIdentity(binding, identity)) {
+    const merged = this.previewIdentityClaim(keyId, identity);
+    if (!bindingMatchesIdentity(binding, merged)) {
       throw new SessionIdentityConflictError();
     }
-    this.discardExpiredRecovery(keyId, cachedState);
+    let claimed = this.claimIdentity(keyId, merged, "persisted");
+    this.discardExpiredRecovery(keyId, this.states.get(keyId));
+    claimed = this.claimIdentity(keyId, claimed, "persisted");
     // Bind only after all applicable L1, L2a, raw-session and L2b identity
     // checks pass. A rejected caller must never poison a later recovery.
-    this.identities.set(keyId, identity);
     console.log(`[cache] session=<redacted> L2b binding hit outcome=${binding.outcome} → rebuild`);
 
     // Async touch (refresh 30d TTL, don't await)
     void this.bindingRepo
-      .touchLastSeen(spaceOf(identity), identity.userId, identity.agentSource, identity.sessionId)
+      .touchLastSeen(spaceOf(claimed), claimed.userId, claimed.agentSource, claimed.sessionId)
       .catch(() => {});
 
     // Step 3.1: bypassed outcome → construct bypass state
     if (binding.outcome === "bypassed") {
       const state: SessionInitState = {
         status: "initialized",
-        keyId: identity.sessionId,
+        keyId: claimed.sessionId,
         startedAt: Date.now(),
         attemptCount: 0,
-        userId: identity.userId,
+        userId: claimed.userId,
         bypassed: true,
         sessionInfo: null,
         agentDetail: null,
@@ -562,12 +702,13 @@ export class SessionStore {
     }
 
     // Step 3.2: initialized outcome → rebuild via kernel
-    return this.rebuildFromBinding(keyId, identity, binding, ctx);
+    return this.rebuildFromBinding(keyId, claimed, binding, ctx);
   }
 
   /**
-   * L2a probe: read the full SessionInitState (agentDetail / taskDetail
-   * included) from `SessionRepo` and, if valid, promote it back to L1.
+   * L2a probe: read and validate the full SessionInitState (agentDetail /
+   * taskDetail included). Promotion and migration happen only after the caller
+   * synchronously claims identity ownership.
    *
    * Returns undefined (caller should fall through to L2b) when:
    *   - the repo has no row for this key,
@@ -581,7 +722,6 @@ export class SessionStore {
    * started on node A can continue on node B.
    */
   private async probeL2a(
-    keyId: string,
     identity: SessionIdentity,
   ): Promise<L2aProbeResult> {
     let row: SessionInitState | null;
@@ -620,24 +760,10 @@ export class SessionStore {
     const normalizedRow = row.keyId === identity.sessionId
       ? row
       : { ...row, keyId: identity.sessionId };
-    if (normalizedRow !== persistedRow) {
-      try {
-        await this.repo!.upsert(
-          spaceOf(identity),
-          identity.userId,
-          identity.agentSource,
-          identity.sessionId,
-          normalizedRow,
-        );
-      } catch {
-        // Best-effort lazy migration; returned state is already sanitized.
-      }
-    }
-    this.states.set(keyId, normalizedRow);
     console.log(
       `[session-recover] session=<redacted> L2a hit status=${row.status} agent=${row.sessionInfo?.agent_id ? "present" : "none"} task=${row.sessionInfo?.task_id ? "present" : "none"}`,
     );
-    return { state: normalizedRow };
+    return { state: normalizedRow, needsMigration: normalizedRow !== persistedRow };
   }
 
   /** In-flight promise deduplication: same keyId → same rebuild promise. */
@@ -663,15 +789,17 @@ export class SessionStore {
     ctx: RecoveryContext,
   ): Promise<SessionInitState | undefined> {
     // Step 4.1: never rebuild a binding under a conflicting caller identity.
-    if (!bindingMatchesIdentity(binding, identity)) {
+    let claimed = this.previewIdentityClaim(keyId, identity);
+    if (!bindingMatchesIdentity(binding, claimed)) {
       throw new SessionIdentityConflictError();
     }
+    claimed = this.claimIdentity(keyId, claimed, "persisted");
 
     if (!ctx.metadataClient) {
       // No client → can't recover, degrade to one-shot bypass
       console.warn("[session-recover] session=<redacted> no metadataClient, one-shot bypass");
       return {
-        status: "initialized", keyId: identity.sessionId, startedAt: Date.now(),
+        status: "initialized", keyId: claimed.sessionId, startedAt: Date.now(),
         attemptCount: 0, bypassed: true,
         sessionInfo: null, agentDetail: null, taskDetail: null,
       };
@@ -682,6 +810,11 @@ export class SessionStore {
       binding.agentId ? ctx.metadataClient.getAgent(binding.agentId) : Promise.resolve(null),
       binding.taskId ? ctx.metadataClient.getTask(binding.taskId) : Promise.resolve(null),
     ]);
+    claimed = this.previewIdentityClaim(keyId, claimed);
+    if (!bindingMatchesIdentity(binding, claimed)) {
+      throw new SessionIdentityConflictError();
+    }
+    claimed = this.claimIdentity(keyId, claimed, "persisted");
 
     const isNotFound = (e: unknown): boolean =>
       typeof e === "object" && e !== null && (e as { notFound?: boolean }).notFound === true;
@@ -721,14 +854,14 @@ export class SessionStore {
     // Step 4.3: dispatch
     if (agentNotFound) {
       console.log("[session-recover] session=<redacted> agent not found, deleting binding");
-      await this.bindingRepo?.deleteBinding(spaceOf(identity), identity.userId, identity.agentSource, identity.sessionId);
+      await this.bindingRepo?.deleteBinding(spaceOf(claimed), claimed.userId, claimed.agentSource, claimed.sessionId);
       return undefined;
     }
     if (anyKernelError) {
       console.warn("[session-recover] session=<redacted> kernel unavailable, one-shot bypass");
       // Don't delete binding; return one-shot bypass to serve this request
       return {
-        status: "initialized", keyId: identity.sessionId, startedAt: Date.now(),
+        status: "initialized", keyId: claimed.sessionId, startedAt: Date.now(),
         attemptCount: 0, bypassed: true,
         sessionInfo: null, agentDetail: null, taskDetail: null,
       };
@@ -737,29 +870,30 @@ export class SessionStore {
       console.log("[session-recover] session=<redacted> task not found, keeping agent");
       // Update binding to drop taskId
       await this.bindingRepo?.putBinding(
-        spaceOf(identity),
-        identity.userId,
-        identity.agentSource,
-        identity.sessionId,
+        spaceOf(claimed),
+        claimed.userId,
+        claimed.agentSource,
+        claimed.sessionId,
         { ...binding, taskId: undefined },
       );
+      claimed = this.claimIdentity(keyId, claimed, "persisted");
       taskDetail = null;
     }
 
     // Step 4.4: construct rebuilt state
     const sessionInfo: SessionInfo = {
-      session_id: identity.sessionId,
-      user_id: binding.userId || identity.userId,
+      session_id: claimed.sessionId,
+      user_id: binding.userId || claimed.userId,
       team_id: binding.teamId || "",
       agent_id: binding.agentId || "",
       task_id: taskDetail ? binding.taskId : undefined,
-      space_id: identity.spaceId,
+      space_id: claimed.spaceId,
       created_at: new Date().toISOString(),
     };
 
     const rebuilt: SessionInitState = {
       status: "initialized",
-      keyId: identity.sessionId,
+      keyId: claimed.sessionId,
       startedAt: Date.now(),
       attemptCount: 0,
       bypassed: false,
@@ -777,10 +911,19 @@ export class SessionStore {
     // 防御性 catch 见 `set()` 头注释。
     if (this.repo) {
       try {
-        await this.repo.upsert(spaceOf(identity), identity.userId, identity.agentSource, identity.sessionId, rebuilt);
+        await this.repo.upsert(
+          spaceOf(claimed),
+          claimed.userId,
+          claimed.agentSource,
+          claimed.sessionId,
+          rebuilt,
+        );
       } catch {
         console.warn("[session-recover] L2a upsert failed during rebuild");
       }
+      const stateAfterPersist = this.claimNewerState(keyId, rebuilt, claimed);
+      if (stateAfterPersist) return stateAfterPersist;
+      this.claimIdentity(keyId, claimed, "persisted");
     }
 
     console.log(`[session-recover] session=<redacted> rebuilt from binding agent=${binding.agentId ? "present" : "none"} task=${binding.taskId ? "present" : "none"}`);

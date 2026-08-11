@@ -374,6 +374,33 @@ describe("session cache identity isolation", () => {
     await expect(store.getOrRecover(key, { ...identity }, {})).resolves.toEqual(state);
   });
 
+  it("keeps optional identity claims monotonic across bind and L1 recovery", async () => {
+    const store = new SessionStore();
+    const identity = victimIdentity();
+    const key = sessionStoreKey(identity);
+    const mandatoryOnly: SessionIdentity = {
+      userId: identity.userId,
+      agentSource: identity.agentSource,
+      sessionId: identity.sessionId,
+      spaceId: identity.spaceId,
+    };
+    const conflicting = { ...identity, taskId: OUTSIDER.taskId };
+    const state = victimState();
+    store.bind(key, identity);
+    await store.set(key, state);
+
+    store.bind(key, mandatoryOnly);
+    await expect(store.getOrRecover(key, mandatoryOnly, {})).resolves.toEqual(state);
+
+    expect(store.getBoundIdentity(key)).toEqual(identity);
+    expect(store.get(key)).toEqual(state);
+    expect(() => store.bind(key, conflicting)).toThrowError("session_identity_conflict");
+    await expect(store.getOrRecover(key, conflicting, {}))
+      .rejects.toMatchObject({ name: "SessionIdentityConflictError" });
+    expect(store.getBoundIdentity(key)).toEqual(identity);
+    expect(store.get(key)).toEqual(state);
+  });
+
   it("does not expire a stale L1 entry before rejecting a bound identity conflict", async () => {
     let persisted: SessionInitState | null = null;
     const deleteBySessionId = vi.fn(() => { persisted = null; });
@@ -530,7 +557,7 @@ describe("session cache identity isolation", () => {
     let signalBindingRead!: () => void;
     const bindingRead = new Promise<void>((resolve) => { signalBindingRead = resolve; });
     const bindingRepo: BindingRepo = {
-      getBinding: vi.fn(async () => {
+      getBinding: vi.fn(async (): Promise<SessionBinding | null> => {
         signalBindingRead();
         await bindingReleased;
         return null;
@@ -552,6 +579,53 @@ describe("session cache identity isolation", () => {
 
     const observer = new SessionStore(1, repo, bindingRepo);
     await expect(observer.getOrRecover(key, identity, {})).resolves.toEqual(newer);
+  });
+
+  it("rechecks a newer identity and state installed while L2a recovery is in flight", async () => {
+    let releaseRead!: () => void;
+    const readReleased = new Promise<void>((resolve) => { releaseRead = resolve; });
+    let signalRead!: () => void;
+    const readStarted = new Promise<void>((resolve) => { signalRead = resolve; });
+    const upsert = vi.fn(async () => undefined);
+    const repo: SessionRepo = {
+      upsert,
+      getBySessionId: vi.fn(async () => {
+        signalRead();
+        await readReleased;
+        return null;
+      }),
+      deleteBySessionId: vi.fn(() => undefined),
+      loadAllInitialized: async () => [],
+    };
+    const identity = victimIdentity();
+    const key = sessionStoreKey(identity);
+    const mandatoryOnly: SessionIdentity = {
+      userId: identity.userId,
+      agentSource: identity.agentSource,
+      sessionId: identity.sessionId,
+      spaceId: identity.spaceId,
+    };
+    const expired: SessionInitState = {
+      ...victimState(),
+      status: "pending_task_select",
+      startedAt: 0,
+    };
+    const newer = victimState();
+    const store = new SessionStore(1, repo);
+    await store.set(key, expired);
+
+    const recovery = store.getOrRecover(key, mandatoryOnly, {});
+    await readStarted;
+    store.bind(key, identity);
+    await store.set(key, newer);
+    const writesAfterNewer = upsert.mock.calls.length;
+    releaseRead();
+
+    await expect(recovery).resolves.toEqual(newer);
+    expect(store.getBoundIdentity(key)).toEqual(identity);
+    expect(store.get(key)).toEqual(newer);
+    expect(upsert).toHaveBeenCalledTimes(writesAfterNewer);
+    await expect(store.getOrRecover(key, identity, {})).resolves.toEqual(newer);
   });
 
   it("does not bind a rejected raw-session collision or disturb the owner", async () => {
@@ -772,6 +846,112 @@ describe("session cache identity isolation", () => {
       space_id: OUTSIDER.spaceId,
       agent_id: OUTSIDER.agentId,
     });
+    expect(store.getBoundIdentity(sessionStoreKey(victimIdentity()))).toEqual(victimIdentity());
+    expect(store.getBoundIdentity(sessionStoreKey(outsiderIdentity))).toEqual(outsiderIdentity);
+  });
+
+  it("reserves a raw session for the first concurrent identity with no persisted owner", async () => {
+    const firstIdentity = victimIdentity();
+    const secondIdentity: FullSessionIdentity = {
+      userId: OUTSIDER.userId,
+      agentSource: VICTIM.source,
+      sessionId: VICTIM.sessionId,
+      spaceId: OUTSIDER.spaceId,
+      teamId: OUTSIDER.teamId,
+      agentId: OUTSIDER.agentId,
+      taskId: OUTSIDER.taskId,
+    };
+    let releaseFirst!: () => void;
+    let releaseSecond!: () => void;
+    let signalFirst!: () => void;
+    let signalSecond!: () => void;
+    const firstReleased = new Promise<void>((resolve) => { releaseFirst = resolve; });
+    const secondReleased = new Promise<void>((resolve) => { releaseSecond = resolve; });
+    const firstStarted = new Promise<void>((resolve) => { signalFirst = resolve; });
+    const secondStarted = new Promise<void>((resolve) => { signalSecond = resolve; });
+    const touchLastSeen = vi.fn(async () => undefined);
+    const putBinding = vi.fn(async () => undefined);
+    const bindingRepo: BindingRepo = {
+      getBinding: vi.fn(async (_space, userId) => {
+        if (userId === firstIdentity.userId) {
+          signalFirst();
+          await firstReleased;
+        } else {
+          signalSecond();
+          await secondReleased;
+        }
+        return null;
+      }),
+      putBinding,
+      deleteBinding: vi.fn(async () => undefined),
+      touchLastSeen,
+    };
+    const store = new SessionStore(30 * 60 * 1_000, undefined, bindingRepo);
+    const firstKey = sessionStoreKey(firstIdentity);
+    const secondKey = sessionStoreKey(secondIdentity);
+
+    const first = store.getOrRecover(firstKey, firstIdentity, {});
+    await firstStarted;
+    const second = store.getOrRecover(secondKey, secondIdentity, {});
+    await secondStarted;
+    releaseFirst();
+    await expect(first).resolves.toBeUndefined();
+    releaseSecond();
+
+    await expect(second).rejects.toMatchObject({ name: "SessionIdentityConflictError" });
+    expect(store.getBoundIdentity(firstKey)).toEqual(firstIdentity);
+    expect(store.getBoundIdentity(secondKey)).toBeUndefined();
+    expect(store.get(firstKey)).toBeUndefined();
+    expect(store.get(secondKey)).toBeUndefined();
+    expect(touchLastSeen).not.toHaveBeenCalled();
+    expect(putBinding).not.toHaveBeenCalled();
+  });
+
+  it("allows concurrent cold recovery for the same unpersisted identity", async () => {
+    const identity = victimIdentity();
+    let releaseFirst!: () => void;
+    let releaseSecond!: () => void;
+    let signalFirst!: () => void;
+    let signalSecond!: () => void;
+    const firstReleased = new Promise<void>((resolve) => { releaseFirst = resolve; });
+    const secondReleased = new Promise<void>((resolve) => { releaseSecond = resolve; });
+    const firstStarted = new Promise<void>((resolve) => { signalFirst = resolve; });
+    const secondStarted = new Promise<void>((resolve) => { signalSecond = resolve; });
+    let bindingRead = 0;
+    const touchLastSeen = vi.fn(async () => undefined);
+    const putBinding = vi.fn(async () => undefined);
+    const bindingRepo: BindingRepo = {
+      getBinding: vi.fn(async (): Promise<SessionBinding | null> => {
+        const current = bindingRead++;
+        if (current === 0) {
+          signalFirst();
+          await firstReleased;
+        } else {
+          signalSecond();
+          await secondReleased;
+        }
+        return null;
+      }),
+      putBinding,
+      deleteBinding: vi.fn(async () => undefined),
+      touchLastSeen,
+    };
+    const store = new SessionStore(30 * 60 * 1_000, undefined, bindingRepo);
+    const key = sessionStoreKey(identity);
+
+    const first = store.getOrRecover(key, identity, {});
+    await firstStarted;
+    const second = store.getOrRecover(key, identity, {});
+    await secondStarted;
+    releaseFirst();
+    await expect(first).resolves.toBeUndefined();
+    releaseSecond();
+    await expect(second).resolves.toBeUndefined();
+
+    expect(store.getBoundIdentity(key)).toEqual(identity);
+    expect(store.get(key)).toBeUndefined();
+    expect(touchLastSeen).not.toHaveBeenCalled();
+    expect(putBinding).not.toHaveBeenCalled();
   });
 
   it("rejects a mismatched bypass binding before touch or cache write", async () => {
@@ -849,6 +1029,7 @@ describe("session cache identity isolation", () => {
       userId: VICTIM.userId,
     });
     expect(touchLastSeen).toHaveBeenCalledTimes(1);
+    expect(putBinding).toHaveBeenCalledTimes(1);
     expect(putBinding).toHaveBeenCalledWith(
       VICTIM.spaceId,
       VICTIM.userId,
@@ -856,6 +1037,76 @@ describe("session cache identity isolation", () => {
       VICTIM.sessionId,
       expect.objectContaining({ outcome: "bypassed", userId: VICTIM.userId }),
     );
+    expect(store.getBoundIdentity(key)).toEqual(identity);
+    expect(store.get(key)).toMatchObject({ bypassed: true, userId: VICTIM.userId });
+  });
+
+  it("allows only the first conflicting optional claim after a shared legacy bypass read", async () => {
+    const firstIdentity = victimIdentity();
+    const secondIdentity: FullSessionIdentity = {
+      ...firstIdentity,
+      teamId: OUTSIDER.teamId,
+      agentId: OUTSIDER.agentId,
+      taskId: OUTSIDER.taskId,
+    };
+    let releaseFirst!: () => void;
+    let releaseSecond!: () => void;
+    let signalFirst!: () => void;
+    let signalSecond!: () => void;
+    const firstReleased = new Promise<void>((resolve) => { releaseFirst = resolve; });
+    const secondReleased = new Promise<void>((resolve) => { releaseSecond = resolve; });
+    const firstStarted = new Promise<void>((resolve) => { signalFirst = resolve; });
+    const secondStarted = new Promise<void>((resolve) => { signalSecond = resolve; });
+    let bindingRead = 0;
+    const upsert = vi.fn(async () => undefined);
+    const touchLastSeen = vi.fn(async () => undefined);
+    const putBinding = vi.fn(async () => undefined);
+    const repo: SessionRepo = {
+      upsert,
+      getBySessionId: vi.fn(async () => null),
+      deleteBySessionId: vi.fn(() => undefined),
+      loadAllInitialized: async () => [],
+    };
+    const bindingRepo: BindingRepo = {
+      getBinding: vi.fn(async (): Promise<SessionBinding | null> => {
+        const current = bindingRead++;
+        if (current === 0) {
+          signalFirst();
+          await firstReleased;
+        } else {
+          signalSecond();
+          await secondReleased;
+        }
+        return { outcome: "bypassed" };
+      }),
+      putBinding,
+      deleteBinding: vi.fn(async () => undefined),
+      touchLastSeen,
+    };
+    const store = new SessionStore(30 * 60 * 1_000, repo, bindingRepo);
+    const key = sessionStoreKey(firstIdentity);
+
+    const first = store.getOrRecover(key, firstIdentity, {});
+    await firstStarted;
+    const second = store.getOrRecover(key, secondIdentity, {});
+    await secondStarted;
+    releaseFirst();
+    await expect(first).resolves.toMatchObject({ bypassed: true, userId: VICTIM.userId });
+    const stateAfterFirst = store.get(key);
+    const sideEffectsAfterFirst = {
+      upsert: upsert.mock.calls.length,
+      touch: touchLastSeen.mock.calls.length,
+      binding: putBinding.mock.calls.length,
+    };
+    releaseSecond();
+
+    await expect(second).rejects.toMatchObject({ name: "SessionIdentityConflictError" });
+    expect(store.getBoundIdentity(key)).toEqual(firstIdentity);
+    expect(store.get(key)).toBe(stateAfterFirst);
+    expect(upsert).toHaveBeenCalledTimes(sideEffectsAfterFirst.upsert);
+    expect(touchLastSeen).toHaveBeenCalledTimes(sideEffectsAfterFirst.touch);
+    expect(putBinding).toHaveBeenCalledTimes(sideEffectsAfterFirst.binding);
+    await expect(store.getOrRecover(key, firstIdentity, {})).resolves.toBe(stateAfterFirst);
   });
 
   it("recovers a legacy bypass state from L2a after restart", async () => {
@@ -891,6 +1142,8 @@ describe("session cache identity isolation", () => {
       keyId: VICTIM.sessionId,
       userId: VICTIM.userId,
     });
+    expect(restartedStore.getBoundIdentity(key)).toEqual(identity);
+    expect(restartedStore.get(key)).toMatchObject({ bypassed: true, userId: VICTIM.userId });
   });
 
   it.each([
