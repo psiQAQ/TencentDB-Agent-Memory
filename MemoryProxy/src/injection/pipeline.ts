@@ -24,7 +24,7 @@ import {
 } from "./context.js";
 import type { HookCacheRepo } from "../db/hookCacheRepo.js";
 import type { InjectionObserver, HookResult } from "./observer.js";
-import { NoopInjectionObserver } from "./observer.js";
+import { NoopInjectionObserver, safeCacheStrategy } from "./observer.js";
 
 /** Optional pipeline behaviors (agent detection, etc.). */
 export interface InjectionPipelineOptions {
@@ -204,7 +204,7 @@ export class InjectionPipeline {
           if (blocks.length > 0) {
             console.log(
               `[injection] hook_done point=${point} blocks=${blocks.length} `
-                + `cacheStrategy=${hook.cacheStrategy ?? "none"}`,
+                + `cacheStrategy=${safeCacheStrategy(hook.cacheStrategy ?? "none")}`,
             );
             this.applyInjection(ctx, hook, point, blocks);
           }

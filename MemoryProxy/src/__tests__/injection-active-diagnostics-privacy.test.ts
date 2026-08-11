@@ -9,6 +9,7 @@ import { prewarmAll } from "../injection/prewarm.js";
 import { HookRegistryImpl } from "../injection/registry.js";
 import type {
   AgentContextMetadata,
+  CacheStrategy,
   InjectionHook,
   InjectionPoint,
   PrewarmInput,
@@ -97,6 +98,23 @@ describe("active injection diagnostic privacy", () => {
         throw new Error(PRIVATE_VALUE, { cause: PRIVATE_VALUE });
       },
     });
+    const toolName = `${PRIVATE_VALUE}-tool`;
+    const toolDescription = `${PRIVATE_VALUE}-tool-description`;
+    registry.register({
+      id: `${PRIVATE_VALUE}-tool-hook`,
+      point: "tools.append",
+      priority: 3,
+      description: PRIVATE_VALUE,
+      cacheStrategy: PRIVATE_VALUE as CacheStrategy,
+      execute: () => [{
+        type: "custom",
+        content: toolDescription,
+        metadata: {
+          tool_name: toolName,
+          parameters: { type: "object", properties: {} },
+        },
+      }],
+    });
 
     const profile: AgentProfile = {
       id: PRIVATE_VALUE,
@@ -127,13 +145,26 @@ describe("active injection diagnostic privacy", () => {
       new LoggingInjectionObserver(),
     );
 
-    await pipeline.process({
+    const result = await pipeline.process({
       model: PRIVATE_VALUE,
       messages: [
         { role: "system", content: "safe system" },
         { role: "user", content: "safe user" },
       ],
     }, metadata());
+
+    expect(result.messages).toEqual([
+      { role: "system", content: `${PRIVATE_VALUE}\nsafe system` },
+      { role: "user", content: "safe user" },
+    ]);
+    expect(result.tools).toEqual([{
+      type: "function",
+      function: {
+        name: toolName,
+        description: toolDescription,
+        parameters: { type: "object", properties: {} },
+      },
+    }]);
 
     const consoleCalls = [
       ...consoleLog.mock.calls,
@@ -145,6 +176,9 @@ describe("active injection diagnostic privacy", () => {
     expect(containsPrivateValue(structuredCalls)).toBe(false);
     expect(consoleLog).toHaveBeenCalledWith(
       "[injection] hook_done point=system.prefix blocks=2 cacheStrategy=session_init",
+    );
+    expect(consoleLog).toHaveBeenCalledWith(
+      "[injection] hook_done point=tools.append blocks=1 cacheStrategy=unknown",
     );
     expect(consoleWarn).toHaveBeenCalledWith(
       "[hook-cache] self_heal_failed category=storage_error",

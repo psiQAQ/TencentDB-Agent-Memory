@@ -42,7 +42,7 @@ function safeProtocol(protocol: unknown): "openai" | "anthropic" | "unknown" {
   return protocol === "openai" || protocol === "anthropic" ? protocol : "unknown";
 }
 
-function safeCacheStrategy(strategy: unknown): string {
+export function safeCacheStrategy(strategy: unknown): string {
   return typeof strategy === "string" && SAFE_CACHE_STRATEGIES.has(strategy)
     ? strategy
     : "unknown";
