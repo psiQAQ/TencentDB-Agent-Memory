@@ -140,7 +140,7 @@ export class RedisBindingRepo implements BindingRepo {
       const currentKey = redisKey(spaceId, userId, agentSource, sessionId);
       const current = await this.redis.hgetall(currentKey);
       if (current && Object.keys(current).length > 0) {
-        if (current.user_id && current.user_id !== userId) return null;
+        if (current.user_id && current.user_id !== userId) throw new BindingRepoReadError();
         return bindingFromHash(current);
       }
 

@@ -7,6 +7,7 @@ import {
   setSessionRepo,
   type SessionRepo,
 } from "../db/sessionRepo.js";
+import { KvSessionRepo } from "../db/kv-session-repo.js";
 import { setMetadataClient } from "../meta/client.js";
 import type { BindingRepo, SessionBinding } from "../db/binding-repo.js";
 import { renderTdaiMemoryToolsBlock } from "../injection/injectors/tdai-tools-injector.js";
@@ -21,6 +22,7 @@ import {
 } from "../session/store.js";
 import type { SessionInitState } from "../session/types.js";
 import type { ProxyConfig } from "../types.js";
+import { MemoryStorage } from "../storage/memory-storage.js";
 
 const VICTIM = {
   key: "key_victim",
@@ -1162,6 +1164,112 @@ describe("session cache identity isolation", () => {
       .resolves.toBeUndefined();
   });
 
+  it.each([
+    ["l2a", "delete-first"],
+    ["l2a", "read-first"],
+    ["l2b", "delete-first"],
+    ["l2b", "read-first"],
+  ] as const)(
+    "does not promote a stale %s read when durable delete completes %s",
+    async (layer, order) => {
+      let signalDeleteStarted!: () => void;
+      let releaseDelete!: () => void;
+      let signalDeleteFinished!: () => void;
+      let signalReadStarted!: () => void;
+      let releaseRead!: () => void;
+      const deleteStarted = new Promise<void>((resolve) => { signalDeleteStarted = resolve; });
+      const deleteReleased = new Promise<void>((resolve) => { releaseDelete = resolve; });
+      const deleteFinished = new Promise<void>((resolve) => { signalDeleteFinished = resolve; });
+      const readStarted = new Promise<void>((resolve) => { signalReadStarted = resolve; });
+      const readReleased = new Promise<void>((resolve) => { releaseRead = resolve; });
+      const identity = victimIdentity();
+      const key = sessionStoreKey(identity);
+      let persistedState: SessionInitState | null = victimState();
+      let persistedBinding: SessionBinding | null = {
+        outcome: "bypassed",
+        userId: identity.userId,
+        teamId: identity.teamId,
+        agentId: identity.agentId,
+        taskId: identity.taskId,
+      };
+      const upsert = vi.fn(async () => true);
+      const putBinding = vi.fn(async () => true);
+      const touchLastSeen = vi.fn(async () => undefined);
+      const repo: SessionRepo | undefined = layer === "l2a"
+        ? {
+            upsert,
+            getBySessionId: vi.fn(async () => {
+              const captured = structuredClone(persistedState);
+              signalReadStarted();
+              await readReleased;
+              return captured;
+            }),
+            deleteBySessionId: vi.fn(async () => {
+              signalDeleteStarted();
+              await deleteReleased;
+              persistedState = null;
+              signalDeleteFinished();
+            }),
+            loadAllInitialized: async () => [],
+          }
+        : undefined;
+      const bindingRepo: BindingRepo = {
+        getBinding: vi.fn(async () => {
+          if (layer !== "l2b") return null;
+          const captured = structuredClone(persistedBinding);
+          signalReadStarted();
+          await readReleased;
+          return captured;
+        }),
+        putBinding,
+        deleteBinding: vi.fn(async () => {
+          if (layer === "l2b") {
+            signalDeleteStarted();
+            await deleteReleased;
+          }
+          persistedBinding = null;
+          if (layer === "l2b") signalDeleteFinished();
+        }),
+        touchLastSeen,
+      };
+      const getAgent = vi.fn();
+      const getTask = vi.fn();
+      const store = new SessionStore(30 * 60 * 1_000, repo, bindingRepo);
+      store.bind(key, identity);
+
+      store.delete(key);
+      await deleteStarted;
+      const recovery = store.getOrRecover(key, identity, {
+        metadataClient: { getAgent, getTask } as never,
+      });
+      await readStarted;
+      if (order === "delete-first") {
+        releaseDelete();
+        await deleteFinished;
+        releaseRead();
+      } else {
+        releaseRead();
+        await Promise.resolve();
+        await Promise.resolve();
+        expect(store.get(key)).toBeUndefined();
+        releaseDelete();
+        await deleteFinished;
+      }
+
+      await expect(recovery).resolves.toBeUndefined();
+      expect(store.get(key)).toBeUndefined();
+      expect(upsert).not.toHaveBeenCalled();
+      expect(putBinding).not.toHaveBeenCalled();
+      expect(touchLastSeen).not.toHaveBeenCalled();
+      expect(getAgent).not.toHaveBeenCalled();
+      expect(getTask).not.toHaveBeenCalled();
+      const rawClaims = (store as unknown as {
+        rawSessionClaims: Map<string, Map<string, string>>;
+      }).rawSessionClaims;
+      expect([...rawClaims.values()].some((claims) => claims.has(key))).toBe(false);
+    },
+  );
+
   it("promotes a successful durable set to a persisted raw owner", async () => {
     const firstIdentity = victimIdentity();
     const secondIdentity: FullSessionIdentity = {
@@ -1790,6 +1898,88 @@ describe("session cache identity isolation", () => {
     expect(store.getBoundIdentity(secondKey)).toEqual(secondIdentity);
     expect(store.get(secondKey)).toBeUndefined();
   });
+
+  it.each(["delete", "newer-set"] as const)(
+    "does not roll a failed weak-claim migration over a concurrent %s winner",
+    async (winner) => {
+      let signalMigration!: () => void;
+      let releaseMigration!: () => void;
+      let signalDeleteFinished!: () => void;
+      const migrationStarted = new Promise<void>((resolve) => { signalMigration = resolve; });
+      const migrationReleased = new Promise<void>((resolve) => { releaseMigration = resolve; });
+      const deleteFinished = new Promise<void>((resolve) => { signalDeleteFinished = resolve; });
+      const fullIdentity = victimIdentity();
+      const partialIdentity: SessionIdentity = {
+        userId: fullIdentity.userId,
+        spaceId: fullIdentity.spaceId,
+        agentSource: fullIdentity.agentSource,
+        sessionId: fullIdentity.sessionId,
+      };
+      const key = sessionStoreKey(fullIdentity);
+      const legacyState: SessionInitState = {
+        status: "initialized",
+        keyId: fullIdentity.sessionId,
+        startedAt: Date.now(),
+        attemptCount: 0,
+        userId: fullIdentity.userId,
+        bypassed: true,
+        sessionInfo: null,
+        agentDetail: null,
+        taskDetail: null,
+      };
+      const newerState: SessionInitState = {
+        ...victimState(),
+        agentDetail: { id: fullIdentity.agentId!, name: "Concurrent Newer Agent" },
+      };
+      const durable = { state: null as SessionInitState | null };
+      const upsert = vi.fn(async (_space, _user, _source, _session, state) => {
+        if (state.identityClaimPending) {
+          signalMigration();
+          await migrationReleased;
+          return false;
+        }
+        durable.state = structuredClone(state);
+        return true;
+      });
+      const repo: SessionRepo = {
+        upsert,
+        getBySessionId: vi.fn(async () => durable.state),
+        deleteBySessionId: vi.fn(async () => {
+          durable.state = null;
+          signalDeleteFinished();
+        }),
+        loadAllInitialized: async () => [],
+      };
+      const store = new SessionStore(30 * 60 * 1_000, repo);
+      store.bind(key, partialIdentity);
+      await store.set(key, legacyState);
+      store.bind(key, fullIdentity);
+
+      const migration = store.getOrRecover(key, fullIdentity, {});
+      await migrationStarted;
+      let newerWrite: Promise<void> | undefined;
+      if (winner === "delete") store.delete(key);
+      else newerWrite = store.set(key, newerState);
+      releaseMigration();
+
+      const migrationResult = await migration;
+      if (winner === "delete") {
+        await deleteFinished;
+        expect(migrationResult).toBeUndefined();
+        expect(store.get(key)).toBeUndefined();
+        expect(durable.state).toBeNull();
+        const rawClaims = (store as unknown as {
+          rawSessionClaims: Map<string, Map<string, string>>;
+        }).rawSessionClaims;
+        expect([...rawClaims.values()].some((claims) => claims.has(key))).toBe(false);
+      } else {
+        await newerWrite;
+        expect(migrationResult?.agentDetail?.name).toBe("Concurrent Newer Agent");
+        expect(store.get(key)?.agentDetail?.name).toBe("Concurrent Newer Agent");
+        expect(durable.state?.agentDetail?.name).toBe("Concurrent Newer Agent");
+      }
+    },
+  );
 
   it.each(["before-wait", "after-wait"] as const)(
     "keeps the latest state durable when stale rebuild persistence completes %s",
@@ -2576,11 +2766,10 @@ describe("session cache identity isolation", () => {
       metadataClient: { getAgent, getTask } as never,
     });
     await readStarted;
-    await expect(store.hydrateFromDb()).resolves.toBe(1);
+    await expect(store.hydrateFromDb()).resolves.toBe(0);
     releaseRead();
 
-    await expect(awaitingRecovery)
-      .rejects.toMatchObject({ name: "SessionIdentityConflictError" });
+    await expect(awaitingRecovery).resolves.toBeUndefined();
     expect(getAgent).not.toHaveBeenCalled();
     expect(getTask).not.toHaveBeenCalled();
   });
@@ -2820,6 +3009,156 @@ describe("session cache identity isolation", () => {
     expect(touchLastSeen).not.toHaveBeenCalled();
     expect(getAgent).not.toHaveBeenCalled();
     expect(getTask).not.toHaveBeenCalled();
+  });
+
+  it("does not hydrate a weak L2a bypass over a stronger L2b owner", async () => {
+    const owner = victimIdentity();
+    const mandatoryOnly: SessionIdentity = {
+      userId: owner.userId,
+      spaceId: owner.spaceId,
+      agentSource: owner.agentSource,
+      sessionId: owner.sessionId,
+    };
+    const conflicting: FullSessionIdentity = {
+      ...owner,
+      teamId: OUTSIDER.teamId,
+      agentId: OUTSIDER.agentId,
+      taskId: OUTSIDER.taskId,
+    };
+    const key = sessionStoreKey(owner);
+    const weakState: SessionInitState = {
+      status: "initialized",
+      keyId: owner.sessionId,
+      startedAt: Date.now(),
+      attemptCount: 0,
+      userId: owner.userId,
+      bypassed: true,
+      sessionInfo: null,
+      agentDetail: null,
+      taskDetail: null,
+      identityClaim: {},
+    };
+    let persistedState = structuredClone(weakState);
+    let persistedBinding: SessionBinding = {
+      outcome: "bypassed",
+      userId: owner.userId,
+      teamId: owner.teamId,
+      agentId: owner.agentId,
+      taskId: owner.taskId,
+    };
+    const upsert = vi.fn(async (_space, _user, _source, _session, state) => {
+      persistedState = structuredClone(state);
+      return true;
+    });
+    const putBinding = vi.fn(async (_space, _user, _source, _session, binding) => {
+      persistedBinding = structuredClone(binding);
+      return true;
+    });
+    const touchLastSeen = vi.fn(async () => undefined);
+    const repo: SessionRepo = {
+      upsert,
+      getBySessionId: vi.fn(async () => structuredClone(persistedState)),
+      deleteBySessionId: vi.fn(() => undefined),
+      loadAllInitialized: vi.fn(async () => [{
+        spaceId: owner.spaceId!,
+        userId: owner.userId,
+        agentSource: owner.agentSource,
+        sessionId: owner.sessionId,
+        state: structuredClone(persistedState),
+      }]),
+    };
+    const bindingRepo: BindingRepo = {
+      getBinding: vi.fn(async () => structuredClone(persistedBinding)),
+      putBinding,
+      deleteBinding: vi.fn(async () => undefined),
+      touchLastSeen,
+    };
+    const getAgent = vi.fn();
+    const getTask = vi.fn();
+    const store = new SessionStore(30 * 60 * 1_000, repo, bindingRepo);
+
+    await expect(store.hydrateFromDb()).resolves.toBe(0);
+    expect(store.get(key)).toBeUndefined();
+    await expect(store.getOrRecover(key, mandatoryOnly, {
+      metadataClient: { getAgent, getTask } as never,
+    })).resolves.toMatchObject({
+      identityClaim: {
+        teamId: owner.teamId,
+        agentId: owner.agentId,
+        taskId: owner.taskId,
+      },
+    });
+
+    vi.clearAllMocks();
+    const restarted = new SessionStore(30 * 60 * 1_000, repo, bindingRepo);
+    await expect(restarted.getOrRecover(key, conflicting, {
+      metadataClient: { getAgent, getTask } as never,
+    })).rejects.toMatchObject({ name: "SessionIdentityConflictError" });
+
+    expect(restarted.get(key)).toBeUndefined();
+    expect(restarted.getBoundIdentity(key)).toBeUndefined();
+    expect(persistedState.identityClaim).toEqual({
+      teamId: owner.teamId,
+      agentId: owner.agentId,
+      taskId: owner.taskId,
+    });
+    expect(persistedBinding).toEqual({
+      outcome: "bypassed",
+      userId: owner.userId,
+      teamId: owner.teamId,
+      agentId: owner.agentId,
+      taskId: owner.taskId,
+    });
+    expect(upsert).not.toHaveBeenCalled();
+    expect(putBinding).not.toHaveBeenCalled();
+    expect(touchLastSeen).not.toHaveBeenCalled();
+    expect(getAgent).not.toHaveBeenCalled();
+    expect(getTask).not.toHaveBeenCalled();
+  });
+
+  it("rejects a real malformed KV session before weaker recovery layers", async () => {
+    const detail = "malformed-store-session-detail-sentinel";
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const error = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const identity = victimIdentity();
+    const key = sessionStoreKey(identity);
+    const storage = new MemoryStorage();
+    const storageKey = `ttl/${identity.spaceId}/${identity.userId}/${identity.agentSource}/${identity.sessionId}/inj-sess.json`;
+    await storage.putText(storageKey, `{${detail}`);
+    const getBinding = vi.fn(async () => null);
+    const touchLastSeen = vi.fn(async () => undefined);
+    const bindingRepo: BindingRepo = {
+      getBinding,
+      putBinding: vi.fn(async () => true),
+      deleteBinding: vi.fn(async () => undefined),
+      touchLastSeen,
+    };
+    const getAgent = vi.fn();
+    const getTask = vi.fn();
+    const store = new SessionStore(
+      30 * 60 * 1_000,
+      new KvSessionRepo(storage),
+      bindingRepo,
+    );
+
+    await expect(store.getOrRecover(key, identity, {
+      metadataClient: { getAgent, getTask } as never,
+      messages: [
+        { role: "user", content: "first" },
+        { role: "assistant", content: "history" },
+        { role: "user", content: "second" },
+      ],
+    })).rejects.toMatchObject({ name: "SessionIdentityConflictError" });
+
+    expect(getBinding).not.toHaveBeenCalled();
+    expect(touchLastSeen).not.toHaveBeenCalled();
+    expect(getAgent).not.toHaveBeenCalled();
+    expect(getTask).not.toHaveBeenCalled();
+    expect(store.get(key)).toBeUndefined();
+    expect(store.getBoundIdentity(key)).toBeUndefined();
+    expect(await storage.getText(storageKey)).toBe(`{${detail}`);
+    const emitted = [...warn.mock.calls, ...error.mock.calls].flat().join(" ");
+    expect(emitted).not.toContain(detail);
   });
 
   it.each([

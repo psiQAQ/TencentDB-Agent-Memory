@@ -93,7 +93,8 @@ export class RedisSessionRepo implements SessionRepo {
       const raw = await this.redis.get(currentKey);
       if (raw !== null) {
         const current = JSON.parse(raw) as SessionInitState;
-        return persistedStateOwnsIdentity(current, identity) ? current : null;
+        if (!persistedStateOwnsIdentity(current, identity)) throw new SessionRepoReadError();
+        return current;
       }
 
       const legacyTail = legacyPersistedSessionIdentityKey(

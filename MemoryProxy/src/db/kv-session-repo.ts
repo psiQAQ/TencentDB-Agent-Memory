@@ -29,6 +29,7 @@ import {
 import type { SessionInitState } from "../session/types.js";
 import type { ProxyStorage } from "../storage/proxy-storage.js";
 import { sessionDirOf } from "../storage/key-utils.js";
+import { persistedStateOwnsIdentity } from "./session-identity-key.js";
 
 const TTL_BUCKET_PREFIX = "ttl/";
 const MAIN_FILENAME = "inj-sess.json";
@@ -77,9 +78,16 @@ export class KvSessionRepo implements SessionRepo {
     sessionId: string,
   ): Promise<SessionInitState | null> {
     try {
-      return await this.storage.getJSON<SessionInitState>(
-        mainKey(spaceId, userId, agentSource, sessionId),
-      );
+      const raw = await this.storage.getText(mainKey(spaceId, userId, agentSource, sessionId));
+      if (raw === null) return null;
+      const state = JSON.parse(raw) as SessionInitState;
+      if (
+        !state
+        || typeof state !== "object"
+        || Array.isArray(state)
+        || !persistedStateOwnsIdentity(state, { spaceId, userId, agentSource, sessionId })
+      ) throw new SessionRepoReadError();
+      return state;
     } catch {
       throw new SessionRepoReadError();
     }
@@ -113,15 +121,21 @@ export class KvSessionRepo implements SessionRepo {
         const segs = stem.split("/");
         if (segs.length !== 4) continue;
         const [spaceId, userId, agentSource, sessionId] = segs;
-        const state = await this.storage.getJSON<SessionInitState>(
-          TTL_BUCKET_PREFIX + name,
-        );
-        if (!state || state.status !== "initialized") continue;
+        const raw = await this.storage.getText(TTL_BUCKET_PREFIX + name);
+        if (raw === null) continue;
+        const state = JSON.parse(raw) as SessionInitState;
+        if (!state || typeof state !== "object" || Array.isArray(state)) {
+          throw new SessionRepoReadError();
+        }
+        if (!persistedStateOwnsIdentity(state, { spaceId, userId, agentSource, sessionId })) {
+          throw new SessionRepoReadError();
+        }
+        if (state.status !== "initialized") continue;
         out.push({ spaceId, userId, agentSource, sessionId, state });
       }
       return out;
     } catch {
-      return [];
+      throw new SessionRepoReadError();
     }
   }
 }

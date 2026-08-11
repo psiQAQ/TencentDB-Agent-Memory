@@ -292,6 +292,12 @@ function bypassClaimNeedsPersistence(
   );
 }
 
+function hasWeakBypassClaim(state: SessionInitState): boolean {
+  if (!state.bypassed) return false;
+  const claim = state.identityClaim;
+  return !claim?.teamId || !claim.agentId || !claim.taskId;
+}
+
 function bypassBindingNeedsPersistence(
   binding: SessionBinding,
   identity: SessionIdentity,
@@ -384,6 +390,7 @@ interface L2aProbeResult {
 
 interface StateSnapshot {
   generation: number;
+  deleteEpoch: number;
   state?: SessionInitState;
 }
 
@@ -400,11 +407,15 @@ interface ClaimMutationSnapshot {
   rawKey: string;
   rawClaim?: RawSessionClaim;
   durableLayers?: DurableClaimLayers;
+  deleteEpoch: number;
 }
 
 export class SessionStore {
   private states = new Map<string, SessionInitState>();
   private stateGenerations = new Map<string, number>();
+  private operationEpochs = new Map<string, number>();
+  private deleteEpochs = new Map<string, number>();
+  private deleteIntents = new Map<string, number>();
   private mutatedKeys = new Set<string>();
   private durableLayersByKey = new Map<string, DurableClaimLayers>();
   /** keyId → identity map — populated via {@link bind} to keep repo/binding writes user-namespaced. */
@@ -458,6 +469,7 @@ export class SessionStore {
   private snapshotState(keyId: string): StateSnapshot {
     return {
       generation: this.stateGenerations.get(keyId) ?? 0,
+      deleteEpoch: this.deleteEpochs.get(keyId) ?? 0,
       state: this.states.get(keyId),
     };
   }
@@ -474,10 +486,22 @@ export class SessionStore {
       rawKey,
       rawClaim: rawClaims?.get(keyId),
       durableLayers: this.durableLayersByKey.get(keyId),
+      deleteEpoch: this.deleteEpochs.get(keyId) ?? 0,
     };
   }
 
-  private restoreClaimMutation(keyId: string, snapshot: ClaimMutationSnapshot): void {
+  private restoreClaimMutation(
+    keyId: string,
+    snapshot: ClaimMutationSnapshot,
+    expectedState: SessionInitState,
+    expectedGeneration: number,
+    expectedOperationEpoch: number,
+  ): void {
+    if (
+      !this.isCurrentState(keyId, expectedGeneration, expectedState)
+      || (this.operationEpochs.get(keyId) ?? 0) !== expectedOperationEpoch
+      || (this.deleteEpochs.get(keyId) ?? 0) !== snapshot.deleteEpoch
+    ) return;
     if (snapshot.state) this.commitState(keyId, snapshot.state);
     else this.removeState(keyId);
     if (snapshot.identity) this.identities.set(keyId, snapshot.identity);
@@ -500,12 +524,26 @@ export class SessionStore {
     this.mutatedKeys.add(keyId);
   }
 
+  private bumpOperation(keyId: string): number {
+    const next = (this.operationEpochs.get(keyId) ?? 0) + 1;
+    this.operationEpochs.set(keyId, next);
+    return next;
+  }
+
+  private bumpDeleteEpoch(keyId: string): number {
+    const next = (this.deleteEpochs.get(keyId) ?? 0) + 1;
+    this.deleteEpochs.set(keyId, next);
+    this.bumpOperation(keyId);
+    return next;
+  }
+
   private markDurableLayer(keyId: string, layer: keyof DurableClaimLayers): void {
     const added: DurableClaimLayers = layer === "l2a" ? { l2a: true } : { l2b: true };
     this.durableLayersByKey.set(
       keyId,
       mergeDurableClaimLayers(this.durableLayersByKey.get(keyId), added)!,
     );
+    this.bumpOperation(keyId);
   }
 
   private commitState(keyId: string, state: SessionInitState): number {
@@ -513,6 +551,7 @@ export class SessionStore {
     this.states.set(keyId, state);
     this.stateGenerations.set(keyId, generation);
     this.markMutation(keyId);
+    this.bumpOperation(keyId);
     return generation;
   }
 
@@ -530,6 +569,7 @@ export class SessionStore {
     if (current) this.states.delete(keyId);
     this.stateGenerations.set(keyId, (this.stateGenerations.get(keyId) ?? 0) + 1);
     this.markMutation(keyId);
+    this.bumpOperation(keyId);
     return true;
   }
 
@@ -538,7 +578,11 @@ export class SessionStore {
     before: StateSnapshot,
     identity: SessionIdentity,
   ): AwaitedStateResult {
-    if ((this.stateGenerations.get(keyId) ?? 0) === before.generation) {
+    if (this.deleteIntents.has(keyId)) return { changed: true };
+    if (
+      (this.stateGenerations.get(keyId) ?? 0) === before.generation
+      && (this.deleteEpochs.get(keyId) ?? 0) === before.deleteEpoch
+    ) {
       return { changed: false };
     }
     const current = this.states.get(keyId);
@@ -609,6 +653,7 @@ export class SessionStore {
     this.identities.set(keyId, merged);
     this.rawSessionClaims.set(rawKey, nextRawClaims);
     this.markMutation(keyId);
+    this.bumpOperation(keyId);
     return merged;
   }
 
@@ -620,6 +665,7 @@ export class SessionStore {
     if (!claims?.delete(keyId)) return;
     if (claims.size === 0) this.rawSessionClaims.delete(rawKey);
     this.markMutation(keyId);
+    this.bumpOperation(keyId);
   }
 
   get(keyId: string): SessionInitState | undefined {
@@ -667,7 +713,13 @@ export class SessionStore {
           id,
         )
       : credentialSafeState;
+    // Only a validated state commit supersedes an in-flight delete. Clearing
+    // the token before identity validation would let a rejected set cancel it.
+    this.deleteIntents.delete(keyId);
     const writeGeneration = this.commitState(keyId, normalizedState);
+    let rollbackState = normalizedState;
+    let rollbackGeneration = writeGeneration;
+    let rollbackOperationEpoch = this.operationEpochs.get(keyId) ?? 0;
     if (!id) {
       // No identity bound → this keyId is L1-only (anonymous session, tests
       // that bypass bind, etc.). Skip repo/binding persistence rather than
@@ -698,6 +750,9 @@ export class SessionStore {
           if (claimedState !== currentState) {
             currentState = claimedState;
             currentGeneration = this.commitState(keyId, currentState);
+            rollbackState = currentState;
+            rollbackGeneration = currentGeneration;
+            rollbackOperationEpoch = this.operationEpochs.get(keyId) ?? 0;
           }
 
           let l2aPersisted = false;
@@ -714,7 +769,10 @@ export class SessionStore {
               console.warn("[session] L2a upsert failed");
             }
             if (!this.isCurrentState(keyId, currentGeneration, currentState)) return;
-            if (l2aPersisted) this.markDurableLayer(keyId, "l2a");
+            if (l2aPersisted) {
+              this.markDurableLayer(keyId, "l2a");
+              rollbackOperationEpoch = this.operationEpochs.get(keyId) ?? 0;
+            }
             const latestIdentity = this.previewIdentityClaim(keyId, durableIdentity);
             if (!sameIdentityClaim(durableIdentity, latestIdentity)) {
               if (l2aPersisted) {
@@ -726,6 +784,9 @@ export class SessionStore {
                 requiredLayers,
               );
               currentGeneration = this.commitState(keyId, currentState);
+              rollbackState = currentState;
+              rollbackGeneration = currentGeneration;
+              rollbackOperationEpoch = this.operationEpochs.get(keyId) ?? 0;
               continue;
             }
           }
@@ -747,7 +808,10 @@ export class SessionStore {
               console.warn("[session] L2b binding write failed");
             }
             if (!this.isCurrentState(keyId, currentGeneration, currentState)) return;
-            if (l2bPersisted) this.markDurableLayer(keyId, "l2b");
+            if (l2bPersisted) {
+              this.markDurableLayer(keyId, "l2b");
+              rollbackOperationEpoch = this.operationEpochs.get(keyId) ?? 0;
+            }
             const latestIdentity = this.previewIdentityClaim(keyId, durableIdentity);
             if (!sameIdentityClaim(durableIdentity, latestIdentity)) {
               if (l2aPersisted) {
@@ -762,6 +826,9 @@ export class SessionStore {
                 requiredLayers,
               );
               currentGeneration = this.commitState(keyId, currentState);
+              rollbackState = currentState;
+              rollbackGeneration = currentGeneration;
+              rollbackOperationEpoch = this.operationEpochs.get(keyId) ?? 0;
               continue;
             }
           }
@@ -798,6 +865,7 @@ export class SessionStore {
               if (!this.isCurrentState(keyId, currentGeneration, currentState)) return;
               if (!settledPersisted) throw new SessionIdentityConflictError();
               this.markDurableLayer(keyId, "l2a");
+              rollbackOperationEpoch = this.operationEpochs.get(keyId) ?? 0;
               const latestIdentity = this.previewIdentityClaim(keyId, durableIdentity);
               if (!sameIdentityClaim(durableIdentity, latestIdentity)) {
                 requiredLayers = mergeDurableClaimLayers(requiredLayers, {
@@ -810,11 +878,17 @@ export class SessionStore {
                   requiredLayers,
                 );
                 currentGeneration = this.commitState(keyId, currentState);
+                rollbackState = currentState;
+                rollbackGeneration = currentGeneration;
+                rollbackOperationEpoch = this.operationEpochs.get(keyId) ?? 0;
                 continue;
               }
             }
             currentState = settledState;
             currentGeneration = this.commitState(keyId, currentState);
+            rollbackState = currentState;
+            rollbackGeneration = currentGeneration;
+            rollbackOperationEpoch = this.operationEpochs.get(keyId) ?? 0;
           }
 
           if (l2aPersisted || l2bPersisted) {
@@ -824,22 +898,47 @@ export class SessionStore {
         }
       });
     } catch (error) {
-      if (rollbackSnapshot) this.restoreClaimMutation(keyId, rollbackSnapshot);
+      if (rollbackSnapshot) {
+        this.restoreClaimMutation(
+          keyId,
+          rollbackSnapshot,
+          rollbackState,
+          rollbackGeneration,
+          rollbackOperationEpoch,
+        );
+      }
       throw error;
     }
   }
 
   delete(keyId: string): void {
+    const deleteToken = this.bumpDeleteEpoch(keyId);
+    this.deleteIntents.set(keyId, deleteToken);
     this.removeState(keyId);
     this.durableLayersByKey.delete(keyId);
     const id = this.identities.get(keyId);
     if (!id) return;
     this.releaseRawSessionClaim(keyId);
     void this.enqueuePersistence(keyId, async () => {
-      await this.repo?.deleteBySessionId(spaceOf(id), id.userId, id.agentSource, id.sessionId);
-      await this.bindingRepo
-        ?.deleteBinding(spaceOf(id), id.userId, id.agentSource, id.sessionId)
-        .catch(() => {});
+      try {
+        await this.repo?.deleteBySessionId(spaceOf(id), id.userId, id.agentSource, id.sessionId);
+      } catch {
+        // The process-local tombstone remains authoritative until a newer set.
+      }
+      try {
+        await this.bindingRepo
+          ?.deleteBinding(spaceOf(id), id.userId, id.agentSource, id.sessionId);
+      } catch {
+        // The process-local tombstone remains authoritative until a newer set.
+      }
+      if (this.deleteIntents.get(keyId) !== deleteToken) return;
+      // A stale L2 read may have completed before the durable delete. Remove it
+      // again at finalization, but never erase a newer set that cleared token.
+      this.removeState(keyId);
+      this.durableLayersByKey.delete(keyId);
+      this.releaseRawSessionClaim(keyId);
+      this.deleteIntents.delete(keyId);
+      this.bumpDeleteEpoch(keyId);
     }).catch(() => {});
   }
 
@@ -932,6 +1031,11 @@ export class SessionStore {
           console.warn("[session-db] skipped session with identity conflict");
           continue;
         }
+        // A legacy bypass with an incomplete optional owner is not sufficient
+        // startup authority: a stronger L2b binding may already own the tuple.
+        // Leave it out of L1 so the first request performs normal L2a/L2b
+        // corroboration before any claim or durable rewrite.
+        if (hasWeakBypassClaim(normalizedState)) continue;
         const keyId = sessionStoreKey(identity);
         if (
           !this.mutatedKeys.has(keyId)
@@ -1057,7 +1161,8 @@ export class SessionStore {
         if (!persistedStateMatchesIdentity(l2a.state, merged)) {
           throw new SessionIdentityConflictError();
         }
-        const needsClaimPersistence = bypassClaimNeedsPersistence(l2a.state, merged);
+        const needsClaimPersistence = hasWeakBypassClaim(l2a.state)
+          || bypassClaimNeedsPersistence(l2a.state, merged);
         let corroboratingBinding: SessionBinding | null = null;
         if (needsClaimPersistence && this.bindingRepo) {
           const beforeCorroboration = this.snapshotState(keyId);

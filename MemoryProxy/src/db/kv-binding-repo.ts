@@ -59,10 +59,13 @@ export class KvBindingRepo implements BindingRepo {
     sessionId: string,
   ): Promise<SessionBinding | null> {
     try {
-      const raw = await this.storage.getJSON<StoredBinding>(
-        keyOf(spaceId, userId, agentSource, sessionId),
-      );
-      if (!raw) return null;
+      const stored = await this.storage.getText(keyOf(spaceId, userId, agentSource, sessionId));
+      if (stored === null) return null;
+      const raw = JSON.parse(stored) as StoredBinding;
+      if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+        throw new BindingRepoReadError();
+      }
+      if (raw.userId && raw.userId !== userId) throw new BindingRepoReadError();
       return {
         outcome: raw.outcome ?? "initialized",
         userId: raw.userId,

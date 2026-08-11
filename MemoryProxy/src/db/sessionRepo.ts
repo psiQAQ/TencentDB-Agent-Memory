@@ -96,18 +96,20 @@ function rowFromState(
   };
 }
 
-function safeParse<T>(s: string | null | undefined): T | null {
-  if (!s) return null;
+function parseState(s: string | null | undefined): SessionInitState {
   try {
-    return JSON.parse(s) as T;
+    const parsed = JSON.parse(s ?? "") as unknown;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      throw new Error("invalid persisted session state");
+    }
+    return parsed as SessionInitState;
   } catch {
-    return null;
+    throw new SessionRepoReadError();
   }
 }
 
-function rowToState(row: PersistedSessionRow): SessionInitState | null {
-  const parsed = safeParse<SessionInitState>(row.state_json);
-  return parsed;
+function rowToState(row: PersistedSessionRow): SessionInitState {
+  return parseState(row.state_json);
 }
 
 function identityOf(
@@ -238,7 +240,8 @@ class SqliteSessionRepo implements SessionRepo {
         | undefined;
       if (row) {
         const state = rowToState(row);
-        return state && persistedStateOwnsIdentity(state, identity) ? state : null;
+        if (!persistedStateOwnsIdentity(state, identity)) throw new SessionRepoReadError();
+        return state;
       }
 
       const legacyId = legacyPersistedSessionIdentityKey(
@@ -307,15 +310,14 @@ class SqliteSessionRepo implements SessionRepo {
       const out: HydratedSessionRow[] = [];
       for (const r of rows) {
         const s = rowToState(r);
-        if (!s) continue;
         const parsed = parsePersistedSessionIdentityKey(r.session_id);
         if (!parsed) continue;
-        if (!persistedStateOwnsIdentity(s, parsed)) continue;
+        if (!persistedStateOwnsIdentity(s, parsed)) throw new SessionRepoReadError();
         out.push({ ...parsed, state: s });
       }
       return out;
     } catch {
-      return [];
+      throw new SessionRepoReadError();
     }
   }
 }

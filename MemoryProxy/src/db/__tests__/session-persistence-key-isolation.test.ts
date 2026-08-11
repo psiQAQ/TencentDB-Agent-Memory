@@ -2,7 +2,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { RedisBindingRepo } from "../binding-repo.js";
 import {
@@ -24,6 +24,7 @@ import {
   sessionRowId,
 } from "../sessionRepo.js";
 import type { SessionInitState } from "../../session/types.js";
+import { MemoryStorage } from "../../storage/memory-storage.js";
 
 const FIRST = ["space:a", "user", "claude-code", "shared-session"] as const;
 const SECOND = ["space", "a:user", "claude-code", "shared-session"] as const;
@@ -483,7 +484,10 @@ describe("collision-safe persisted session identity keys", () => {
       JSON.stringify(state(identity, "legacy-owner")),
     );
 
-    expect(await sessions.getBySessionId(...identity)).toBeNull();
+    await expect(sessions.getBySessionId(...identity)).rejects.toMatchObject({
+      name: "SessionRepoReadError",
+      message: "session repository read failed",
+    });
     expect(redis.strings).toHaveLength(2);
   });
 
@@ -581,6 +585,101 @@ describe("collision-safe persisted session identity keys", () => {
     await expect(sqliteSession.getBySessionId(...FIRST)).rejects.toMatchObject({
       name: "SessionRepoReadError",
       message: "session repository read failed",
+    });
+  });
+
+  it("rejects present malformed and mismatched canonical SQLite sessions", async () => {
+    const detail = "malformed-sqlite-session-detail-sentinel";
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const error = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const sessions = getSessionRepo();
+    expect(await sessions.upsert(...FIRST, state(FIRST, "canonical-owner"))).toBe(true);
+    const db = getDb()!;
+    const update = db.prepare("UPDATE sessions SET state_json = ? WHERE session_id = ?");
+
+    update.run(`{${detail}`, sessionRowId(...FIRST));
+    await expect(sessions.getBySessionId(...FIRST)).rejects.toMatchObject({
+      name: "SessionRepoReadError",
+      message: "session repository read failed",
+    });
+    expect(db.prepare("SELECT COUNT(*) AS count FROM sessions WHERE session_id = ?")
+      .get(sessionRowId(...FIRST))).toEqual({ count: 1 });
+
+    update.run(JSON.stringify(state(SECOND, "wrong-owner")), sessionRowId(...FIRST));
+    await expect(sessions.getBySessionId(...FIRST)).rejects.toMatchObject({
+      name: "SessionRepoReadError",
+      message: "session repository read failed",
+    });
+    const emitted = [...warn.mock.calls, ...error.mock.calls].flat().join(" ");
+    expect(emitted).not.toContain(detail);
+  });
+
+  it("rejects present malformed and mismatched canonical KV sessions", async () => {
+    const detail = "malformed-kv-session-detail-sentinel";
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const error = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const storage = new MemoryStorage();
+    const sessions = new KvSessionRepo(storage);
+    const key = `ttl/${FIRST.join("/")}/inj-sess.json`;
+
+    await storage.putText(key, `{${detail}`);
+    await expect(sessions.getBySessionId(...FIRST)).rejects.toMatchObject({
+      name: "SessionRepoReadError",
+      message: "session repository read failed",
+    });
+    expect(await storage.getText(key)).toBe(`{${detail}`);
+
+    expect(await sessions.upsert(...FIRST, state(SECOND, "wrong-owner"))).toBe(true);
+    await expect(sessions.getBySessionId(...FIRST)).rejects.toMatchObject({
+      name: "SessionRepoReadError",
+      message: "session repository read failed",
+    });
+    expect(await new KvSessionRepo(new MemoryStorage()).getBySessionId(...FIRST)).toBeNull();
+    const emitted = [...warn.mock.calls, ...error.mock.calls].flat().join(" ");
+    expect(emitted).not.toContain(detail);
+  });
+
+  it("rejects present malformed and mismatched canonical KV bindings", async () => {
+    const detail = "malformed-kv-binding-detail-sentinel";
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const error = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const storage = new MemoryStorage();
+    const bindings = new KvBindingRepo(storage);
+    const key = `nottl/${FIRST.join("/")}/binding.json`;
+
+    await storage.putText(key, `{${detail}`);
+    await expect(bindings.getBinding(...FIRST)).rejects.toMatchObject({
+      name: "BindingRepoReadError",
+      message: "binding repository read failed",
+    });
+    expect(await storage.getText(key)).toBe(`{${detail}`);
+
+    await storage.putJSON(key, {
+      outcome: "bypassed",
+      userId: SECOND[1],
+      created_at: 1,
+      last_seen: 1,
+    });
+    await expect(bindings.getBinding(...FIRST)).rejects.toMatchObject({
+      name: "BindingRepoReadError",
+      message: "binding repository read failed",
+    });
+    expect(await new KvBindingRepo(new MemoryStorage()).getBinding(...FIRST)).toBeNull();
+    const emitted = [...warn.mock.calls, ...error.mock.calls].flat().join(" ");
+    expect(emitted).not.toContain(detail);
+  });
+
+  it("rejects a present mismatched canonical Redis binding", async () => {
+    const redis = new FakeRedis();
+    const bindings = new RedisBindingRepo(redis as never);
+    redis.hashes.set(`inj:binding:${v2IdentityKey(FIRST)}`, {
+      outcome: "bypassed",
+      user_id: SECOND[1],
+    });
+
+    await expect(bindings.getBinding(...FIRST)).rejects.toMatchObject({
+      name: "BindingRepoReadError",
+      message: "binding repository read failed",
     });
   });
 
