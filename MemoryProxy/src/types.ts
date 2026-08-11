@@ -572,6 +572,8 @@ export interface AuthConfig {
   enabled: boolean;
   /** Auth service base URL (e.g. http://kernel.example.com:8420). */
   url: string;
+  /** Optional server credential sent to the auth service as Bearer authorization. */
+  serviceToken?: string;
   /** Request timeout in ms. Default: 5000. */
   timeoutMs: number;
 }
@@ -796,6 +798,7 @@ export interface RawYamlConfig {
   auth?: {
     enabled?: boolean;
     url?: string;
+    serviceToken?: string;
     timeoutMs?: number;
   };
   systemUsers?: Partial<SystemUserEntry>[];

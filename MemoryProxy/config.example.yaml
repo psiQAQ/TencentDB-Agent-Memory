@@ -291,10 +291,12 @@ clickhouse:
 # 启用后 proxy 调用内核 POST /v3/meta/auth/verify 验证客户端 API Key。
 # 任何非 valid=true 的结果都返回 401 拒绝请求（包括超时/网络错误）。
 # x-tdai-service-id 从请求路径 /proxy/<spaceId>/... 自动提取。
+# serviceToken 是 proxy 到内核的服务端凭证；绝不回退使用客户端 user_key。
 # 验证通过后的 user_id 仅用于进程内鉴权/业务逻辑；遥测导出列固定脱敏。
 auth:
   enabled: true            # 是否启用鉴权
   url: "http://kernel.example.com:8420"   # 内核鉴权服务 base URL（自动拼接 /v3/meta/auth/verify）
+  serviceToken: ""         # 可选；非空时发送 Authorization: Bearer <serviceToken>
   timeoutMs: 5000          # 鉴权请求超时（毫秒）
 
 
