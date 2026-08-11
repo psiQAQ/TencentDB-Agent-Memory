@@ -376,7 +376,14 @@ export interface ProxyConfig {
   };
   upstream: {
     url: string; // OpenAI-compatible upstream URL
-    apiKey: string; // 若非空则替换请求中的 API Key
+    /**
+     * Server-side global upstream credential. Injected as Authorization Bearer
+     * for OpenAI or x-api-key for Anthropic. If neither the selected
+     * global/per-agent config nor explicit server auth supplies a credential,
+     * forwarding fails closed before fetch; caller credentials are never used
+     * as fallback.
+     */
+    apiKey: string;
     /**
      * Per-agent overrides keyed by agent name (URL path prefix, e.g. "claude-code").
      * Empty / missing entry → agent falls back to `url` + `apiKey`.
@@ -433,10 +440,11 @@ export interface ProxyConfig {
   skillRuntime: SkillRuntimeConfig;
   auth: AuthConfig;
   /**
-   * Internal service accounts allowed to passthrough the proxy without any
-   * injection / session logic. Match is by `userKey` on inbound Authorization.
-   * Empty array (default) disables the feature — every request goes through
-   * the standard verifyUserKey pipeline.
+   * Internal service accounts allowed to skip injection / session logic after
+   * authentication. Matching compares the `userId` returned by `verifyUserKey`
+   * with each entry's `userId`; inbound credentials are never compared with
+   * `SystemUserEntry.userKey`, which is legacy operator-reference data only.
+   * Empty array (default) disables the short-circuit.
    */
   systemUsers: SystemUserEntry[];
   /**
