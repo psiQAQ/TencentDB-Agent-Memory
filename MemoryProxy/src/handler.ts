@@ -54,6 +54,7 @@ import {
   MissingUpstreamCredentialError,
   sameOrigin,
 } from "./upstream-headers.js";
+import { SessionIdentityConflictError, sessionStoreKey } from "./session/store.js";
 
 /**
  * Build a per-request TdaiClient. `spaceId` (extracted from the request path
@@ -581,7 +582,6 @@ export async function handleChatCompletions(
       const presetIdentity = parsePresetIdentity(config.sessionInit, lcHeaders);
 
       // ── Session Recovery: try L2b binding before falling into session-init form ──
-      const compositeKey = `${agentSource}:${sessionKey}`;
       // Identity for repo/binding writes. userId 缺失时 fallback 到 `anonymous`
       // 复合键，保证 key path 分段合法（`u=anonymous` 走独立命名空间，天然与
       // 有 userId 的请求隔离）。参见 §4.4 边界处理。
@@ -590,7 +590,11 @@ export async function handleChatCompletions(
         agentSource,
         sessionId: sessionKey,
         spaceId,
+        teamId: presetIdentity?.teamId,
+        agentId: presetIdentity?.agentId,
+        taskId: presetIdentity?.taskId,
       };
+      const compositeKey = sessionStoreKey(identity);
       const recovered = await store.getOrRecover(compositeKey, identity, {
         metadataClient,
         messages: body.messages as Array<Record<string, unknown>> ?? [],
@@ -739,7 +743,11 @@ export async function handleChatCompletions(
       // call is a no-op and guards against future refactors that copy
       // the object between these two lines.
       restoreSessionSpaceId(sessionInfo, spaceId);
-    } catch {
+    } catch (err) {
+      if (err instanceof SessionIdentityConflictError) {
+        console.warn("[session-init] request rejected reason=identity_conflict");
+        return c.json({ error: "session_identity_conflict" }, 403);
+      }
       console.error("[session-init] handleSessionInit failed");
       sessionInfo = undefined;
       injectedSkipped = true;

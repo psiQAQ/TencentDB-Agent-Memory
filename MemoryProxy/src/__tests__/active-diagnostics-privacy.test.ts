@@ -166,6 +166,7 @@ describe("active diagnostics privacy", () => {
           "content-type": "application/json",
           "x-conversation-id": PRIVATE_VALUE,
           "x-tdai-service-id": PRIVATE_VALUE,
+          "x-tdai-agent-source": "claude-code",
         },
         body: "{}",
       },
@@ -182,10 +183,20 @@ describe("active diagnostics privacy", () => {
   it("returns fixed memory-bridge rejection envelopes and diagnostics", async () => {
     const consoleWarn = vi.spyOn(console, "warn").mockImplementation(() => {});
     const config = structuredClone(DEFAULT_CONFIG);
+    config.auth = {
+      enabled: true,
+      url: "https://auth.invalid",
+      timeoutMs: 100,
+    };
+    initAuth(config.auth);
+    vi.stubGlobal("fetch", vi.fn(async () => Response.json({
+      code: 0,
+      data: { valid: true, user: { user_id: "user-safe" } },
+    })));
     const store = getSessionStore();
-    await store.set("ses_safe", {
+    vi.spyOn(store, "getOrRecover").mockResolvedValue({
       status: "initialized",
-      keyId: "key-safe",
+      keyId: "session-safe",
       startedAt: 0,
       attemptCount: 0,
       userId: "user-safe",
@@ -213,7 +224,13 @@ describe("active diagnostics privacy", () => {
       "http://proxy/memory-bridge/v3/scenario/read",
       {
         method: "POST",
-        headers: { "content-type": "application/json", "x-session-id": "ses_safe" },
+        headers: {
+          authorization: `Bearer ${TEST_USER_KEY}`,
+          "content-type": "application/json",
+          "x-session-id": "session-safe",
+          "x-tdai-service-id": "space-safe",
+          "x-tdai-agent-source": "claude-code",
+        },
         body: PRIVATE_BODY_VALUE,
       },
     );

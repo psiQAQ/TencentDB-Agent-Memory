@@ -58,8 +58,9 @@ export class TdaiProfileMemoryInjector implements InjectionHook {
     const identity = getTdaiIdentity(ctx.metadata.custom);
     if (!identity) return [];
 
-    const session = (ctx.metadata.custom as any)?.session as { user_key?: string; space_id?: string } | undefined;
-    const userKey = session?.user_key;
+    const custom = ctx.metadata.custom as Record<string, unknown> | undefined;
+    const session = custom?.session as { space_id?: string } | undefined;
+    const userKey = typeof custom?.userKey === "string" ? custom.userKey : undefined;
     // spaceId 来自 session 注册时保存的 URL path 中的 `/proxy/<spaceId>/...`；
     // 用作内核的 `x-tdai-service-id` 头做租户路由。空字符串会被内核拒绝（invalid_user_key）
     // —— caller 已在 session-init 阶段做 bypass 处理。
@@ -154,8 +155,8 @@ function createPrewarmAgentContext(input: PrewarmInput): AgentContext {
       keyId: input.keyId,
       modelId: "prewarm",
       stream: false,
-      agentSource: "session-init",
-      custom: { session: input.sessionInfo },
+      agentSource: input.agentSource,
+      custom: { session: input.sessionInfo, userKey: input.callerUserKey },
     },
   };
 }

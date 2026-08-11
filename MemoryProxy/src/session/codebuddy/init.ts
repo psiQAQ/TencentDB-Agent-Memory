@@ -18,7 +18,7 @@ import type {
   TeamOption,
 } from "../types.js";
 import { DEFAULT_TASK_LABEL } from "../types.js";
-import { SessionStore } from "../store.js";
+import { SessionStore, sessionStoreKey } from "../store.js";
 import { buildSessionInfo } from "../registrar.js";
 import {
   buildSessionContextBlockWithToggles,
@@ -329,7 +329,12 @@ export async function handleSessionInit(
   presetIdentity?: PresetIdentity,
   agentSource: string = "codebuddy",
 ): Promise<SessionInitResult> {
-  const compositeKey = `${agentSource}:${sessionKey}`;
+  const compositeKey = sessionStoreKey({
+    userId: userId || "anonymous",
+    agentSource,
+    sessionId: sessionKey,
+    spaceId,
+  });
   if (sessionKey === "unknown" || !sessionKey) return { intercepted: false };
 
   const state = store.get(compositeKey);

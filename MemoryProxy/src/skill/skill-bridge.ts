@@ -20,8 +20,12 @@
 import type { Context } from "hono";
 import type { Redis } from "ioredis";
 import { extractBearerToken } from "../opik.js";
-import { apiKeyToKeyId } from "../opik.js";
-import { getSessionStore } from "../session/store.js";
+import {
+  getSessionStore,
+  sessionStoreKey,
+  type SessionIdentity,
+} from "../session/store.js";
+import { resolveConversationId } from "../session/session-key.js";
 import { verifyUserKey, isAuthEnabled } from "../auth.js";
 // getSkillExtractTrigger / KvExtractStore 已随老链路一起删除。
 // 详见 handler-glue.ts 顶部注释 —— skill_extract 触发路径当前不可用,
@@ -32,6 +36,8 @@ import { KvVersionPinRepo } from "./kv-version-pin-repo.js";
 import { getProxyStorage } from "../storage/factory.js";
 import { getMetadataClient } from "../meta/client.js";
 import type { ProxyConfig } from "../types.js";
+import { assertAgentSource } from "../storage/key-utils.js";
+import { isAnthropicMessageSource } from "../agent-adapters/anthropic-platform.js";
 
 /**
  * 二选一的 pin repo（KvVersionPinRepo 或 VersionPinRepo）——
@@ -179,11 +185,7 @@ interface SessionIdFields {
   user_id: string;
   team_id: string;
   agent_id: string;
-  /**
-   * URL 路径侧的 agentSource（`claude-code` / `codebuddy` ...）—— 用于
-   * Repo 三段隔离键。从 SessionStore 里存储 session 的 keyId 反解出来
-   * （keyId 形如 `${agentSource}:${sessionId}`）。
-   */
+  /** Authenticated request's explicit agent source. */
   agent_source: string;
   /**
    * Kernel tenant/instance ID for `x-tdai-service-id`. Extracted from
@@ -193,102 +195,55 @@ interface SessionIdFields {
    * `config.coreSkill.serviceId`.
    */
   space_id?: string;
-  /**
-   * User API key (`x-tdai-user-key`). Captured during session init from the
-   * upstream request's api key exchange. Required by kernel /v3/meta/* endpoints
-   * to enforce per-user ACL/visibility. Missing here means the session upstream
-   * bypassed apikey verification — that's a programming bug, not a rejectable
-   * runtime state; team-wide search returns 500 rather than silently opening up.
-   */
-  user_key?: string;
-}
-
-function deriveSessionKey(c: Context): { sessionKey: string; userIdForSession: string } {
-  const auth = c.req.header("authorization") ?? c.req.header("Authorization") ?? "";
-  const apiKey = extractBearerToken(auth);
-  const keyId = apiKey ? apiKeyToKeyId(apiKey) : "unknown";
-  const conversationId =
-    c.req.header("x-conversation-id") ??
-    c.req.header("x-session-id") ??
-    c.req.header("x-chat-id") ??
-    c.req.header("x-thread-id") ??
-    null;
-  return {
-    sessionKey: conversationId ?? keyId,
-    userIdForSession: keyId,
-  };
 }
 
 function stateToIdFields(
   state: import("../session/types.js").SessionInitState | undefined,
-  matchedKey: string | undefined,
+  identity: SessionIdentity,
 ): SessionIdFields | null {
-  if (!state || !matchedKey || state.status !== "initialized" || !state.sessionInfo) return null;
+  if (!state || state.status !== "initialized" || !state.sessionInfo) return null;
   const s = state.sessionInfo;
   if (!s.user_id || !s.team_id || !s.agent_id) return null;
-  const colonIdx = matchedKey.indexOf(":");
-  const agentSource = colonIdx > 0 ? matchedKey.slice(0, colonIdx) : "claude-code";
+  if (
+    s.user_id !== identity.userId
+    || (state.userId && state.userId !== identity.userId)
+    || (state.keyId && state.keyId !== identity.sessionId)
+    || s.session_id !== identity.sessionId
+    || (s.space_id && s.space_id !== identity.spaceId)
+  ) {
+    return null;
+  }
   return {
     user_id: s.user_id,
     team_id: s.team_id,
     agent_id: s.agent_id,
-    agent_source: agentSource,
-    space_id: s.space_id,
-    user_key: s.user_key,
+    agent_source: identity.agentSource,
+    space_id: identity.spaceId,
   };
 }
 
-function loadSessionIdsL1(sessionKey: string): SessionIdFields | null {
-  // 会话 keyId 在 handler 层是 `${agentSource}:${sessionId}`；skill-bridge 拿到
-  // 的通常是 bare sessionKey（外部 curl 不知道 agentSource）。原语义是先按
-  // bare 命中，命中不到再按已知 agentSource 前缀试。
-  const candidates = sessionKey.includes(":")
-    ? [sessionKey]
-    : [sessionKey, `codebuddy:${sessionKey}`, `claude-code:${sessionKey}`];
-  for (const k of candidates) {
-    const s = getSessionStore().get(k);
-    if (s) return stateToIdFields(s, k);
-  }
-  return null;
-}
-
-/**
- * L2 fallthrough (§6.1 修复) —— L1 miss 时用 apiKey→userId + 从 sessionKey 反解的
- * agentSource/sessionId 通过 SessionStore.getOrRecover 走 L2a→L2b→history-scan。
- * 见 memory-bridge.ts 里同名函数的注释。
- */
-async function loadSessionIdsL2(
-  apiKey: string,
-  spaceId: string,
-  sessionKey: string,
+/** Resolve an authenticated, identity-scoped session through L1/L2. */
+async function loadSessionIds(
+  config: ProxyConfig,
+  userKey: string,
+  identity: SessionIdentity,
 ): Promise<SessionIdFields | null> {
-  if (!isAuthEnabled() || !apiKey) return null;
-  const verifyResult = await verifyUserKey(apiKey, spaceId);
-  if (verifyResult.rejected || !verifyResult.userId) return null;
-  const userId = verifyResult.userId;
-
-  // 与 L1 一样按前缀候选跑一遍
-  const candidates = sessionKey.includes(":")
-    ? [sessionKey]
-    : [sessionKey, `codebuddy:${sessionKey}`, `claude-code:${sessionKey}`];
-  for (const compositeKey of candidates) {
-    const colonIdx = compositeKey.indexOf(":");
-    const agentSource = colonIdx > 0 ? compositeKey.slice(0, colonIdx) : "claude-code";
-    const sessionId = colonIdx > 0 ? compositeKey.slice(colonIdx + 1) : compositeKey;
-    try {
-      // spaceId 必须传 —— 拼 COS key 要用（同 handler / memory-bridge 修复）
-      const recovered = await getSessionStore().getOrRecover(
-        compositeKey,
-        { userId, agentSource, sessionId, spaceId },
-        {},
-      );
-      const fields = stateToIdFields(recovered, compositeKey);
-      if (fields) return fields;
-    } catch (err) {
-      console.warn(`${TAG} L2 fallthrough error key=${compositeKey}: ${(err as Error).message}`);
-    }
+  try {
+    const metadataClient = getMetadataClient(
+      config.coreSkill,
+      identity.spaceId ?? "",
+      userKey,
+    );
+    const recovered = await getSessionStore().getOrRecover(
+      sessionStoreKey(identity),
+      identity,
+      { metadataClient },
+    );
+    return stateToIdFields(recovered, identity);
+  } catch {
+    console.warn(`${TAG} session recovery failed`);
+    return null;
   }
-  return null;
 }
 
 function envelope(code: number, message: string, httpStatus = 200) {
@@ -416,24 +371,51 @@ export function createSkillBridgeHandler(
       return envelope(41501, `${TAG} content-type must be application/json`, 415);
     }
 
-    // Session must be initialized — IdFields come from there.
-    const { sessionKey } = deriveSessionKey(c);
-    let ids = loadSessionIdsL1(sessionKey);
-    if (!ids) {
-      // §6.1 修复：跨 pod L2 fallthrough
-      const auth = c.req.header("authorization") ?? c.req.header("Authorization") ?? "";
-      const apiKey = extractBearerToken(auth);
-      const spaceId = c.req.header("x-tdai-service-id")
-        ?? config.tdai?.serviceId
-        ?? config.coreSkill?.serviceId
-        ?? "";
-      if (apiKey && spaceId) {
-        console.log(`${TAG} session=${sessionKey} L1 miss → L2 fallthrough (apiKey=${apiKeyToKeyId(apiKey)} spaceId=${spaceId})`);
-        ids = await loadSessionIdsL2(apiKey, spaceId, sessionKey);
-      }
+    if (!isAuthEnabled()) {
+      return envelope(50301, `${TAG} user authentication is required`, 503);
     }
+    const authorization = (c.req.header("authorization") ?? "").trim();
+    const xApiKey = (c.req.header("x-api-key") ?? "").trim();
+    if (authorization && xApiKey) {
+      return envelope(40002, `${TAG} ambiguous authentication headers`, 400);
+    }
+    const bearer = extractBearerToken(authorization);
+    if ((authorization && !bearer) || (!bearer && !xApiKey)) {
+      return envelope(40102, `${TAG} valid Bearer or x-api-key authentication is required`, 401);
+    }
+    const userKey = bearer || xApiKey;
+
+    const spaceId = (c.req.header("x-tdai-service-id") ?? "").trim();
+    if (!spaceId) {
+      return envelope(40003, `${TAG} x-tdai-service-id is required`, 400);
+    }
+    const agentSource = (c.req.header("x-tdai-agent-source") ?? "").trim();
+    try {
+      assertAgentSource(agentSource);
+      if (agentSource !== "codebuddy" && !isAnthropicMessageSource(agentSource)) {
+        throw new Error("unregistered agent source");
+      }
+    } catch {
+      return envelope(40004, `${TAG} valid x-tdai-agent-source is required`, 400);
+    }
+    const sessionKey = resolveConversationId(c)?.trim() ?? "";
+    if (!sessionKey) {
+      return envelope(40101, `${TAG} session identity is unavailable`, 401);
+    }
+
+    const verified = await verifyUserKey(userKey, spaceId);
+    if (verified.rejected || !verified.userId) {
+      return envelope(40302, `${TAG} authentication rejected`, 403);
+    }
+    const identity: SessionIdentity = {
+      userId: verified.userId,
+      agentSource,
+      sessionId: sessionKey,
+      spaceId,
+    };
+    const ids = await loadSessionIds(config, userKey, identity);
     if (!ids) {
-      return envelope(40101, `${TAG} session not initialized; cannot derive identity`, 401);
+      return envelope(40101, `${TAG} session identity is unavailable`, 401);
     }
 
     // Backing storage for extract trigger + version pin.
@@ -480,7 +462,7 @@ export function createSkillBridgeHandler(
       const headers: Record<string, string> = {
         "Authorization": `Bearer ${config.coreSkill.serviceToken}`,
         // Prefer session-derived tenant; fall back to config for legacy sessions.
-        "x-tdai-service-id": ids.space_id || config.coreSkill.serviceId,
+        "x-tdai-service-id": spaceId,
         "Content-Type": "application/json",
       };
       let coreResp: Response;
@@ -600,19 +582,13 @@ export function createSkillBridgeHandler(
         //     plugin unchanged, filter the response.
         //
         // Contract:
-        //   - Missing user_key → programming bug (session-init should have
-        //     stored it). Return 500 rather than silently opening up.
+        //   - The user key is request-local and re-verified on every bridge call.
         //   - Resolver throws → fail-closed: return {items: []}. Never widen
         //     to an unfiltered search on infra failure.
         //   - Empty whitelist → short-circuit: return {items: []} without
         //     hitting core (user has 0 visible team skills).
         //   - Non-empty whitelist → overfetch top_k=PLUGIN_SEARCH_HARD_TOPK,
         //     filter response items by whitelist, slice back to caller's top_k.
-        if (!ids.user_key) {
-          console.error(`${TAG} team search: session lacks user_key — session-init should have stored it (sessionKey=${sessionKey})`);
-          return envelope(50001, `${TAG} team search misconfigured: session has no user_key`, 500);
-        }
-
         let whitelist: string[];
         try {
           const resolver = deps.resolveVisibleSkillIds
@@ -620,8 +596,8 @@ export function createSkillBridgeHandler(
           const result = await resolver({
             user_id: ids.user_id,
             team_id: ids.team_id,
-            user_key: ids.user_key,
-            space_id: ids.space_id,
+            user_key: userKey,
+            space_id: spaceId,
           });
           whitelist = result.ids;
           console.log(`${TAG} team search whitelist size=${whitelist.length} user=${ids.user_id} team=${ids.team_id}`);
@@ -683,7 +659,7 @@ export function createSkillBridgeHandler(
     const headers: Record<string, string> = {
       "Authorization": `Bearer ${config.coreSkill.serviceToken}`,
       // Prefer session-derived tenant; fall back to config for legacy sessions.
-      "x-tdai-service-id": ids.space_id || config.coreSkill.serviceId,
+      "x-tdai-service-id": spaceId,
       "Content-Type": "application/json",
     };
 

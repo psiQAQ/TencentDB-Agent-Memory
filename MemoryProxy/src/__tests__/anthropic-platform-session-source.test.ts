@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { DEFAULT_CONFIG } from "../config.js";
 import { handleSessionInit } from "../session/index.js";
-import { SessionStore } from "../session/store.js";
+import { sessionStoreKey, SessionStore } from "../session/store.js";
 
 describe("Anthropic platform session source", () => {
   afterEach(() => vi.restoreAllMocks());
@@ -22,13 +22,14 @@ describe("Anthropic platform session source", () => {
     };
     const store = new SessionStore();
     const sessionId = `ses_${source}`;
-    const compositeKey = `${source}:${sessionId}`;
-    store.bind(compositeKey, {
+    const identity = {
       userId: "user-1",
       agentSource: source,
       sessionId,
       spaceId: "space-1",
-    });
+    };
+    const compositeKey = sessionStoreKey(identity);
+    store.bind(compositeKey, identity);
 
     const result = await handleSessionInit(
       sessionId,
@@ -78,13 +79,14 @@ describe("Anthropic platform session source", () => {
   it("keeps the OpenAI initialized context in messages", async () => {
     const store = new SessionStore();
     const sessionId = "session-openai";
-    const compositeKey = `codebuddy:${sessionId}`;
-    store.bind(compositeKey, {
+    const identity = {
       userId: "user-1",
       agentSource: "codebuddy",
       sessionId,
       spaceId: "space-1",
-    });
+    };
+    const compositeKey = sessionStoreKey(identity);
+    store.bind(compositeKey, identity);
     await store.set(compositeKey, {
       status: "initialized",
       keyId: sessionId,
@@ -102,6 +104,9 @@ describe("Anthropic platform session source", () => {
       store,
       { stream: false, modelId: "test-model", protocol: "openai" },
       "codebuddy",
+      undefined,
+      undefined,
+      "space-1",
     );
 
     expect(result.messages?.map((message) => message.role)).toEqual(["system", "user"]);

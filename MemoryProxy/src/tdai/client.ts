@@ -381,23 +381,12 @@ export async function checkAclOrDeny(
 ): Promise<AclCheckResult> {
   try {
     return await client.checkAcl(params);
-  } catch (err) {
-    log.error(
-      "[tdai-acl] check_failed",
-      { user_key_masked: maskUserKey(params.user_key), asset_id: params.asset_id, action: params.action },
-      err instanceof Error ? err : new Error(String(err)),
-    );
+  } catch {
+    log.error("[tdai-acl] check_failed", { category: "upstream_error" });
     return { allowed: false, reason: "acl_check_error" };
   }
 }
 
 function stripUndefined(body: Record<string, unknown>): Record<string, unknown> {
   return Object.fromEntries(Object.entries(body).filter(([, value]) => value !== undefined));
-}
-
-/** 打印敏感 userKey 时脱敏：只保留前 6 位 + 后 4 位。 */
-function maskUserKey(key: string | undefined): string {
-  if (!key) return "";
-  if (key.length <= 12) return "***";
-  return `${key.slice(0, 6)}...${key.slice(-4)}`;
 }

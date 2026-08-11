@@ -172,7 +172,7 @@ export interface SessionInfo {
   agent_id: string;
   user_id: string;
   task_id?: string;
-  /** User's API key — stored so injectors can create MetadataClient for per-user kernel calls. */
+  /** @deprecated Legacy persisted field. New state uses request-local custom.userKey. */
   user_key?: string;
   /**
    * Kernel instance / space ID (e.g. `mem-example001`) extracted from the request

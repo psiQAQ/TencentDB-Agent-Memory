@@ -9,11 +9,12 @@
  * See docs/design/2026-07-10-cos-ttl-nottl-split-plan.md §4.3.
  *
  * ── Identity binding ──────────────────────────────────────────────────────
- * Public API keeps a single `keyId: string` as the L1 map key
- * (historically `${agentSource}:${sessionKey}` from handler.ts). Repo calls
- * however now require `(userId, agentSource, sessionId)`. To avoid rippling
- * that tuple through every `store.set(...)` call site in the session-init
- * state machine, the store maintains a keyId → identity map (`identities`):
+ * Public API keeps a single `keyId: string` as the L1 map key. The key is a
+ * collision-safe serialization of `(spaceId, userId, agentSource, sessionId)`;
+ * the raw session id remains in `SessionInitState.keyId` and external APIs.
+ * Repo calls require the same identity tuple. To avoid rippling it through
+ * every `store.set(...)` call site in the session-init state machine, the
+ * store maintains a keyId → identity map (`identities`):
  * callers invoke `bind(keyId, identity)` **once** when they have identity in
  * hand, and subsequent `set` / `delete` / `getOrRecover` pull the identity
  * back out. When no identity has been bound (e.g. anonymous / systemUser
@@ -27,6 +28,7 @@ import type { SessionInitState, SessionInitStatus, SessionInfo, AgentDetail, Tas
 import { getSessionRepo, type SessionRepo } from "../db/sessionRepo.js";
 import type { BindingRepo, SessionBinding } from "../db/binding-repo.js";
 import type { MetadataClient } from "../meta/client.js";
+import { withoutPersistedCredential } from "./state-sanitize.js";
 
 const DEFAULT_TTL_MS = 30 * 60 * 1000; // 30 minutes
 
@@ -41,6 +43,107 @@ export interface SessionIdentity {
   agentSource: string;
   sessionId: string;
   spaceId?: string;
+  teamId?: string;
+  agentId?: string;
+  taskId?: string;
+}
+
+export class SessionIdentityConflictError extends Error {
+  constructor() {
+    super("session_identity_conflict");
+    this.name = "SessionIdentityConflictError";
+  }
+}
+
+function compatibleOptionalIdentity(left?: string, right?: string): boolean {
+  return !left || !right || left === right;
+}
+
+function boundIdentityMatchesIdentity(
+  bound: SessionIdentity,
+  incoming: SessionIdentity,
+): boolean {
+  return bound.userId === incoming.userId
+    && bound.agentSource === incoming.agentSource
+    && bound.sessionId === incoming.sessionId
+    && compatibleOptionalIdentity(bound.spaceId, incoming.spaceId)
+    && compatibleOptionalIdentity(bound.teamId, incoming.teamId)
+    && compatibleOptionalIdentity(bound.agentId, incoming.agentId)
+    && compatibleOptionalIdentity(bound.taskId, incoming.taskId);
+}
+
+function claimedIdentityMatchesStored(claimed?: string, stored?: string): boolean {
+  return !claimed || claimed === stored;
+}
+
+/** Collision-safe L1 key; never expose this internal serialization to clients. */
+export function sessionStoreKey(identity: SessionIdentity): string {
+  return JSON.stringify([
+    spaceOf(identity),
+    identity.userId,
+    identity.agentSource,
+    identity.sessionId,
+  ]);
+}
+
+function assertIdentityScopedKey(keyId: string, identity: SessionIdentity): void {
+  if (keyId !== sessionStoreKey(identity)) {
+    throw new SessionIdentityConflictError();
+  }
+}
+
+/** Validate every identity field available on a recovered state. */
+export function persistedStateMatchesIdentity(
+  state: SessionInitState,
+  identity: SessionIdentity,
+): boolean {
+  const session = state.sessionInfo;
+  if (state.userId && state.userId !== identity.userId) return false;
+  // Older recovery-only states used `${source}:${session}` here. Accept that
+  // exact identity-bound representation during read, then normalize it before
+  // promoting to L1; arbitrary or cross-source keys still fail closed.
+  if (
+    state.keyId
+    && state.keyId !== identity.sessionId
+    && state.keyId !== `${identity.agentSource}:${identity.sessionId}`
+  ) return false;
+  if (session?.user_id && session.user_id !== identity.userId) return false;
+  if (session?.session_id && session.session_id !== identity.sessionId) return false;
+  if (session?.space_id && identity.spaceId && session.space_id !== identity.spaceId) return false;
+
+  const storedTeamId = session?.team_id ?? state.selectedTeamId;
+  const storedAgentId = session?.agent_id ?? state.selectedAgentId ?? state.agentDetail?.id;
+  const storedTaskId = session?.task_id ?? state.taskDetail?.id;
+  return claimedIdentityMatchesStored(identity.teamId, storedTeamId)
+    && claimedIdentityMatchesStored(identity.agentId, storedAgentId)
+    && claimedIdentityMatchesStored(identity.taskId, storedTaskId);
+}
+
+function bindingMatchesIdentity(binding: SessionBinding, identity: SessionIdentity): boolean {
+  // Legacy bindings may omit fields. Their repository key is already scoped by
+  // authenticated user/space/source/session. A bypass binding carries no
+  // injectable team/agent/task context, so missing legacy fields remain safe;
+  // initialized bindings must prove every explicit optional claim before Core.
+  const optionalClaimMatches = binding.outcome === "bypassed"
+    ? compatibleOptionalIdentity
+    : claimedIdentityMatchesStored;
+  return compatibleOptionalIdentity(identity.userId, binding.userId)
+    && optionalClaimMatches(identity.teamId, binding.teamId)
+    && optionalClaimMatches(identity.agentId, binding.agentId)
+    && optionalClaimMatches(identity.taskId, binding.taskId);
+}
+
+function recoveryIdentityKey(keyId: string, identity: SessionIdentity): string {
+  return JSON.stringify([
+    keyId,
+    identity.userId,
+    identity.agentSource,
+    identity.sessionId,
+    identity.spaceId ?? "",
+    identity.teamId ?? "",
+    identity.agentId ?? "",
+    identity.taskId ?? "",
+  ]);
 }
 
 /** Extract spaceId from identity, defaulting to `""` for repo helpers. */
@@ -91,6 +194,11 @@ export class SessionStore {
    * silently degrades to memory-only for such keys.
    */
   bind(keyId: string, identity: SessionIdentity): void {
+    assertIdentityScopedKey(keyId, identity);
+    const bound = this.identities.get(keyId);
+    if (bound && !boundIdentityMatchesIdentity(bound, identity)) {
+      throw new SessionIdentityConflictError();
+    }
     this.identities.set(keyId, identity);
   }
 
@@ -125,8 +233,12 @@ export class SessionStore {
    * "小纸条"型持久化，用于长睡对话唤醒；写延迟不影响 pending 状态跨节点恢复。
    */
   async set(keyId: string, state: SessionInitState): Promise<void> {
-    this.states.set(keyId, state);
     const id = this.identities.get(keyId);
+    const credentialSafeState = withoutPersistedCredential(state);
+    const normalizedState = id
+      ? { ...credentialSafeState, keyId: id.sessionId, userId: id.userId }
+      : credentialSafeState;
+    this.states.set(keyId, normalizedState);
     if (!id) {
       // No identity bound → this keyId is L1-only (anonymous session, tests
       // that bypass bind, etc.). Skip repo/binding persistence rather than
@@ -140,7 +252,7 @@ export class SessionStore {
     // caller —— L1 已成功写入，主流程不因 L2a 写失败挂掉。
     if (this.repo) {
       try {
-        await this.repo.upsert(spaceOf(id), id.userId, id.agentSource, id.sessionId, state);
+        await this.repo.upsert(spaceOf(id), id.userId, id.agentSource, id.sessionId, normalizedState);
       } catch {
         console.warn("[session] L2a upsert failed");
       }
@@ -149,15 +261,15 @@ export class SessionStore {
     // await 而非 fire-and-forget，保持与 L2a 一致的契约：
     // `await store.set(...)` return 时，L1 / L2a / L2b 三层都已 durable。
     // 每个 session 只会在初始化终态触发一次，成本可控。
-    if (state.status === "initialized" && this.bindingRepo) {
-      const binding: SessionBinding = state.bypassed
-        ? { outcome: "bypassed", userId: state.userId, teamId: state.sessionInfo?.team_id, agentId: state.sessionInfo?.agent_id, taskId: state.sessionInfo?.task_id }
+    if (normalizedState.status === "initialized" && this.bindingRepo) {
+      const binding: SessionBinding = normalizedState.bypassed
+        ? { outcome: "bypassed", userId: normalizedState.userId, teamId: normalizedState.sessionInfo?.team_id, agentId: normalizedState.sessionInfo?.agent_id, taskId: normalizedState.sessionInfo?.task_id }
         : {
             outcome: "initialized",
-            userId: state.sessionInfo?.user_id || state.userId,
-            teamId: state.sessionInfo?.team_id,
-            agentId: state.sessionInfo?.agent_id,
-            taskId: state.sessionInfo?.task_id,
+            userId: normalizedState.sessionInfo?.user_id || normalizedState.userId,
+            teamId: normalizedState.sessionInfo?.team_id,
+            agentId: normalizedState.sessionInfo?.agent_id,
+            taskId: normalizedState.sessionInfo?.task_id,
           };
       try {
         await this.bindingRepo.putBinding(spaceOf(id), id.userId, id.agentSource, id.sessionId, binding);
@@ -181,6 +293,27 @@ export class SessionStore {
     return this.get(keyId)?.status ?? "uninitialized";
   }
 
+  /**
+   * Detect an already-live raw conversation owned by a different user/space.
+   * A persisted row for the incoming full identity may still prove that the
+   * collision is legitimate, so callers use this only after their own L2
+   * probes miss.
+   */
+  private hasRawSessionConflict(keyId: string, identity: SessionIdentity): boolean {
+    for (const [otherKey] of this.states) {
+      if (otherKey === keyId || !this.get(otherKey)) continue;
+      const other = this.identities.get(otherKey);
+      if (
+        other
+        && other.agentSource === identity.agentSource
+        && other.sessionId === identity.sessionId
+      ) {
+        return true;
+      }
+    }
+    return false;
+  }
+
   cleanup(): void {
     const now = Date.now();
     for (const [keyId, state] of this.states) {
@@ -198,19 +331,45 @@ export class SessionStore {
       const rows = await this.repo.loadAllInitialized();
       let loaded = 0;
       for (const row of rows) {
-        // L1 key convention matches handler.ts / init.ts entry sites:
-        //   `${agentSource}:${sessionId}`
+        // L1 keys use the same full identity tuple as handler/init entry sites.
         // Also bind full identity so subsequent set() persists back through
         // the correct (userId, agentSource, sessionId) key path.
-        const keyId = `${row.agentSource}:${row.sessionId}`;
+        const safeState = withoutPersistedCredential(row.state);
+        const normalizedState = safeState.keyId === row.sessionId
+          ? safeState
+          : { ...safeState, keyId: row.sessionId };
+        const identity: SessionIdentity = {
+          userId: row.userId,
+          agentSource: row.agentSource,
+          sessionId: row.sessionId,
+          spaceId: row.spaceId || undefined,
+          teamId: normalizedState.sessionInfo?.team_id ?? normalizedState.selectedTeamId,
+          agentId: normalizedState.sessionInfo?.agent_id
+            ?? normalizedState.selectedAgentId
+            ?? normalizedState.agentDetail?.id,
+          taskId: normalizedState.sessionInfo?.task_id ?? normalizedState.taskDetail?.id,
+        };
+        if (!persistedStateMatchesIdentity(row.state, identity)) {
+          console.warn("[session-db] skipped session with identity conflict");
+          continue;
+        }
+        const keyId = sessionStoreKey(identity);
         if (!this.states.has(keyId)) {
-          this.states.set(keyId, row.state);
-          this.identities.set(keyId, {
-            userId: row.userId,
-            agentSource: row.agentSource,
-            sessionId: row.sessionId,
-            spaceId: row.spaceId || undefined,
-          });
+          this.states.set(keyId, normalizedState);
+          this.identities.set(keyId, identity);
+          if (normalizedState !== row.state) {
+            try {
+              await this.repo.upsert(
+                row.spaceId,
+                row.userId,
+                row.agentSource,
+                row.sessionId,
+                normalizedState,
+              );
+            } catch {
+              // Best-effort lazy migration; L1 is already credential-free.
+            }
+          }
           loaded++;
         }
       }
@@ -239,9 +398,10 @@ export class SessionStore {
     identity: SessionIdentity,
     ctx: RecoveryContext,
   ): Promise<SessionInitState | undefined> {
-    // Bind identity for downstream set()/delete()/probeL2a callchain.
-    this.identities.set(keyId, identity);
-
+    // Validate before any L1 read or identity binding. Reusing a raw
+    // source/session key here would let one authenticated user receive another
+    // user's terminal state and would redirect later write-through persistence.
+    assertIdentityScopedKey(keyId, identity);
     // Step 1: L1
     //
     // ⚠ Terminal 状态（`initialized`，含 `bypassed`）L1 才权威 —— 一旦定型
@@ -266,6 +426,19 @@ export class SessionStore {
     // pending 轮次只在初始化 form 阶段出现，每个 session 顶多 2-4 次，可接受；
     // initialized 快路径仍是纯内存零 IO。
     const l1 = this.get(keyId);
+    const boundIdentity = this.identities.get(keyId);
+    const rawSessionConflict = !l1 && this.hasRawSessionConflict(keyId, identity);
+    if (
+      (boundIdentity && !boundIdentityMatchesIdentity(boundIdentity, identity))
+      || (l1 && !persistedStateMatchesIdentity(l1, identity))
+    ) {
+      throw new SessionIdentityConflictError();
+    }
+
+    // Bind only after validating an existing L1 entry. A conflicting caller
+    // must never replace the victim's write-through identity.
+    this.identities.set(keyId, identity);
+
     if (l1 && l1.status === "initialized") {
       console.log("[cache] session=<redacted> L1 hit (terminal)");
       return l1;
@@ -303,6 +476,7 @@ export class SessionStore {
 
     // Step 3: L2b Binding
     if (!this.bindingRepo) {
+      if (rawSessionConflict) throw new SessionIdentityConflictError();
       console.log("[cache] session=<redacted> miss (no bindingRepo) → history-scan");
       return this.tryHistoryScan(keyId, identity, ctx);
     }
@@ -318,8 +492,12 @@ export class SessionStore {
       binding = null;
     }
     if (!binding) {
+      if (rawSessionConflict) throw new SessionIdentityConflictError();
       console.log("[cache] session=<redacted> miss (no binding) → history-scan");
       return this.tryHistoryScan(keyId, identity, ctx);
+    }
+    if (!bindingMatchesIdentity(binding, identity)) {
+      throw new SessionIdentityConflictError();
     }
     console.log(`[cache] session=<redacted> L2b binding hit outcome=${binding.outcome} → rebuild`);
 
@@ -332,9 +510,10 @@ export class SessionStore {
     if (binding.outcome === "bypassed") {
       const state: SessionInitState = {
         status: "initialized",
-        keyId,
+        keyId: identity.sessionId,
         startedAt: Date.now(),
         attemptCount: 0,
+        userId: identity.userId,
         bypassed: true,
         sessionInfo: null,
         agentDetail: null,
@@ -379,6 +558,12 @@ export class SessionStore {
       return undefined;
     }
     if (!row) return undefined;
+    const persistedRow = row;
+    row = withoutPersistedCredential(row);
+
+    if (!persistedStateMatchesIdentity(row, identity)) {
+      throw new SessionIdentityConflictError();
+    }
 
     // Zombie guard: pending forms past ttl are dropped (mirrors get()'s
     // in-memory ttl policy). Only pending — initialized sessions have no
@@ -398,25 +583,28 @@ export class SessionStore {
       return undefined;
     }
 
-    const storedUserId = row.userId ?? row.sessionInfo?.user_id;
-    if (storedUserId && identity.userId && storedUserId !== identity.userId) {
-      console.log(
-        "[session-recover] session=<redacted> L2a user mismatch, invalidating",
-      );
-      try {
-        this.repo!.deleteBySessionId(spaceOf(identity), identity.userId, identity.agentSource, identity.sessionId);
-      } catch {
-        /* best-effort */
-      }
-      return undefined;
-    }
-
     // Promote back to L1 so subsequent turns don't hit the repo at all.
-    this.states.set(keyId, row);
+    const normalizedRow = row.keyId === identity.sessionId
+      ? row
+      : { ...row, keyId: identity.sessionId };
+    if (normalizedRow !== persistedRow) {
+      try {
+        await this.repo!.upsert(
+          spaceOf(identity),
+          identity.userId,
+          identity.agentSource,
+          identity.sessionId,
+          normalizedRow,
+        );
+      } catch {
+        // Best-effort lazy migration; returned state is already sanitized.
+      }
+    }
+    this.states.set(keyId, normalizedRow);
     console.log(
       `[session-recover] session=<redacted> L2a hit status=${row.status} agent=${row.sessionInfo?.agent_id ? "present" : "none"} task=${row.sessionInfo?.task_id ? "present" : "none"}`,
     );
-    return row;
+    return normalizedRow;
   }
 
   /** In-flight promise deduplication: same keyId → same rebuild promise. */
@@ -426,11 +614,12 @@ export class SessionStore {
     binding: SessionBinding,
     ctx: RecoveryContext,
   ): Promise<SessionInitState | undefined> {
-    const inFlight = this.recoveryInFlight.get(keyId);
+    const inFlightKey = recoveryIdentityKey(keyId, identity);
+    const inFlight = this.recoveryInFlight.get(inFlightKey);
     if (inFlight) return inFlight;
     const p = this.doRebuild(keyId, identity, binding, ctx)
-      .finally(() => this.recoveryInFlight.delete(keyId));
-    this.recoveryInFlight.set(keyId, p);
+      .finally(() => this.recoveryInFlight.delete(inFlightKey));
+    this.recoveryInFlight.set(inFlightKey, p);
     return p;
   }
 
@@ -440,18 +629,16 @@ export class SessionStore {
     binding: SessionBinding,
     ctx: RecoveryContext,
   ): Promise<SessionInitState | undefined> {
-    // Step 4.1: user mismatch → invalidate binding
-    if (binding.userId && identity.userId && binding.userId !== identity.userId) {
-      console.log("[session-recover] session=<redacted> user mismatch, invalidating");
-      await this.bindingRepo?.deleteBinding(spaceOf(identity), identity.userId, identity.agentSource, identity.sessionId);
-      return undefined;
+    // Step 4.1: never rebuild a binding under a conflicting caller identity.
+    if (!bindingMatchesIdentity(binding, identity)) {
+      throw new SessionIdentityConflictError();
     }
 
     if (!ctx.metadataClient) {
       // No client → can't recover, degrade to one-shot bypass
       console.warn("[session-recover] session=<redacted> no metadataClient, one-shot bypass");
       return {
-        status: "initialized", keyId, startedAt: Date.now(),
+        status: "initialized", keyId: identity.sessionId, startedAt: Date.now(),
         attemptCount: 0, bypassed: true,
         sessionInfo: null, agentDetail: null, taskDetail: null,
       };
@@ -508,7 +695,7 @@ export class SessionStore {
       console.warn("[session-recover] session=<redacted> kernel unavailable, one-shot bypass");
       // Don't delete binding; return one-shot bypass to serve this request
       return {
-        status: "initialized", keyId, startedAt: Date.now(),
+        status: "initialized", keyId: identity.sessionId, startedAt: Date.now(),
         attemptCount: 0, bypassed: true,
         sessionInfo: null, agentDetail: null, taskDetail: null,
       };
@@ -533,12 +720,13 @@ export class SessionStore {
       team_id: binding.teamId || "",
       agent_id: binding.agentId || "",
       task_id: taskDetail ? binding.taskId : undefined,
+      space_id: identity.spaceId,
       created_at: new Date().toISOString(),
     };
 
     const rebuilt: SessionInitState = {
       status: "initialized",
-      keyId,
+      keyId: identity.sessionId,
       startedAt: Date.now(),
       attemptCount: 0,
       bypassed: false,
@@ -651,7 +839,7 @@ export class SessionStore {
       // User chose bypass: construct bypass state
       const state: SessionInitState = {
         status: "initialized",
-        keyId,
+        keyId: identity.sessionId,
         startedAt: Date.now(),
         attemptCount: 0,
         bypassed: true,
@@ -669,7 +857,7 @@ export class SessionStore {
       console.log("[session-recover] session=<redacted> history scan → one-shot bypass (conversation exists but no form markers found)");
       const state: SessionInitState = {
         status: "initialized",
-        keyId,
+        keyId: identity.sessionId,
         startedAt: Date.now(),
         attemptCount: 0,
         bypassed: true,

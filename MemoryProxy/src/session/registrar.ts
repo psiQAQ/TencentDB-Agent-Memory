@@ -19,7 +19,7 @@ import type { SessionInfo, SessionRegistrationData } from "./types.js";
  */
 export function buildSessionInfo(
   data: SessionRegistrationData,
-  userKey?: string,
+  _userKey?: string,
   spaceId?: string,
 ): SessionInfo {
   const now = new Date().toISOString();
@@ -29,7 +29,6 @@ export function buildSessionInfo(
     agent_id: data.agent_id,
     user_id: data.user_id,
     task_id: data.task_id,
-    user_key: userKey,
     space_id: spaceId,
     created_at: now,
   };

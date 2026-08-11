@@ -63,6 +63,7 @@ import {
   MissingUpstreamCredentialError,
   sameOrigin,
 } from "./upstream-headers.js";
+import { SessionIdentityConflictError, sessionStoreKey } from "./session/store.js";
 
 const SKIP_RESPONSE_HEADERS = new Set([
   "content-encoding",
@@ -678,11 +679,10 @@ export async function handleAnthropicMessages(
     injectorCount: config.injection?.injectors?.length ?? 0,
     injectedSkipped,
   });
-  // CC 分流：SIDEQUERY 完全跳过 session-init（独立小请求无对话概念）。
-  //          FORK 允许走 L2b recovery 复用 MAIN 已建的 session，但不进 form 交互路径
-  //          （借用 MAIN 的 sessionInfo，见下方的 kind === 'fork' 分支保护）。
-  const skipSessionInit = requestKind === "sidequery";
-  if (config.sessionInit?.enabled && conversationId && !skipSessionInit) {
+  // Every request kind first recovers the identity-scoped session so a
+  // sidequery/fork cannot bypass the terminal identity gate. SIDEQUERY still
+  // skips form/context/injection after that check; FORK may reuse MAIN state.
+  if (config.sessionInit?.enabled && conversationId) {
     try {
       const { getSessionStore, handleSessionInit, parsePresetIdentity } = await import("./session/index.js");
       const { getMetadataClient } = await import("./meta/client.js");
@@ -691,7 +691,6 @@ export async function handleAnthropicMessages(
       const presetIdentity = parsePresetIdentity(config.sessionInit, lcHeaders);
 
       // ── Session Recovery: try L2b binding before falling into session-init form ──
-      const compositeKey = `${agentSource}:${sessionKey}`;
       // Identity for repo/binding writes. userId 缺失时 fallback 到 `anonymous`
       // 复合键，保证 key path 分段合法（参见 §4.4 边界处理）。
       const identity = {
@@ -699,7 +698,11 @@ export async function handleAnthropicMessages(
         agentSource,
         sessionId: sessionKey,
         spaceId,
+        teamId: presetIdentity?.teamId,
+        agentId: presetIdentity?.agentId,
+        taskId: presetIdentity?.taskId,
       };
+      const compositeKey = sessionStoreKey(identity);
       const recovered = await store.getOrRecover(compositeKey, identity, {
         metadataClient,
         messages: body.messages as Array<Record<string, unknown>> ?? [],
@@ -723,7 +726,12 @@ export async function handleAnthropicMessages(
       // justRegistered=true 只是为了触发下游 prewarm，与状态机无关，那里
       // wentThroughSessionInitStateMachine=false 会自然过滤掉。
       let wentThroughSessionInitStateMachine = false;
-      if (recovered && isTerminalState) {
+      if (requestKind === "sidequery") {
+        initResult = {
+          intercepted: false,
+          messages: body.messages as Record<string, unknown>[],
+        };
+      } else if (recovered && isTerminalState) {
         // Recovery hit: keep original messages, only re-inject <session_context>
         // so this turn's system prompt carries agent/task context again.
         // 用户对话永远保留原样，包括 session_init form 交互 — 不做任何删除。
@@ -861,7 +869,11 @@ export async function handleAnthropicMessages(
       if (sessionInfo && !sessionInfo.space_id && spaceId) {
         sessionInfo.space_id = spaceId;
       }
-    } catch {
+    } catch (err) {
+      if (err instanceof SessionIdentityConflictError) {
+        console.warn("[session-init] request rejected reason=identity_conflict protocol=anthropic");
+        return c.json({ error: "session_identity_conflict" }, 403);
+      }
       console.error("[session-init] handleSessionInit failed protocol=anthropic");
       sessionInfo = undefined;
       injectedSkipped = true;
