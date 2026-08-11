@@ -4,7 +4,7 @@ import { join } from "node:path";
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { RedisBindingRepo } from "../binding-repo.js";
+import { NullBindingRepo, RedisBindingRepo } from "../binding-repo.js";
 import {
   __resetHookCacheRepoForTests,
   getHookCacheRepo,
@@ -292,7 +292,7 @@ describe("collision-safe persisted session identity keys", () => {
     expect((await restartedHooks.get(...SECOND, "memory"))?.[0]?.content).toBe("second");
 
     restartedHooks.clearBySession(...FIRST);
-    restartedSessions.deleteBySessionId(...FIRST);
+    await restartedSessions.deleteBySessionId(...FIRST);
     expect(await restartedSessions.getBySessionId(...FIRST)).toBeNull();
     expect((await restartedSessions.getBySessionId(...SECOND))?.agentDetail?.id)
       .toBe("agent-second");
@@ -346,7 +346,7 @@ describe("collision-safe persisted session identity keys", () => {
     expect(await sessions.getBySessionId(...unsafe)).toBeNull();
     expect(await hooks.get(...unsafe, "memory")).toBeNull();
     hooks.clearBySession(...unsafe);
-    sessions.deleteBySessionId(...unsafe);
+    await sessions.deleteBySessionId(...unsafe);
     expect(getDb()!.prepare("SELECT COUNT(*) AS count FROM sessions WHERE session_id = ?")
       .get(legacyIdentityKey(unsafe))).toEqual({ count: 1 });
     expect(getDb()!.prepare("SELECT COUNT(*) AS count FROM hook_cache WHERE session_id = ?")
@@ -389,7 +389,7 @@ describe("collision-safe persisted session identity keys", () => {
     expect(redis.hashes.get(firstBindingKey)?.last_seen).not.toBe("old");
     expect(redis.ttls.get(firstBindingKey)).toBe(172800);
 
-    sessions.deleteBySessionId(...FIRST);
+    await sessions.deleteBySessionId(...FIRST);
     await bindings.deleteBinding(...FIRST);
     hooks.clearBySession(...FIRST);
     await settle();
@@ -433,7 +433,7 @@ describe("collision-safe persisted session identity keys", () => {
     const unsafeLegacyKey = `inj:sess:${legacyIdentityKey(unsafe)}`;
     redis.strings.set(unsafeLegacyKey, JSON.stringify(state(unsafe, "legacy-unsafe")));
     expect(await sessions.getBySessionId(...unsafe)).toBeNull();
-    sessions.deleteBySessionId(...unsafe);
+    await sessions.deleteBySessionId(...unsafe);
     await settle();
     expect(redis.strings.has(unsafeLegacyKey)).toBe(true);
 
@@ -454,7 +454,7 @@ describe("collision-safe persisted session identity keys", () => {
     const sqlite = getSessionRepo();
     expect((await sqlite.getBySessionId(...identity))?.agentDetail?.id)
       .toBe("legacy-recovery-agent");
-    sqlite.deleteBySessionId(...identity);
+    await sqlite.deleteBySessionId(...identity);
     expect(getDb()!.prepare("SELECT COUNT(*) AS count FROM sessions WHERE session_id = ?")
       .get(legacyIdentityKey(identity))).toEqual({ count: 0 });
 
@@ -465,7 +465,7 @@ describe("collision-safe persisted session identity keys", () => {
     redis.ttls.set(legacyRedisKey, 60);
     expect((await redisRepo.getBySessionId(...identity))?.agentDetail?.id)
       .toBe("legacy-recovery-agent");
-    redisRepo.deleteBySessionId(...identity);
+    await redisRepo.deleteBySessionId(...identity);
     await settle();
     expect(redis.strings.has(legacyRedisKey)).toBe(false);
   });
@@ -549,6 +549,44 @@ describe("collision-safe persisted session identity keys", () => {
     })).toBe(false);
   });
 
+  it("reports durable delete success and failure across real adapters", async () => {
+    const sqlite = getSessionRepo();
+    expect(await sqlite.upsert(...FIRST, state(FIRST, "sqlite-owner"))).toBe(true);
+    getDb()!.close();
+    expect(await sqlite.deleteBySessionId(...FIRST)).toBe(false);
+    __resetSessionRepoForTests();
+    __resetDbForTests();
+    await expect(getSessionRepo().getBySessionId(...FIRST)).resolves.toMatchObject({
+      agentDetail: { id: "sqlite-owner" },
+    });
+
+    const redisSessionBackend = new FakeRedis();
+    vi.spyOn(redisSessionBackend, "del").mockRejectedValue(new Error("redis-delete-detail"));
+    expect(await new RedisSessionRepo(redisSessionBackend as never).deleteBySessionId(...FIRST))
+      .toBe(false);
+
+    const redisBindingBackend = new FakeRedis();
+    vi.spyOn(redisBindingBackend, "del").mockRejectedValue(new Error("redis-delete-detail"));
+    expect(await new RedisBindingRepo(redisBindingBackend as never).deleteBinding(...FIRST))
+      .toBe(false);
+
+    const kvSessionStorage = new MemoryStorage();
+    vi.spyOn(kvSessionStorage, "del").mockRejectedValue(new Error("kv-delete-detail"));
+    expect(await new KvSessionRepo(kvSessionStorage).deleteBySessionId(...FIRST))
+      .toBe(false);
+
+    const kvBindingStorage = new MemoryStorage();
+    vi.spyOn(kvBindingStorage, "del").mockRejectedValue(new Error("kv-delete-detail"));
+    expect(await new KvBindingRepo(kvBindingStorage).deleteBinding(...FIRST))
+      .toBe(false);
+
+    expect(await new KvSessionRepo(new MemoryStorage()).deleteBySessionId(...FIRST))
+      .toBe(true);
+    expect(await new KvBindingRepo(new MemoryStorage()).deleteBinding(...FIRST))
+      .toBe(true);
+    expect(await new NullBindingRepo().deleteBinding(...FIRST)).toBe(true);
+  });
+
   it("distinguishes durable read failures from missing rows", async () => {
     const rawDetail = "raw-backend-read-detail-sentinel";
     const failedRedisSession = new RedisSessionRepo({
@@ -610,6 +648,16 @@ describe("collision-safe persisted session identity keys", () => {
       name: "SessionRepoReadError",
       message: "session repository read failed",
     });
+
+    update.run(JSON.stringify({ ...state(FIRST, "owner"), status: detail }), sessionRowId(...FIRST));
+    await expect(sessions.getBySessionId(...FIRST)).rejects.toMatchObject({
+      name: "SessionRepoReadError",
+      message: "session repository read failed",
+    });
+    await expect(sessions.loadAllInitialized()).rejects.toMatchObject({
+      name: "SessionRepoReadError",
+      message: "session repository read failed",
+    });
     const emitted = [...warn.mock.calls, ...error.mock.calls].flat().join(" ");
     expect(emitted).not.toContain(detail);
   });
@@ -631,6 +679,16 @@ describe("collision-safe persisted session identity keys", () => {
 
     expect(await sessions.upsert(...FIRST, state(SECOND, "wrong-owner"))).toBe(true);
     await expect(sessions.getBySessionId(...FIRST)).rejects.toMatchObject({
+      name: "SessionRepoReadError",
+      message: "session repository read failed",
+    });
+
+    await storage.putJSON(key, { ...state(FIRST, "owner"), status: detail });
+    await expect(sessions.getBySessionId(...FIRST)).rejects.toMatchObject({
+      name: "SessionRepoReadError",
+      message: "session repository read failed",
+    });
+    await expect(sessions.loadAllInitialized()).rejects.toMatchObject({
       name: "SessionRepoReadError",
       message: "session repository read failed",
     });
@@ -664,12 +722,26 @@ describe("collision-safe persisted session identity keys", () => {
       name: "BindingRepoReadError",
       message: "binding repository read failed",
     });
+
+    await storage.putJSON(key, {
+      outcome: detail,
+      userId: FIRST[1],
+      created_at: 1,
+      last_seen: 1,
+    });
+    await expect(bindings.getBinding(...FIRST)).rejects.toMatchObject({
+      name: "BindingRepoReadError",
+      message: "binding repository read failed",
+    });
     expect(await new KvBindingRepo(new MemoryStorage()).getBinding(...FIRST)).toBeNull();
     const emitted = [...warn.mock.calls, ...error.mock.calls].flat().join(" ");
     expect(emitted).not.toContain(detail);
   });
 
   it("rejects a present mismatched canonical Redis binding", async () => {
+    const detail = "malformed-redis-binding-detail-sentinel";
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const error = vi.spyOn(console, "error").mockImplementation(() => undefined);
     const redis = new FakeRedis();
     const bindings = new RedisBindingRepo(redis as never);
     redis.hashes.set(`inj:binding:${v2IdentityKey(FIRST)}`, {
@@ -681,6 +753,17 @@ describe("collision-safe persisted session identity keys", () => {
       name: "BindingRepoReadError",
       message: "binding repository read failed",
     });
+
+    redis.hashes.set(`inj:binding:${v2IdentityKey(FIRST)}`, {
+      outcome: detail,
+      user_id: FIRST[1],
+    });
+    await expect(bindings.getBinding(...FIRST)).rejects.toMatchObject({
+      name: "BindingRepoReadError",
+      message: "binding repository read failed",
+    });
+    const emitted = [...warn.mock.calls, ...error.mock.calls].flat().join(" ");
+    expect(emitted).not.toContain(detail);
   });
 
   it("rejects malformed and mismatched canonical Redis hydrate rows", async () => {
@@ -699,6 +782,16 @@ describe("collision-safe persisted session identity keys", () => {
     expect(redis.strings.get(key)).toBe(`{${detail}`);
 
     redis.strings.set(key, JSON.stringify(state(SECOND, "wrong-owner")));
+    await expect(sessions.loadAllInitialized()).rejects.toMatchObject({
+      name: "SessionRepoReadError",
+      message: "session repository read failed",
+    });
+
+    redis.strings.set(key, JSON.stringify({ ...state(FIRST, "owner"), status: detail }));
+    await expect(sessions.getBySessionId(...FIRST)).rejects.toMatchObject({
+      name: "SessionRepoReadError",
+      message: "session repository read failed",
+    });
     await expect(sessions.loadAllInitialized()).rejects.toMatchObject({
       name: "SessionRepoReadError",
       message: "session repository read failed",

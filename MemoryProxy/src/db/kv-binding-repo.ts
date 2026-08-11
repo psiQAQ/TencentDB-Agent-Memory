@@ -13,6 +13,7 @@
  */
 import {
   BindingRepoReadError,
+  isSessionBinding,
   type BindingRepo,
   type SessionBinding,
 } from "./binding-repo.js";
@@ -61,13 +62,11 @@ export class KvBindingRepo implements BindingRepo {
     try {
       const stored = await this.storage.getText(keyOf(spaceId, userId, agentSource, sessionId));
       if (stored === null) return null;
-      const raw = JSON.parse(stored) as StoredBinding;
-      if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
-        throw new BindingRepoReadError();
-      }
+      const raw = JSON.parse(stored) as unknown;
+      if (!isSessionBinding(raw)) throw new BindingRepoReadError();
       if (raw.userId && raw.userId !== userId) throw new BindingRepoReadError();
       return {
-        outcome: raw.outcome ?? "initialized",
+        outcome: raw.outcome,
         userId: raw.userId,
         teamId: raw.teamId,
         agentId: raw.agentId,
@@ -119,11 +118,19 @@ export class KvBindingRepo implements BindingRepo {
     userId: string,
     agentSource: string,
     sessionId: string,
-  ): Promise<void> {
+  ): Promise<boolean> {
     const key = keyOf(spaceId, userId, agentSource, sessionId);
-    await withPerKeyLock(lockKey(spaceId, userId, agentSource, sessionId), async () => {
-      await this.storage.del(key).catch(() => { /* silent */ });
-    });
+    try {
+      return await withPerKeyLock(
+        lockKey(spaceId, userId, agentSource, sessionId),
+        async () => {
+          await this.storage.del(key);
+          return true;
+        },
+      );
+    } catch {
+      return false;
+    }
   }
 
   async touchLastSeen(

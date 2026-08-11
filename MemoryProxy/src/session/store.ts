@@ -298,6 +298,17 @@ function hasWeakBypassClaim(state: SessionInitState): boolean {
   return !claim?.teamId || !claim.agentId || !claim.taskId;
 }
 
+function hasPromotedPendingBypassClaim(current: SessionInitState): boolean {
+  if (
+    !current.bypassed
+    || !current.identityClaimPending
+    || !current.identityClaim
+  ) return false;
+  return current.identityClaim.teamId !== undefined
+    || current.identityClaim.agentId !== undefined
+    || current.identityClaim.taskId !== undefined;
+}
+
 function bypassBindingNeedsPersistence(
   binding: SessionBinding,
   identity: SessionIdentity,
@@ -408,6 +419,7 @@ interface ClaimMutationSnapshot {
   rawClaim?: RawSessionClaim;
   durableLayers?: DurableClaimLayers;
   deleteEpoch: number;
+  deleteIntent?: number;
 }
 
 export class SessionStore {
@@ -487,6 +499,7 @@ export class SessionStore {
       rawClaim: rawClaims?.get(keyId),
       durableLayers: this.durableLayersByKey.get(keyId),
       deleteEpoch: this.deleteEpochs.get(keyId) ?? 0,
+      deleteIntent: this.deleteIntents.get(keyId),
     };
   }
 
@@ -517,6 +530,11 @@ export class SessionStore {
       this.durableLayersByKey.set(keyId, snapshot.durableLayers);
     } else {
       this.durableLayersByKey.delete(keyId);
+    }
+    if (snapshot.deleteIntent !== undefined) {
+      this.deleteIntents.set(keyId, snapshot.deleteIntent);
+    } else {
+      this.deleteIntents.delete(keyId);
     }
   }
 
@@ -720,6 +738,7 @@ export class SessionStore {
     let rollbackState = normalizedState;
     let rollbackGeneration = writeGeneration;
     let rollbackOperationEpoch = this.operationEpochs.get(keyId) ?? 0;
+    let promotedClaimPersisted = false;
     if (!id) {
       // No identity bound → this keyId is L1-only (anonymous session, tests
       // that bypass bind, etc.). Skip repo/binding persistence rather than
@@ -770,6 +789,7 @@ export class SessionStore {
             }
             if (!this.isCurrentState(keyId, currentGeneration, currentState)) return;
             if (l2aPersisted) {
+              promotedClaimPersisted ||= hasPromotedPendingBypassClaim(currentState);
               this.markDurableLayer(keyId, "l2a");
               rollbackOperationEpoch = this.operationEpochs.get(keyId) ?? 0;
             }
@@ -809,6 +829,7 @@ export class SessionStore {
             }
             if (!this.isCurrentState(keyId, currentGeneration, currentState)) return;
             if (l2bPersisted) {
+              promotedClaimPersisted ||= hasPromotedPendingBypassClaim(currentState);
               this.markDurableLayer(keyId, "l2b");
               rollbackOperationEpoch = this.operationEpochs.get(keyId) ?? 0;
             }
@@ -898,7 +919,13 @@ export class SessionStore {
         }
       });
     } catch (error) {
-      if (rollbackSnapshot) {
+      const keepsPromotedClaim = Boolean(
+        rollbackSnapshot
+        && rollbackSnapshot.deleteIntent === undefined
+        && promotedClaimPersisted
+        && hasPromotedPendingBypassClaim(rollbackState),
+      );
+      if (rollbackSnapshot && !keepsPromotedClaim) {
         this.restoreClaimMutation(
           keyId,
           rollbackSnapshot,
@@ -917,19 +944,38 @@ export class SessionStore {
     this.removeState(keyId);
     this.durableLayersByKey.delete(keyId);
     const id = this.identities.get(keyId);
-    if (!id) return;
+    if (!id) {
+      this.deleteIntents.delete(keyId);
+      this.bumpDeleteEpoch(keyId);
+      return;
+    }
     this.releaseRawSessionClaim(keyId);
     void this.enqueuePersistence(keyId, async () => {
+      let l2aDeleted = !this.repo;
       try {
-        await this.repo?.deleteBySessionId(spaceOf(id), id.userId, id.agentSource, id.sessionId);
+        if (this.repo) {
+          l2aDeleted = await this.repo.deleteBySessionId(
+            spaceOf(id),
+            id.userId,
+            id.agentSource,
+            id.sessionId,
+          );
+        }
       } catch {
-        // The process-local tombstone remains authoritative until a newer set.
+        l2aDeleted = false;
       }
+      let l2bDeleted = !this.bindingRepo;
       try {
-        await this.bindingRepo
-          ?.deleteBinding(spaceOf(id), id.userId, id.agentSource, id.sessionId);
+        if (this.bindingRepo) {
+          l2bDeleted = await this.bindingRepo.deleteBinding(
+            spaceOf(id),
+            id.userId,
+            id.agentSource,
+            id.sessionId,
+          );
+        }
       } catch {
-        // The process-local tombstone remains authoritative until a newer set.
+        l2bDeleted = false;
       }
       if (this.deleteIntents.get(keyId) !== deleteToken) return;
       // A stale L2 read may have completed before the durable delete. Remove it
@@ -937,6 +983,7 @@ export class SessionStore {
       this.removeState(keyId);
       this.durableLayersByKey.delete(keyId);
       this.releaseRawSessionClaim(keyId);
+      if (!l2aDeleted || !l2bDeleted) return;
       this.deleteIntents.delete(keyId);
       this.bumpDeleteEpoch(keyId);
     }).catch(() => {});

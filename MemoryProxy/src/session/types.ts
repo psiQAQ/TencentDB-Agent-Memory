@@ -34,6 +34,17 @@ export type SessionInitStatus =
   // legacy（一期单 form），保留以兼容旧测试 / 旧 store 数据
   | "pending_form";
 
+export function isSessionInitStatus(value: unknown): value is SessionInitStatus {
+  return value === "uninitialized"
+    || value === "pending_asset_confirm"
+    || value === "pending_team_select"
+    || value === "pending_agent_task"
+    || value === "pending_agent_select"
+    || value === "pending_task_select"
+    || value === "initialized"
+    || value === "pending_form";
+}
+
 export interface SessionInitState {
   status: SessionInitStatus;
   keyId: string;
@@ -95,6 +106,26 @@ export interface SessionInitState {
    * 但 agentDetail/taskDetail 为 null，后续请求只 strip 不 inject。
    */
   bypassed?: boolean;
+}
+
+/** Runtime boundary for persisted state before identity ownership checks. */
+export function isPersistedSessionInitState(value: unknown): value is SessionInitState {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const state = value as Record<string, unknown>;
+  return isSessionInitStatus(state.status)
+    && (state.keyId === undefined || typeof state.keyId === "string")
+    && (state.startedAt === undefined
+      || (typeof state.startedAt === "number" && Number.isFinite(state.startedAt)))
+    && (state.attemptCount === undefined
+      || (typeof state.attemptCount === "number"
+        && Number.isInteger(state.attemptCount)
+        && state.attemptCount >= 0))
+    && (state.userId === undefined || typeof state.userId === "string")
+    && (state.sessionInfo === undefined
+      || state.sessionInfo === null
+      || (typeof state.sessionInfo === "object" && !Array.isArray(state.sessionInfo)))
+    && (state.bypassed === undefined || typeof state.bypassed === "boolean")
+    && (state.contextSuppressed === undefined || typeof state.contextSuppressed === "boolean");
 }
 
 /**

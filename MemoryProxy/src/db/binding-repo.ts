@@ -37,6 +37,20 @@ export interface SessionBinding {
   taskId?: string;
 }
 
+export function isSessionBindingOutcome(
+  value: unknown,
+): value is SessionBinding["outcome"] {
+  return value === "initialized" || value === "bypassed";
+}
+
+export function isSessionBinding(value: unknown): value is SessionBinding {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const binding = value as Record<string, unknown>;
+  return isSessionBindingOutcome(binding.outcome)
+    && [binding.userId, binding.teamId, binding.agentId, binding.taskId]
+      .every((id) => id === undefined || typeof id === "string");
+}
+
 /** Fixed, non-sensitive signal that a durable binding read failed. */
 export class BindingRepoReadError extends Error {
   constructor() {
@@ -65,7 +79,7 @@ export interface BindingRepo {
     userId: string,
     agentSource: string,
     sessionId: string,
-  ): Promise<void>;
+  ): Promise<boolean>;
   touchLastSeen(
     spaceId: string,
     userId: string,
@@ -106,9 +120,14 @@ function legacyRedisKey(
   return tail ? REDIS_KEY_PREFIX + tail : null;
 }
 
-function bindingFromHash(all: Record<string, string>): SessionBinding {
+function bindingFromHash(
+  all: Record<string, string>,
+  allowMissingOutcome = false,
+): SessionBinding {
+  const outcome = all.outcome || (allowMissingOutcome ? "initialized" : undefined);
+  if (!isSessionBindingOutcome(outcome)) throw new BindingRepoReadError();
   return {
-    outcome: (all.outcome as "initialized" | "bypassed") || "initialized",
+    outcome,
     userId: all.user_id || undefined,
     teamId: all.team_id || undefined,
     agentId: all.agent_id || undefined,
@@ -151,7 +170,7 @@ export class RedisBindingRepo implements BindingRepo {
         return null;
       }
       if (await this.redis.ttl(legacyKey) <= 0) return null;
-      return bindingFromHash(legacy);
+      return bindingFromHash(legacy, true);
     } catch {
       throw new BindingRepoReadError();
     }
@@ -194,15 +213,16 @@ export class RedisBindingRepo implements BindingRepo {
     userId: string,
     agentSource: string,
     sessionId: string,
-  ): Promise<void> {
+  ): Promise<boolean> {
     try {
       await this.redis.del(redisKey(spaceId, userId, agentSource, sessionId));
       const legacyKey = legacyRedisKey(spaceId, userId, agentSource, sessionId);
-      if (!legacyKey) return;
+      if (!legacyKey) return true;
       const legacy = await this.redis.hgetall(legacyKey);
       if (legacy.user_id === userId) await this.redis.del(legacyKey);
+      return true;
     } catch {
-      /* ignore */
+      return false;
     }
   }
 
@@ -247,7 +267,7 @@ export class NullBindingRepo implements BindingRepo {
     _userId: string,
     _agentSource: string,
     _sessionId: string,
-  ): Promise<void> {}
+  ): Promise<boolean> { return true; }
   async touchLastSeen(
     _spaceId: string,
     _userId: string,

@@ -48,7 +48,7 @@ function repo(overrides: Partial<SessionRepo> = {}): SessionRepo {
   return {
     upsert: vi.fn(async () => true),
     getBySessionId: vi.fn(async () => null),
-    deleteBySessionId: vi.fn(),
+    deleteBySessionId: vi.fn(async () => true),
     loadAllInitialized: vi.fn(async () => []),
     ...overrides,
   };

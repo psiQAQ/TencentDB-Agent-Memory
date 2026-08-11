@@ -24,7 +24,10 @@
 import type Database from "better-sqlite3";
 
 import { getDb } from "./index.js";
-import type { SessionInitState } from "../session/types.js";
+import {
+  isPersistedSessionInitState,
+  type SessionInitState,
+} from "../session/types.js";
 import {
   legacyPersistedSessionIdentityKey,
   parsePersistedSessionIdentityKey,
@@ -99,17 +102,17 @@ function rowFromState(
 function parseState(s: string | null | undefined): SessionInitState {
   try {
     const parsed = JSON.parse(s ?? "") as unknown;
-    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-      throw new Error("invalid persisted session state");
-    }
-    return parsed as SessionInitState;
+    if (!isPersistedSessionInitState(parsed)) throw new SessionRepoReadError();
+    return parsed;
   } catch {
     throw new SessionRepoReadError();
   }
 }
 
 function rowToState(row: PersistedSessionRow): SessionInitState {
-  return parseState(row.state_json);
+  const state = parseState(row.state_json);
+  if (row.status !== state.status) throw new SessionRepoReadError();
+  return state;
 }
 
 function identityOf(
@@ -196,7 +199,7 @@ export interface SessionRepo {
     userId: string,
     agentSource: string,
     sessionId: string,
-  ): void | Promise<void>;
+  ): Promise<boolean>;
   loadAllInitialized(): Promise<HydratedSessionRow[]>;
 }
 
@@ -265,12 +268,12 @@ class SqliteSessionRepo implements SessionRepo {
     }
   }
 
-  deleteBySessionId(
+  async deleteBySessionId(
     spaceId: string,
     userId: string,
     agentSource: string,
     sessionId: string,
-  ): void {
+  ): Promise<boolean> {
     try {
       const select = this.db.prepare("SELECT * FROM sessions WHERE session_id = ?");
       const remove = this.db.prepare("DELETE FROM sessions WHERE session_id = ?");
@@ -282,7 +285,7 @@ class SqliteSessionRepo implements SessionRepo {
         agentSource,
         sessionId,
       );
-      if (!legacyId) return;
+      if (!legacyId) return true;
       const legacyRow = select.get(legacyId) as PersistedSessionRow | undefined;
       const legacyState = legacyRow ? rowToState(legacyRow) : null;
       if (
@@ -294,11 +297,10 @@ class SqliteSessionRepo implements SessionRepo {
           spaceId === "",
         )
       ) remove.run(legacyId);
-    } catch (err) {
-      console.warn(
-        "[session-db] delete failed:",
-        err instanceof Error ? err.message : String(err),
-      );
+      return true;
+    } catch {
+      console.warn("[session-db] delete failed");
+      return false;
     }
   }
 
@@ -328,7 +330,7 @@ class NullSessionRepo implements SessionRepo {
   async getBySessionId(): Promise<SessionInitState | null> {
     return null;
   }
-  deleteBySessionId(): void {}
+  async deleteBySessionId(): Promise<boolean> { return true; }
   async loadAllInitialized(): Promise<HydratedSessionRow[]> {
     return [];
   }

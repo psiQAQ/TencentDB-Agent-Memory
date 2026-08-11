@@ -26,7 +26,10 @@ import {
   type SessionRepo,
   type HydratedSessionRow,
 } from "./sessionRepo.js";
-import type { SessionInitState } from "../session/types.js";
+import {
+  isPersistedSessionInitState,
+  type SessionInitState,
+} from "../session/types.js";
 import type { ProxyStorage } from "../storage/proxy-storage.js";
 import { sessionDirOf } from "../storage/key-utils.js";
 import { persistedStateOwnsIdentity } from "./session-identity-key.js";
@@ -80,11 +83,9 @@ export class KvSessionRepo implements SessionRepo {
     try {
       const raw = await this.storage.getText(mainKey(spaceId, userId, agentSource, sessionId));
       if (raw === null) return null;
-      const state = JSON.parse(raw) as SessionInitState;
+      const state = JSON.parse(raw) as unknown;
       if (
-        !state
-        || typeof state !== "object"
-        || Array.isArray(state)
+        !isPersistedSessionInitState(state)
         || !persistedStateOwnsIdentity(state, { spaceId, userId, agentSource, sessionId })
       ) throw new SessionRepoReadError();
       return state;
@@ -98,10 +99,13 @@ export class KvSessionRepo implements SessionRepo {
     userId: string,
     agentSource: string,
     sessionId: string,
-  ): Promise<void> {
-    await this.storage
-      .del(mainKey(spaceId, userId, agentSource, sessionId))
-      .catch(() => { /* silent */ });
+  ): Promise<boolean> {
+    try {
+      await this.storage.del(mainKey(spaceId, userId, agentSource, sessionId));
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   async loadAllInitialized(): Promise<HydratedSessionRow[]> {
@@ -123,10 +127,8 @@ export class KvSessionRepo implements SessionRepo {
         const [spaceId, userId, agentSource, sessionId] = segs;
         const raw = await this.storage.getText(TTL_BUCKET_PREFIX + name);
         if (raw === null) continue;
-        const state = JSON.parse(raw) as SessionInitState;
-        if (!state || typeof state !== "object" || Array.isArray(state)) {
-          throw new SessionRepoReadError();
-        }
+        const state = JSON.parse(raw) as unknown;
+        if (!isPersistedSessionInitState(state)) throw new SessionRepoReadError();
         if (!persistedStateOwnsIdentity(state, { spaceId, userId, agentSource, sessionId })) {
           throw new SessionRepoReadError();
         }

@@ -8,6 +8,7 @@ import {
   type SessionRepo,
 } from "../db/sessionRepo.js";
 import { KvSessionRepo } from "../db/kv-session-repo.js";
+import { KvBindingRepo } from "../db/kv-binding-repo.js";
 import { setMetadataClient } from "../meta/client.js";
 import type { BindingRepo, SessionBinding } from "../db/binding-repo.js";
 import { renderTdaiMemoryToolsBlock } from "../injection/injectors/tdai-tools-injector.js";
@@ -49,7 +50,7 @@ const VICTIM_CONTEXT = "victim_context_must_not_cross_identity";
 const NULL_SESSION_REPO: SessionRepo = {
   upsert: async () => false,
   getBySessionId: async () => null,
-  deleteBySessionId: () => undefined,
+  deleteBySessionId: async () => true,
   loadAllInitialized: async () => [],
 };
 
@@ -386,7 +387,7 @@ describe("session cache identity isolation", () => {
         taskId: VICTIM.taskId,
       })),
       putBinding: vi.fn(async () => true),
-      deleteBinding: vi.fn(async () => undefined),
+      deleteBinding: vi.fn(async () => true),
       touchLastSeen: vi.fn(async () => undefined),
     };
     setMetadataClient(metadataClient as never);
@@ -566,7 +567,10 @@ describe("session cache identity isolation", () => {
 
   it("does not expire a stale L1 entry before rejecting a bound identity conflict", async () => {
     let persisted: SessionInitState | null = null;
-    const deleteBySessionId = vi.fn(() => { persisted = null; });
+    const deleteBySessionId = vi.fn(async () => {
+      persisted = null;
+      return true;
+    });
     const repo: SessionRepo = {
       upsert: vi.fn(async (_space, _user, _source, _session, state) => {
         persisted = state;
@@ -587,7 +591,7 @@ describe("session cache identity isolation", () => {
     const bindingRepo: BindingRepo = {
       getBinding,
       putBinding: vi.fn(async () => true),
-      deleteBinding: vi.fn(async () => undefined),
+      deleteBinding: vi.fn(async () => true),
       touchLastSeen,
     };
     const identity = victimIdentity();
@@ -622,7 +626,7 @@ describe("session cache identity isolation", () => {
     const rejectedIdentity = { ...identity, taskId: OUTSIDER.taskId };
     const key = sessionStoreKey(identity);
     const upsert = vi.fn(async () => true);
-    const deleteBySessionId = vi.fn(() => undefined);
+    const deleteBySessionId = vi.fn(async () => true);
     const getAgent = vi.fn();
     const getTask = vi.fn();
     const repo: SessionRepo = {
@@ -658,7 +662,10 @@ describe("session cache identity isolation", () => {
       startedAt: 0,
     };
     let persisted: SessionInitState | null = expired;
-    const deleteBySessionId = vi.fn(() => { persisted = null; });
+    const deleteBySessionId = vi.fn(async () => {
+      persisted = null;
+      return true;
+    });
     const repo: SessionRepo = {
       upsert: vi.fn(async (_space, _user, _source, _session, state) => {
         persisted = state;
@@ -679,7 +686,7 @@ describe("session cache identity isolation", () => {
     const bindingRepo: BindingRepo = {
       getBinding: vi.fn(async () => binding),
       putBinding: vi.fn(async () => true),
-      deleteBinding: vi.fn(async () => undefined),
+      deleteBinding: vi.fn(async () => true),
       touchLastSeen,
     };
     const store = new SessionStore(1, repo, bindingRepo);
@@ -708,7 +715,10 @@ describe("session cache identity isolation", () => {
     };
     const newer = victimState();
     let persisted: SessionInitState | null = expired;
-    const deleteBySessionId = vi.fn(() => { persisted = null; });
+    const deleteBySessionId = vi.fn(async () => {
+      persisted = null;
+      return true;
+    });
     const repo: SessionRepo = {
       upsert: vi.fn(async (_space, _user, _source, _session, state) => {
         persisted = state;
@@ -729,7 +739,7 @@ describe("session cache identity isolation", () => {
         return null;
       }),
       putBinding: vi.fn(async () => true),
-      deleteBinding: vi.fn(async () => undefined),
+      deleteBinding: vi.fn(async () => true),
       touchLastSeen: vi.fn(async () => undefined),
     };
     const store = new SessionStore(1, repo, bindingRepo);
@@ -760,7 +770,7 @@ describe("session cache identity isolation", () => {
         await readReleased;
         return null;
       }),
-      deleteBySessionId: vi.fn(() => undefined),
+      deleteBySessionId: vi.fn(async () => true),
       loadAllInitialized: async () => [],
     };
     const identity = victimIdentity();
@@ -821,7 +831,7 @@ describe("session cache identity isolation", () => {
   });
 
   it("scans raw-session conflicts without expiring another identity's state", async () => {
-    const deleteBySessionId = vi.fn(() => undefined);
+    const deleteBySessionId = vi.fn(async () => true);
     const hydratedRows: Array<{
       spaceId: string;
       userId: string;
@@ -975,7 +985,10 @@ describe("session cache identity isolation", () => {
         return true;
       }),
       getBySessionId: vi.fn(async () => persistedState),
-      deleteBySessionId: vi.fn(async () => { persistedState = null; }),
+      deleteBySessionId: vi.fn(async () => {
+        persistedState = null;
+        return true;
+      }),
       loadAllInitialized: vi.fn(async () => {
         const captured = persistedState ? structuredClone(persistedState) : null;
         signalLoad();
@@ -1000,6 +1013,7 @@ describe("session cache identity isolation", () => {
       deleteBinding: vi.fn(async () => {
         persistedBinding = null;
         signalDelete();
+        return true;
       }),
       touchLastSeen: vi.fn(async () => undefined),
     };
@@ -1049,7 +1063,10 @@ describe("session cache identity isolation", () => {
         return true;
       }),
       getBySessionId: vi.fn(async () => persistedState),
-      deleteBySessionId: vi.fn(async () => { persistedState = null; }),
+      deleteBySessionId: vi.fn(async () => {
+        persistedState = null;
+        return true;
+      }),
       loadAllInitialized: vi.fn(async () => [{
         spaceId: identity.spaceId!,
         userId: identity.userId,
@@ -1067,6 +1084,7 @@ describe("session cache identity isolation", () => {
       deleteBinding: vi.fn(async () => {
         persistedBinding = null;
         signalDelete();
+        return true;
       }),
       touchLastSeen: vi.fn(async () => undefined),
     };
@@ -1117,6 +1135,7 @@ describe("session cache identity isolation", () => {
         signalDeleteStarted();
         await deleteReleased;
         persistedState = null;
+        return true;
       }),
       loadAllInitialized: vi.fn(async () => persistedState
         ? [{
@@ -1134,6 +1153,7 @@ describe("session cache identity isolation", () => {
       deleteBinding: vi.fn(async () => {
         persistedBinding = null;
         signalDeleteFinished();
+        return true;
       }),
       touchLastSeen: vi.fn(async () => undefined),
     };
@@ -1209,6 +1229,7 @@ describe("session cache identity isolation", () => {
               await deleteReleased;
               persistedState = null;
               signalDeleteFinished();
+              return true;
             }),
             loadAllInitialized: async () => [],
           }
@@ -1229,6 +1250,7 @@ describe("session cache identity isolation", () => {
           }
           persistedBinding = null;
           if (layer === "l2b") signalDeleteFinished();
+          return true;
         }),
         touchLastSeen,
       };
@@ -1270,6 +1292,135 @@ describe("session cache identity isolation", () => {
     },
   );
 
+  it.each(["l2a", "l2b"] as const)(
+    "retains a fail-closed tombstone when %s durable delete fails",
+    async (failingLayer) => {
+      const identity = victimIdentity();
+      const key = sessionStoreKey(identity);
+      let persistedState: SessionInitState | null = victimState();
+      let persistedBinding: SessionBinding | null = {
+        outcome: "bypassed",
+        userId: identity.userId,
+        teamId: identity.teamId,
+        agentId: identity.agentId,
+        taskId: identity.taskId,
+      };
+      const upsert = vi.fn(async (_space, _user, _source, _session, state) => {
+        persistedState = structuredClone(state);
+        return true;
+      });
+      const deleteBySessionId = vi.fn(async () => {
+        if (failingLayer === "l2a") return false;
+        persistedState = null;
+        return true;
+      });
+      const putBinding = vi.fn(async (_space, _user, _source, _session, binding) => {
+        persistedBinding = structuredClone(binding);
+        return true;
+      });
+      const deleteBinding = vi.fn(async () => {
+        if (failingLayer === "l2b") return false;
+        persistedBinding = null;
+        return true;
+      });
+      const touchLastSeen = vi.fn(async () => undefined);
+      const repo: SessionRepo = {
+        upsert,
+        getBySessionId: vi.fn(async () => structuredClone(persistedState)),
+        deleteBySessionId,
+        loadAllInitialized: async () => [],
+      };
+      const bindingRepo: BindingRepo = {
+        getBinding: vi.fn(async () => structuredClone(persistedBinding)),
+        putBinding,
+        deleteBinding,
+        touchLastSeen,
+      };
+      const getAgent = vi.fn();
+      const getTask = vi.fn();
+      const store = new SessionStore(30 * 60 * 1_000, repo, bindingRepo);
+      store.bind(key, identity);
+      await store.set(key, victimState());
+      vi.clearAllMocks();
+
+      store.delete(key);
+      const deleteTail = (store as unknown as {
+        persistenceTails: Map<string, Promise<void>>;
+      }).persistenceTails.get(key);
+      expect(deleteTail).toBeDefined();
+      await deleteTail;
+
+      await expect(store.getOrRecover(key, identity, {
+        metadataClient: { getAgent, getTask } as never,
+      })).resolves.toBeUndefined();
+      expect(store.get(key)).toBeUndefined();
+      expect(deleteBySessionId).toHaveBeenCalledTimes(1);
+      expect(deleteBinding).toHaveBeenCalledTimes(1);
+      expect(upsert).not.toHaveBeenCalled();
+      expect(putBinding).not.toHaveBeenCalled();
+      expect(touchLastSeen).not.toHaveBeenCalled();
+      expect(getAgent).not.toHaveBeenCalled();
+      expect(getTask).not.toHaveBeenCalled();
+      const deleteIntents = (store as unknown as {
+        deleteIntents: Map<string, number>;
+      }).deleteIntents;
+      expect(deleteIntents.has(key)).toBe(true);
+    },
+  );
+
+  it("restores a failed-delete tombstone when its replacement set also fails", async () => {
+    const identity = victimIdentity();
+    const key = sessionStoreKey(identity);
+    const durable = { state: victimState() as SessionInitState | null };
+    let writesFail = false;
+    const repo: SessionRepo = {
+      upsert: vi.fn(async (_space, _user, _source, _session, state) => {
+        if (writesFail) return false;
+        durable.state = structuredClone(state);
+        return true;
+      }),
+      getBySessionId: vi.fn(async () => structuredClone(durable.state)),
+      deleteBySessionId: vi.fn(async () => false),
+      loadAllInitialized: async () => [],
+    };
+    const store = new SessionStore(30 * 60 * 1_000, repo);
+    store.bind(key, identity);
+    await store.set(key, victimState());
+
+    store.delete(key);
+    const deleteTail = (store as unknown as {
+      persistenceTails: Map<string, Promise<void>>;
+    }).persistenceTails.get(key);
+    expect(deleteTail).toBeDefined();
+    await deleteTail;
+    writesFail = true;
+
+    await expect(store.set(key, {
+      status: "initialized",
+      keyId: identity.sessionId,
+      startedAt: Date.now(),
+      attemptCount: 0,
+      userId: identity.userId,
+      bypassed: true,
+      sessionInfo: null,
+      agentDetail: null,
+      taskDetail: null,
+      identityClaim: {
+        teamId: identity.teamId,
+        agentId: identity.agentId,
+        taskId: identity.taskId,
+      },
+      identityClaimPending: { l2a: true },
+    })).rejects.toMatchObject({ name: "SessionIdentityConflictError" });
+
+    await expect(store.getOrRecover(key, identity, {})).resolves.toBeUndefined();
+    expect(store.get(key)).toBeUndefined();
+    const deleteIntents = (store as unknown as {
+      deleteIntents: Map<string, number>;
+    }).deleteIntents;
+    expect(deleteIntents.has(key)).toBe(true);
+  });
+
   it("promotes a successful durable set to a persisted raw owner", async () => {
     const firstIdentity = victimIdentity();
     const secondIdentity: FullSessionIdentity = {
@@ -1301,7 +1452,7 @@ describe("session cache identity isolation", () => {
       getBySessionId: vi.fn(async (_space, userId) => userId === secondIdentity.userId
         ? secondState
         : null),
-      deleteBySessionId: vi.fn(() => undefined),
+      deleteBySessionId: vi.fn(async () => true),
       loadAllInitialized: async () => [],
     };
     const store = new SessionStore(30 * 60 * 1_000, repo);
@@ -1350,7 +1501,7 @@ describe("session cache identity isolation", () => {
       getBySessionId: vi.fn(async (_space, userId) => userId === secondIdentity.userId
         ? secondState
         : null),
-      deleteBySessionId: vi.fn(() => undefined),
+      deleteBySessionId: vi.fn(async () => true),
       loadAllInitialized: async () => [],
     };
     const store = new SessionStore(30 * 60 * 1_000, repo);
@@ -1393,7 +1544,7 @@ describe("session cache identity isolation", () => {
       )),
       // A real backend reports a handled write failure without throwing.
       putBinding: vi.fn(async () => false),
-      deleteBinding: vi.fn(async () => undefined),
+      deleteBinding: vi.fn(async () => true),
       touchLastSeen: vi.fn(async () => undefined),
     };
     const store = new SessionStore(30 * 60 * 1_000, undefined, bindingRepo);
@@ -1450,7 +1601,7 @@ describe("session cache identity isolation", () => {
           getBySessionId: vi.fn(async (_space, userId) => userId === secondIdentity.userId
             ? secondState
             : null),
-          deleteBySessionId: vi.fn(() => undefined),
+          deleteBySessionId: vi.fn(async () => true),
           loadAllInitialized: async () => [],
         }
       : undefined;
@@ -1468,7 +1619,7 @@ describe("session cache identity isolation", () => {
               : null
           )),
           putBinding: vi.fn(async () => true),
-          deleteBinding: vi.fn(async () => undefined),
+          deleteBinding: vi.fn(async () => true),
           touchLastSeen: vi.fn(async () => undefined),
         }
       : undefined;
@@ -1535,7 +1686,7 @@ describe("session cache identity isolation", () => {
         taskId: identity.taskId,
       })),
       putBinding,
-      deleteBinding: vi.fn(async () => undefined),
+      deleteBinding: vi.fn(async () => true),
       touchLastSeen,
     };
     const metadataClient = {
@@ -1581,7 +1732,10 @@ describe("session cache identity isolation", () => {
       persistedBinding = binding;
       return true;
     });
-    const deleteBinding = vi.fn(async () => { persistedBinding = null; });
+    const deleteBinding = vi.fn(async () => {
+      persistedBinding = null;
+      return true;
+    });
     const bindingRepo: BindingRepo = {
       getBinding: vi.fn(async () => persistedBinding),
       putBinding,
@@ -1637,7 +1791,7 @@ describe("session cache identity isolation", () => {
       const bindingRepo: BindingRepo = {
         getBinding: vi.fn(async () => persistedBinding),
         putBinding,
-        deleteBinding: vi.fn(async () => undefined),
+        deleteBinding: vi.fn(async () => true),
         touchLastSeen: vi.fn(async () => undefined),
       };
       const metadataClient = {
@@ -1688,7 +1842,7 @@ describe("session cache identity isolation", () => {
           taskId: identity.taskId,
         })),
         putBinding: vi.fn(async () => true),
-        deleteBinding: vi.fn(async () => undefined),
+        deleteBinding: vi.fn(async () => true),
         touchLastSeen: vi.fn(async () => undefined),
       };
       const metadataClient = {
@@ -1738,7 +1892,7 @@ describe("session cache identity isolation", () => {
         taskId: identity.taskId,
       })),
       putBinding: vi.fn(async () => true),
-      deleteBinding: vi.fn(async () => undefined),
+      deleteBinding: vi.fn(async () => true),
       touchLastSeen: vi.fn(async () => undefined),
     };
     const metadataClient = {
@@ -1783,7 +1937,7 @@ describe("session cache identity isolation", () => {
         return true;
       }),
       getBySessionId: vi.fn(async () => durable.state),
-      deleteBySessionId: vi.fn(() => undefined),
+      deleteBySessionId: vi.fn(async () => true),
       loadAllInitialized: async () => [],
     };
     const store = new SessionStore(30 * 60 * 1_000, repo);
@@ -1827,10 +1981,11 @@ describe("session cache identity isolation", () => {
         await deleteReleased;
         durable.state = null;
         signalDeleteFinished();
+        return true;
       }),
       loadAllInitialized: async () => [],
     };
-    const deleteBinding = vi.fn(async () => undefined);
+    const deleteBinding = vi.fn(async () => true);
     const bindingRepo: BindingRepo = {
       getBinding: vi.fn(async () => null),
       putBinding: vi.fn(async () => true),
@@ -1878,7 +2033,10 @@ describe("session cache identity isolation", () => {
         return true;
       }),
       getBySessionId: vi.fn(async () => null),
-      deleteBySessionId: vi.fn(async () => { signalDeleteFinished(); }),
+      deleteBySessionId: vi.fn(async () => {
+        signalDeleteFinished();
+        return true;
+      }),
       loadAllInitialized: async () => [],
     };
     const store = new SessionStore(30 * 60 * 1_000, repo);
@@ -1944,10 +2102,11 @@ describe("session cache identity isolation", () => {
       const repo: SessionRepo = {
         upsert,
         getBySessionId: vi.fn(async () => durable.state),
-        deleteBySessionId: vi.fn(async () => {
-          durable.state = null;
-          signalDeleteFinished();
-        }),
+      deleteBySessionId: vi.fn(async () => {
+        durable.state = null;
+        signalDeleteFinished();
+        return true;
+      }),
         loadAllInitialized: async () => [],
       };
       const store = new SessionStore(30 * 60 * 1_000, repo);
@@ -2008,7 +2167,7 @@ describe("session cache identity isolation", () => {
           return true;
         }),
         getBySessionId: vi.fn(async () => null),
-        deleteBySessionId: vi.fn(() => undefined),
+        deleteBySessionId: vi.fn(async () => true),
         loadAllInitialized: async () => [],
       };
       const bindingRepo: BindingRepo = {
@@ -2020,7 +2179,7 @@ describe("session cache identity isolation", () => {
           taskId: identity.taskId,
         })),
         putBinding: vi.fn(async () => true),
-        deleteBinding: vi.fn(async () => undefined),
+        deleteBinding: vi.fn(async () => true),
         touchLastSeen: vi.fn(async () => undefined),
       };
       const metadataClient = {
@@ -2071,7 +2230,7 @@ describe("session cache identity isolation", () => {
             taskId: OUTSIDER.taskId,
           },
       putBinding: async () => true,
-      deleteBinding: async () => undefined,
+      deleteBinding: async () => true,
       touchLastSeen: async () => undefined,
     };
     let release!: () => void;
@@ -2156,7 +2315,7 @@ describe("session cache identity isolation", () => {
         return null;
       }),
       putBinding,
-      deleteBinding: vi.fn(async () => undefined),
+      deleteBinding: vi.fn(async () => true),
       touchLastSeen,
     };
     const store = new SessionStore(30 * 60 * 1_000, undefined, bindingRepo);
@@ -2206,7 +2365,7 @@ describe("session cache identity isolation", () => {
         return null;
       }),
       putBinding,
-      deleteBinding: vi.fn(async () => undefined),
+      deleteBinding: vi.fn(async () => true),
       touchLastSeen,
     };
     const store = new SessionStore(30 * 60 * 1_000, undefined, bindingRepo);
@@ -2240,7 +2399,7 @@ describe("session cache identity isolation", () => {
     const bindingRepo: BindingRepo = {
       getBinding: async () => binding,
       putBinding,
-      deleteBinding: async () => undefined,
+      deleteBinding: async () => true,
       touchLastSeen,
     };
     const store = new SessionStore(30 * 60 * 1_000, undefined, bindingRepo);
@@ -2282,7 +2441,7 @@ describe("session cache identity isolation", () => {
     const bindingRepo: BindingRepo = {
       getBinding: async () => ({ outcome: "bypassed" }),
       putBinding,
-      deleteBinding: async () => undefined,
+      deleteBinding: async () => true,
       touchLastSeen,
     };
     const store = new SessionStore(30 * 60 * 1_000, undefined, bindingRepo);
@@ -2337,7 +2496,7 @@ describe("session cache identity isolation", () => {
     const repo: SessionRepo = {
       upsert,
       getBySessionId: vi.fn(async () => null),
-      deleteBySessionId: vi.fn(() => undefined),
+      deleteBySessionId: vi.fn(async () => true),
       loadAllInitialized: async () => [],
     };
     const bindingRepo: BindingRepo = {
@@ -2353,7 +2512,7 @@ describe("session cache identity isolation", () => {
         return { outcome: "bypassed" };
       }),
       putBinding,
-      deleteBinding: vi.fn(async () => undefined),
+      deleteBinding: vi.fn(async () => true),
       touchLastSeen,
     };
     const store = new SessionStore(30 * 60 * 1_000, repo, bindingRepo);
@@ -2390,13 +2549,13 @@ describe("session cache identity isolation", () => {
         return true;
       },
       getBySessionId: async () => persistedState,
-      deleteBySessionId: () => undefined,
+      deleteBySessionId: async () => true,
       loadAllInitialized: async () => [],
     };
     const bindingRepo: BindingRepo = {
       getBinding: async () => ({ outcome: "bypassed" }),
       putBinding: async () => true,
-      deleteBinding: async () => undefined,
+      deleteBinding: async () => true,
       touchLastSeen: async () => undefined,
     };
     const identity = victimIdentity();
@@ -2453,13 +2612,13 @@ describe("session cache identity isolation", () => {
     const repo: SessionRepo = {
       upsert,
       getBySessionId: vi.fn(async () => persistedState),
-      deleteBySessionId: vi.fn(() => undefined),
+      deleteBySessionId: vi.fn(async () => true),
       loadAllInitialized: async () => [],
     };
     const bindingRepo: BindingRepo = {
       getBinding: vi.fn(async () => persistedBinding),
       putBinding,
-      deleteBinding: vi.fn(async () => undefined),
+      deleteBinding: vi.fn(async () => true),
       touchLastSeen,
     };
     const firstStore = new SessionStore(30 * 60 * 1_000, repo, bindingRepo);
@@ -2524,7 +2683,7 @@ describe("session cache identity isolation", () => {
           return true;
         }),
         getBySessionId: vi.fn(async () => persistedState),
-        deleteBySessionId: vi.fn(() => undefined),
+        deleteBySessionId: vi.fn(async () => true),
         loadAllInitialized: async () => [],
       };
       const bindingRepo: BindingRepo = {
@@ -2538,7 +2697,7 @@ describe("session cache identity isolation", () => {
           persistedBinding = structuredClone(binding);
           return true;
         }),
-        deleteBinding: vi.fn(async () => undefined),
+        deleteBinding: vi.fn(async () => true),
         touchLastSeen: vi.fn(async () => undefined),
       };
       const store = new SessionStore(30 * 60 * 1_000, repo, bindingRepo);
@@ -2618,7 +2777,7 @@ describe("session cache identity isolation", () => {
         await readReleased;
         return null;
       }),
-      deleteBySessionId: vi.fn(() => undefined),
+      deleteBySessionId: vi.fn(async () => true),
       loadAllInitialized: async () => [],
     };
     const getAgent = vi.fn();
@@ -2700,7 +2859,7 @@ describe("session cache identity isolation", () => {
         await readReleased;
         return null;
       }),
-      deleteBySessionId: vi.fn(() => undefined),
+      deleteBySessionId: vi.fn(async () => true),
       loadAllInitialized: async () => [],
     };
     const getAgent = vi.fn();
@@ -2749,7 +2908,7 @@ describe("session cache identity isolation", () => {
         await readReleased;
         return null;
       }),
-      deleteBySessionId: vi.fn(() => undefined),
+      deleteBySessionId: vi.fn(async () => true),
       loadAllInitialized: vi.fn(async () => [{
         spaceId: fullIdentity.spaceId!,
         userId: fullIdentity.userId,
@@ -2821,7 +2980,7 @@ describe("session cache identity isolation", () => {
       getBySessionId: vi.fn(async (_space, userId) => (
         userId === firstIdentity.userId ? structuredClone(partialState) : null
       )),
-      deleteBySessionId: vi.fn(() => undefined),
+      deleteBySessionId: vi.fn(async () => true),
       loadAllInitialized: async () => [],
     };
     const bindingRepo: BindingRepo = {
@@ -2837,7 +2996,7 @@ describe("session cache identity isolation", () => {
           : null
       )),
       putBinding: vi.fn(async () => true),
-      deleteBinding: vi.fn(async () => undefined),
+      deleteBinding: vi.fn(async () => true),
       touchLastSeen: vi.fn(async () => undefined),
     };
     const store = new SessionStore(30 * 60 * 1_000, repo, bindingRepo);
@@ -2915,13 +3074,13 @@ describe("session cache identity isolation", () => {
           if (repoReadFails) throw new Error("repo unavailable sentinel");
           return persistedState;
         }),
-        deleteBySessionId: vi.fn(() => undefined),
+        deleteBySessionId: vi.fn(async () => true),
         loadAllInitialized: async () => [],
       };
       const bindingRepo: BindingRepo = {
         getBinding: vi.fn(async () => persistedBinding),
         putBinding,
-        deleteBinding: vi.fn(async () => undefined),
+        deleteBinding: vi.fn(async () => true),
         touchLastSeen,
       };
       const store = new SessionStore(30 * 60 * 1_000, repo, bindingRepo);
@@ -2942,6 +3101,27 @@ describe("session cache identity isolation", () => {
       store.bind(key, fullIdentity);
       releaseWrite();
       await expect(write).rejects.toMatchObject({ name: "SessionIdentityConflictError" });
+
+      vi.clearAllMocks();
+      const sameProcessGetAgent = vi.fn();
+      const sameProcessGetTask = vi.fn();
+      await expect(store.getOrRecover(key, conflictingIdentity, {
+        metadataClient: {
+          getAgent: sameProcessGetAgent,
+          getTask: sameProcessGetTask,
+        } as never,
+      })).rejects.toMatchObject({ name: "SessionIdentityConflictError" });
+      expect(store.get(key)?.identityClaim).toEqual({
+        teamId: fullIdentity.teamId,
+        agentId: fullIdentity.agentId,
+        taskId: fullIdentity.taskId,
+      });
+      expect(store.get(key)?.identityClaimPending).toBeTruthy();
+      expect(upsert).not.toHaveBeenCalled();
+      expect(putBinding).not.toHaveBeenCalled();
+      expect(touchLastSeen).not.toHaveBeenCalled();
+      expect(sameProcessGetAgent).not.toHaveBeenCalled();
+      expect(sameProcessGetTask).not.toHaveBeenCalled();
 
       repoReadFails = failingLayer === "l2b";
       vi.clearAllMocks();
@@ -2984,13 +3164,13 @@ describe("session cache identity isolation", () => {
     const repo: SessionRepo = {
       upsert,
       getBySessionId: vi.fn(async () => structuredClone(legacyState)),
-      deleteBySessionId: vi.fn(() => undefined),
+      deleteBySessionId: vi.fn(async () => true),
       loadAllInitialized: async () => [],
     };
     const bindingRepo: BindingRepo = {
       getBinding: vi.fn(async (): Promise<SessionBinding> => ({ outcome: "bypassed" })),
       putBinding,
-      deleteBinding: vi.fn(async () => undefined),
+      deleteBinding: vi.fn(async () => true),
       touchLastSeen,
     };
 
@@ -3058,7 +3238,7 @@ describe("session cache identity isolation", () => {
     const repo: SessionRepo = {
       upsert,
       getBySessionId: vi.fn(async () => structuredClone(persistedState)),
-      deleteBySessionId: vi.fn(() => undefined),
+      deleteBySessionId: vi.fn(async () => true),
       loadAllInitialized: vi.fn(async () => [{
         spaceId: owner.spaceId!,
         userId: owner.userId,
@@ -3070,7 +3250,7 @@ describe("session cache identity isolation", () => {
     const bindingRepo: BindingRepo = {
       getBinding: vi.fn(async () => structuredClone(persistedBinding)),
       putBinding,
-      deleteBinding: vi.fn(async () => undefined),
+      deleteBinding: vi.fn(async () => true),
       touchLastSeen,
     };
     const getAgent = vi.fn();
@@ -3130,7 +3310,7 @@ describe("session cache identity isolation", () => {
     const bindingRepo: BindingRepo = {
       getBinding,
       putBinding: vi.fn(async () => true),
-      deleteBinding: vi.fn(async () => undefined),
+      deleteBinding: vi.fn(async () => true),
       touchLastSeen,
     };
     const getAgent = vi.fn();
@@ -3157,6 +3337,41 @@ describe("session cache identity isolation", () => {
     expect(store.get(key)).toBeUndefined();
     expect(store.getBoundIdentity(key)).toBeUndefined();
     expect(await storage.getText(storageKey)).toBe(`{${detail}`);
+    const emitted = [...warn.mock.calls, ...error.mock.calls].flat().join(" ");
+    expect(emitted).not.toContain(detail);
+  });
+
+  it("rejects a real malformed KV binding before recovery metadata", async () => {
+    const detail = "malformed-store-binding-detail-sentinel";
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const error = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const identity = victimIdentity();
+    const key = sessionStoreKey(identity);
+    const storage = new MemoryStorage();
+    const storageKey = `nottl/${identity.spaceId}/${identity.userId}/${identity.agentSource}/${identity.sessionId}/binding.json`;
+    await storage.putJSON(storageKey, {
+      outcome: detail,
+      userId: identity.userId,
+      created_at: 1,
+      last_seen: 1,
+    });
+    const getAgent = vi.fn();
+    const getTask = vi.fn();
+    const store = new SessionStore(
+      30 * 60 * 1_000,
+      undefined,
+      new KvBindingRepo(storage),
+    );
+
+    await expect(store.getOrRecover(key, identity, {
+      metadataClient: { getAgent, getTask } as never,
+    })).rejects.toMatchObject({ name: "SessionIdentityConflictError" });
+
+    expect(getAgent).not.toHaveBeenCalled();
+    expect(getTask).not.toHaveBeenCalled();
+    expect(store.get(key)).toBeUndefined();
+    expect(store.getBoundIdentity(key)).toBeUndefined();
+    expect(await storage.getText(storageKey)).toContain(detail);
     const emitted = [...warn.mock.calls, ...error.mock.calls].flat().join(" ");
     expect(emitted).not.toContain(detail);
   });
@@ -3277,7 +3492,7 @@ describe("session cache identity isolation", () => {
         taskId: VICTIM.taskId,
       }),
       putBinding: async () => true,
-      deleteBinding: async () => undefined,
+      deleteBinding: async () => true,
       touchLastSeen,
     };
     const fetchCategories: string[] = [];

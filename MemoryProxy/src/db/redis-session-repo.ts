@@ -17,7 +17,10 @@ import {
   type SessionRepo,
   type HydratedSessionRow,
 } from "./sessionRepo.js";
-import type { SessionInitState } from "../session/types.js";
+import {
+  isPersistedSessionInitState,
+  type SessionInitState,
+} from "../session/types.js";
 import {
   legacyPersistedSessionIdentityKey,
   parsePersistedSessionIdentityKey,
@@ -92,7 +95,8 @@ export class RedisSessionRepo implements SessionRepo {
       const currentKey = KEY_PREFIX + compositeKey(spaceId, userId, agentSource, sessionId);
       const raw = await this.redis.get(currentKey);
       if (raw !== null) {
-        const current = JSON.parse(raw) as SessionInitState;
+        const current = JSON.parse(raw) as unknown;
+        if (!isPersistedSessionInitState(current)) throw new SessionRepoReadError();
         if (!persistedStateOwnsIdentity(current, identity)) throw new SessionRepoReadError();
         return current;
       }
@@ -108,7 +112,8 @@ export class RedisSessionRepo implements SessionRepo {
       const legacyRaw = await this.redis.get(legacyKey);
       if (!legacyRaw) return null;
       if (await this.redis.ttl(legacyKey) <= 0) return null;
-      const legacyState = JSON.parse(legacyRaw) as SessionInitState;
+      const legacyState = JSON.parse(legacyRaw) as unknown;
+      if (!isPersistedSessionInitState(legacyState)) return null;
       if (!persistedStateOwnsIdentity(legacyState, identity, spaceId === "")) return null;
       return legacyState;
     } catch {
@@ -121,7 +126,7 @@ export class RedisSessionRepo implements SessionRepo {
     userId: string,
     agentSource: string,
     sessionId: string,
-  ): Promise<void> {
+  ): Promise<boolean> {
     const identity = identityOf(spaceId, userId, agentSource, sessionId);
     const currentKey = KEY_PREFIX + compositeKey(spaceId, userId, agentSource, sessionId);
     const legacyTail = legacyPersistedSessionIdentityKey(
@@ -132,16 +137,18 @@ export class RedisSessionRepo implements SessionRepo {
     );
     try {
       await this.redis.del(currentKey);
-      if (!legacyTail) return;
+      if (!legacyTail) return true;
       const legacyKey = KEY_PREFIX + legacyTail;
       const raw = await this.redis.get(legacyKey);
-      if (!raw) return;
-      const state = JSON.parse(raw) as SessionInitState;
+      if (!raw) return true;
+      const state = JSON.parse(raw) as unknown;
+      if (!isPersistedSessionInitState(state)) return false;
       if (persistedStateOwnsIdentity(state, identity, spaceId === "")) {
         await this.redis.del(legacyKey);
       }
+      return true;
     } catch {
-      // silent
+      return false;
     }
   }
 
@@ -152,14 +159,12 @@ export class RedisSessionRepo implements SessionRepo {
       const raws = await this.redis.mget(...keys);
       const result: HydratedSessionRow[] = [];
       for (let i = 0; i < keys.length; i++) {
-        if (!raws[i]) continue;
-        const state = JSON.parse(raws[i]!) as SessionInitState;
+        if (raws[i] === null) continue;
+        const state = JSON.parse(raws[i]!) as unknown;
         const tail = keys[i].slice(KEY_PREFIX.length);
         const identity = parsePersistedSessionIdentityKey(tail);
         if (
-          !state
-          || typeof state !== "object"
-          || Array.isArray(state)
+          !isPersistedSessionInitState(state)
           || !identity
           || !persistedStateOwnsIdentity(state, identity)
         ) throw new SessionRepoReadError();
