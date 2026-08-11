@@ -399,20 +399,25 @@ Edit `~/.openclaw/openclaw.json`, add a provider under `models.providers`:
 
 ## Using Proxy with Other Platforms (Generic)
 
-Beyond ClaudeCode / CodeBuddy / Hermes / OpenClaw, any OpenAI-compatible platform or custom-built agent can connect to the Proxy to access team memory capabilities.
+An OpenAI-compatible platform or custom-built agent that uses Chat Completions can use the source-less compatibility route. Platform-prefixed routes are reserved for registered integrations; the Proxy does not infer a platform from an arbitrary first path segment.
 
 ### Connection
 
 Point the platform's API base URL at the Proxy:
 
 ```text
-http://<proxy-host>:<port>/<agent-source>/<spaceId>
+http://<proxy-host>:<port>/proxy/<spaceId>
 ```
 
-- `<agent-source>`: must be one of the Proxy-supported values: `claude-code`, `codebuddy`, `hermes`, `openclaw`. For other platforms, you can impersonate one of these (e.g. use `codebuddy` as the identifier)
-- `<spaceId>`: memory instance ID (`default` for local deployments)
+- Anthropic Messages platform routes use `claude-code`, `opencode`, or `pi`:
+  `http://<proxy-host>:<port>/<agent-source>/<spaceId>`.
+- OpenAI Chat Completions platform routes use `codebuddy`, `hermes`, or `openclaw`:
+  `http://<proxy-host>:<port>/<agent-source>/<spaceId>`.
+- Other OpenAI-compatible clients use `http://<proxy-host>:<port>/proxy/<spaceId>`.
+  The unprefixed `/v1/chat/completions` route is also retained for direct clients.
+- `<spaceId>` is the memory instance ID (`default` for local deployments).
 
-The request path is automatically appended: `/v1/chat/completions` (OpenAI protocol) or `/v1/messages` (Anthropic protocol).
+Do not impersonate another platform source. Unknown sources, cross-protocol source reuse, and unsupported endpoints such as `/v1/responses` are rejected before request authentication or forwarding.
 
 ### Required Headers
 

@@ -37,7 +37,7 @@ import { getProxyStorage } from "../storage/factory.js";
 import { getMetadataClient } from "../meta/client.js";
 import type { ProxyConfig } from "../types.js";
 import { assertAgentSource } from "../storage/key-utils.js";
-import { isAnthropicMessageSource } from "../agent-adapters/anthropic-platform.js";
+import { isRegisteredAgentSource } from "../agent-adapters/index.js";
 
 /**
  * 二选一的 pin repo（KvVersionPinRepo 或 VersionPinRepo）——
@@ -392,7 +392,7 @@ export function createSkillBridgeHandler(
     const agentSource = (c.req.header("x-tdai-agent-source") ?? "").trim();
     try {
       assertAgentSource(agentSource);
-      if (agentSource !== "codebuddy" && !isAnthropicMessageSource(agentSource)) {
+      if (!isRegisteredAgentSource(agentSource)) {
         throw new Error("unregistered agent source");
       }
     } catch {

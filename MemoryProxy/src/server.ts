@@ -11,10 +11,19 @@ import { createInstanceDestroyHandler } from "./routes/instance-destroy.js";
 import { createRateLimitHandlers } from "./routes/rate-limits.js";
 import { hasCostGuardMarker } from "./routes/whitelist.js";
 import { isAnthropicMessageSource } from "./agent-adapters/anthropic-platform.js";
-import { isOpenAIChatSource } from "./agent-adapters/index.js";
+import {
+  isOpenAIPlatformSource,
+  type OpenAIChatSource,
+} from "./agent-adapters/index.js";
 import { tryActivateStorage, tryActivateRedis } from "./injection/index.js";
 import { getEffectiveBackend } from "./storage/factory.js";
 import type { ProxyConfig } from "./types.js";
+
+/** Explicit binding for the dynamic `/:agent/:spaceId/*` route family. */
+function bindOpenAISpaceRoute(source: string): OpenAIChatSource | undefined {
+  if (source === "proxy") return "openai";
+  return isOpenAIPlatformSource(source) ? source : undefined;
+}
 
 export function createApp(config: ProxyConfig): Hono {
   const app = new Hono();
@@ -138,9 +147,9 @@ export function createApp(config: ProxyConfig): Hono {
   // 详见 docs/design/2026-07-02-arbitrary-path-passthrough-design.md
   app.post("/v1/messages/count_tokens", (c) =>
     handleAuxiliaryEndpoint(c, config, "claude-code"));
-  app.post("/v1/embeddings", (c) => handleAuxiliaryEndpoint(c, config));
-  app.post("/v1/completions", (c) => handleAuxiliaryEndpoint(c, config));
-  app.post("/v1/moderations", (c) => handleAuxiliaryEndpoint(c, config));
+  app.post("/v1/embeddings", (c) => handleAuxiliaryEndpoint(c, config, "openai"));
+  app.post("/v1/completions", (c) => handleAuxiliaryEndpoint(c, config, "openai"));
+  app.post("/v1/moderations", (c) => handleAuxiliaryEndpoint(c, config, "openai"));
 
   // Agent-prefixed routes with spaceId — 客户端标准配置格式：
   //   CC:  ANTHROPIC_BASE_URL=http://<proxy>:8096/claude-code/<spaceId>
@@ -171,7 +180,7 @@ export function createApp(config: ProxyConfig): Hono {
     });
     app.post("/:agent/:spaceId/cost-guard/v1/chat/completions", (c) => {
       const source = c.req.param("agent");
-      return handleChatCompletions(c, config, isOpenAIChatSource(source) ? source : undefined);
+      return handleChatCompletions(c, config, bindOpenAISpaceRoute(source));
     });
   }
 
@@ -195,7 +204,7 @@ export function createApp(config: ProxyConfig): Hono {
     });
     app.post("/:agent/:spaceId/analyse/v1/chat/completions", (c) => {
       const source = c.req.param("agent");
-      return handleChatCompletions(c, config, isOpenAIChatSource(source) ? source : undefined);
+      return handleChatCompletions(c, config, bindOpenAISpaceRoute(source));
     });
   }
 
@@ -217,29 +226,45 @@ export function createApp(config: ProxyConfig): Hono {
   // Anthropic-style prefixes. It has no platform binding and cannot forward.
   app.post("/:agent/:spaceId/v1/messages", (c) => handleAnthropicMessages(c, config));
   app.post("/:agent/:spaceId/v1/messages/count_tokens", (c) => handleAuxiliaryEndpoint(c, config));
-  app.post("/:agent/:spaceId/v1/embeddings", (c) => handleAuxiliaryEndpoint(c, config));
-  app.post("/:agent/:spaceId/v1/completions", (c) => handleAuxiliaryEndpoint(c, config));
-  app.post("/:agent/:spaceId/v1/moderations", (c) => handleAuxiliaryEndpoint(c, config));
-  app.post("/:agent/:spaceId/v1/chat/completions", (c) => handleChatCompletions(c, config));
+  app.post("/:agent/:spaceId/v1/embeddings", (c) => {
+    const source = c.req.param("agent");
+    return handleAuxiliaryEndpoint(c, config, bindOpenAISpaceRoute(source));
+  });
+  app.post("/:agent/:spaceId/v1/completions", (c) => {
+    const source = c.req.param("agent");
+    return handleAuxiliaryEndpoint(c, config, bindOpenAISpaceRoute(source));
+  });
+  app.post("/:agent/:spaceId/v1/moderations", (c) => {
+    const source = c.req.param("agent");
+    return handleAuxiliaryEndpoint(c, config, bindOpenAISpaceRoute(source));
+  });
+  app.post("/:agent/:spaceId/v1/chat/completions", (c) => {
+    const source = c.req.param("agent");
+    return handleChatCompletions(c, config, bindOpenAISpaceRoute(source));
+  });
 
   // Agent-prefixed routes without spaceId (deprecated: no credit reporting)
   app.post("/:agent/v1/messages", (c) => handleAnthropicMessages(c, config));
   app.post("/codebuddy/v1/chat/completions", (c) =>
     handleChatCompletions(c, config, "codebuddy"));
-  app.post("/:agent/v1/chat/completions", (c) => handleChatCompletions(c, config));
+  app.post("/:agent/v1/chat/completions", (c) => {
+    const source = c.req.param("agent");
+    return handleChatCompletions(c, config, isOpenAIPlatformSource(source) ? source : undefined);
+  });
 
-  // Legacy /proxy/<spaceId>/ prefix — no agent info, defaults to Claude Code.
-  // 保留以兼容不带 agent 前缀的客户端。
+  // Legacy /proxy/<spaceId>/ prefix — protocol-specific compatibility:
+  // Anthropic Messages defaults to Claude Code; OpenAI endpoints use the
+  // internal source-less `openai` identity.
   app.post("/proxy/:spaceId/v1/messages", (c) => handleAnthropicMessages(c, config, "claude-code"));
   app.post("/proxy/:spaceId/v1/messages/count_tokens", (c) =>
     handleAuxiliaryEndpoint(c, config, "claude-code"));
-  app.post("/proxy/:spaceId/v1/embeddings", (c) => handleAuxiliaryEndpoint(c, config));
-  app.post("/proxy/:spaceId/v1/completions", (c) => handleAuxiliaryEndpoint(c, config));
-  app.post("/proxy/:spaceId/v1/moderations", (c) => handleAuxiliaryEndpoint(c, config));
-  app.post("/proxy/:spaceId/*", (c) => handleChatCompletions(c, config));
+  app.post("/proxy/:spaceId/v1/embeddings", (c) => handleAuxiliaryEndpoint(c, config, "openai"));
+  app.post("/proxy/:spaceId/v1/completions", (c) => handleAuxiliaryEndpoint(c, config, "openai"));
+  app.post("/proxy/:spaceId/v1/moderations", (c) => handleAuxiliaryEndpoint(c, config, "openai"));
+  app.post("/proxy/:spaceId/*", (c) => handleChatCompletions(c, config, "openai"));
 
   // OpenAI-compatible chat completions (catch-all for any remaining POST paths)
-  app.post("/*", (c) => handleChatCompletions(c, config));
+  app.post("/*", (c) => handleChatCompletions(c, config, "openai"));
 
   return app;
 }

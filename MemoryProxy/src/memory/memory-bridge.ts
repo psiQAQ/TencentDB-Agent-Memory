@@ -36,7 +36,7 @@ import type { AgentContext } from "../injection/types.js";
 import { resolveFixedAssetCtxs, type FixedAssetCtx } from "../injection/injectors/tdai-fixed-asset.js";
 import type { TdaiIdentity } from "../tdai/types.js";
 import { assertAgentSource } from "../storage/key-utils.js";
-import { isAnthropicMessageSource } from "../agent-adapters/anthropic-platform.js";
+import { isRegisteredAgentSource } from "../agent-adapters/index.js";
 
 const TAG = "[memory-bridge]";
 
@@ -260,7 +260,7 @@ export function createMemoryBridgeHandler(
     const agentSource = (c.req.header("x-tdai-agent-source") ?? "").trim();
     try {
       assertAgentSource(agentSource);
-      if (agentSource !== "codebuddy" && !isAnthropicMessageSource(agentSource)) {
+      if (!isRegisteredAgentSource(agentSource)) {
         throw new Error("unregistered agent source");
       }
     } catch {

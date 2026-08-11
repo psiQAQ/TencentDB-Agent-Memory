@@ -14,6 +14,7 @@ vi.mock("../guard-adapter.js", async (importOriginal) => {
 import { initAuth } from "../auth.js";
 import { DEFAULT_CONFIG } from "../config.js";
 import { resolveForwardTarget, type ForwardTarget } from "../guard-adapter.js";
+import { handleAuxiliaryEndpoint } from "../auxiliaryHandler.js";
 import { handleChatCompletions } from "../handler.js";
 import { createApp } from "../server.js";
 
@@ -155,7 +156,39 @@ describe("OpenAI upstream header privacy", () => {
     assertSafe(upstreamHeaders[0]!, "Bearer server-global-key");
   });
 
-  it.each(["cursor", "openai", "opencode", "pi", "codex", "unknown"])(
+  it.each(["hermes", "openclaw"])(
+    "preserves the documented %s OpenAI compatibility route",
+    async (source) => {
+      const value = config();
+      initAuth(value.auth);
+      const response = await createApp(value).request(
+        `http://proxy/${source}/space-1/v1/chat/completions`,
+        { method: "POST", headers: privateHeaders(), body: requestBody() },
+      );
+
+      expect(response.status).toBe(200);
+      expect(upstreamHeaders).toHaveLength(1);
+      assertSafe(upstreamHeaders[0]!, "Bearer server-global-key");
+    },
+  );
+
+  it.each([
+    "/proxy/space-1/v1/chat/completions",
+    "/v1/chat/completions",
+  ])("preserves the source-less OpenAI compatibility route %s", async (path) => {
+    const value = config();
+    initAuth(value.auth);
+    const response = await createApp(value).request(
+      `http://proxy${path}`,
+      { method: "POST", headers: privateHeaders(), body: requestBody() },
+    );
+
+    expect(response.status).toBe(200);
+    expect(upstreamHeaders).toHaveLength(1);
+    assertSafe(upstreamHeaders[0]!, "Bearer server-global-key");
+  });
+
+  it.each(["claude-code", "cursor", "openai", "opencode", "pi", "codex", "unknown"])(
     "rejects the unregistered %s OpenAI source before auth or body parsing",
     async (source) => {
       const value = config();
@@ -207,6 +240,91 @@ describe("OpenAI upstream header privacy", () => {
     expect(response.status).toBe(400);
     expect(upstreamUrls).toEqual([]);
     expect(resolveForwardTarget).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    "/v1/responses",
+    "/proxy/space-1/v1/responses",
+    "/codex/space-1/v1/responses",
+  ])("rejects the non-whitelisted catch-all endpoint %s before auth or body parsing", async (path) => {
+    const value = config();
+    value.auth = { enabled: true, url: "https://auth.invalid", timeoutMs: 1_000 };
+    initAuth(value.auth);
+
+    const response = await createApp(value).request(
+      `http://proxy${path}`,
+      { method: "POST", headers: privateHeaders(), body: "not-json" },
+    );
+
+    expect(response.status).toBe(404);
+    expect(upstreamUrls).toEqual([]);
+    expect(resolveForwardTarget).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    "/v1/embeddings",
+    "/proxy/space-1/v1/completions",
+    "/codebuddy/space-1/v1/embeddings",
+    "/codebuddy/space-1/v1/completions",
+    "/codebuddy/space-1/v1/moderations",
+    "/hermes/space-1/v1/embeddings",
+    "/hermes/space-1/v1/completions",
+    "/hermes/space-1/v1/moderations",
+    "/openclaw/space-1/v1/embeddings",
+    "/openclaw/space-1/v1/completions",
+    "/openclaw/space-1/v1/moderations",
+  ])("binds the OpenAI auxiliary compatibility route %s", async (path) => {
+    const value = config();
+    initAuth(value.auth);
+
+    const response = await createApp(value).request(
+      `http://proxy${path}`,
+      { method: "POST", headers: privateHeaders(), body: requestBody() },
+    );
+
+    expect(response.status).toBe(200);
+    expect(upstreamUrls).toHaveLength(1);
+    assertSafe(upstreamHeaders[0]!, "Bearer server-global-key");
+  });
+
+  it.each(["claude-code", "opencode", "pi", "cursor", "openai", "codex", "unknown"])(
+    "rejects the non-OpenAI %s auxiliary source before auth or body parsing",
+    async (source) => {
+      const value = config();
+      value.auth = { enabled: true, url: "https://auth.invalid", timeoutMs: 1_000 };
+      initAuth(value.auth);
+      const bodyRead = vi.spyOn(Request.prototype, "arrayBuffer");
+
+      const response = await createApp(value).request(
+        `http://proxy/${source}/space-1/v1/embeddings`,
+        { method: "POST", headers: privateHeaders(), body: "not-json" },
+      );
+
+      expect(response.status).toBe(404);
+      expect(bodyRead).not.toHaveBeenCalled();
+      expect(upstreamUrls).toEqual([]);
+      expect(upstreamHeaders).toEqual([]);
+    },
+  );
+
+  it("rejects a cross-protocol auxiliary binding before auth or body parsing", async () => {
+    const value = config();
+    value.auth = { enabled: true, url: "https://auth.invalid", timeoutMs: 1_000 };
+    initAuth(value.auth);
+    const bodyRead = vi.spyOn(Request.prototype, "arrayBuffer");
+    const app = new Hono();
+    app.post("/opencode/:spaceId/v1/embeddings", (c) =>
+      handleAuxiliaryEndpoint(c, value, "opencode"));
+
+    const response = await app.request(
+      "http://proxy/opencode/space-1/v1/embeddings",
+      { method: "POST", headers: privateHeaders(), body: "not-json" },
+    );
+
+    expect(response.status).toBe(400);
+    expect(bodyRead).not.toHaveBeenCalled();
+    expect(upstreamUrls).toEqual([]);
+    expect(upstreamHeaders).toEqual([]);
   });
 
   it.each([

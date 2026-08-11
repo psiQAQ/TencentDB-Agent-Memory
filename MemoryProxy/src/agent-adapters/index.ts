@@ -22,7 +22,16 @@ import {
 
 export type { AgentAdapter, AgentKind, RequestKind } from "./types.js";
 
-export const OPENAI_CHAT_SOURCES = ["codebuddy"] as const;
+/** Public agent-prefixed OpenAI compatibility routes. */
+export const OPENAI_PLATFORM_SOURCES = ["codebuddy", "hermes", "openclaw"] as const;
+export type OpenAIPlatformSource = (typeof OPENAI_PLATFORM_SOURCES)[number];
+
+/**
+ * All OpenAI identities used internally by handlers and bridge tools. `openai`
+ * is reserved for source-less `/v1/*` and `/proxy/<space>/v1/*` compatibility;
+ * it is not accepted as an arbitrary caller-selected path prefix.
+ */
+export const OPENAI_CHAT_SOURCES = [...OPENAI_PLATFORM_SOURCES, "openai"] as const;
 export type OpenAIChatSource = (typeof OPENAI_CHAT_SOURCES)[number];
 
 /** Product platforms with an explicit adapter and protocol route binding. */
@@ -37,6 +46,10 @@ export function isRegisteredAgentSource(value: string): boolean {
 
 export function isOpenAIChatSource(value: string): value is OpenAIChatSource {
   return (OPENAI_CHAT_SOURCES as readonly string[]).includes(value);
+}
+
+export function isOpenAIPlatformSource(value: string): value is OpenAIPlatformSource {
+  return (OPENAI_PLATFORM_SOURCES as readonly string[]).includes(value);
 }
 
 export function getOpenAISourceBindingError(

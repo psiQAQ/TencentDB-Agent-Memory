@@ -428,6 +428,13 @@ export async function handleChatCompletions(
   config: ProxyConfig,
   boundAgentSource?: OpenAIChatSource,
 ): Promise<Response> {
+  const endpoint = matchWhitelistEndpoint(c.req.path);
+  if (!endpoint || endpoint.protocol !== "openai" || !endpoint.isPrimary) {
+    return c.json(
+      { error: { type: "not_found_error", message: "Unsupported OpenAI endpoint" } },
+      404,
+    );
+  }
   // The URL route, not a caller header or arbitrary path prefix, binds the
   // product platform. Reject before auth, body parsing, cache/Core or logs.
   const sourceBindingError = getOpenAISourceBindingError(c.req.path, boundAgentSource);

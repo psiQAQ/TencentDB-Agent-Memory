@@ -226,6 +226,14 @@ async function warmVictimSession(app: ReturnType<typeof createApp>): Promise<voi
   expect(response.status).toBe(200);
 }
 
+async function seedVictimSessionForSource(agentSource: string): Promise<void> {
+  const identity = { ...victimIdentity(), agentSource };
+  const key = sessionStoreKey(identity);
+  const store = getSessionStore();
+  store.bind(key, identity);
+  await store.set(key, victimState());
+}
+
 describe("session cache identity isolation", () => {
   beforeEach(() => {
     setSessionRepo(NULL_SESSION_REPO);
@@ -558,8 +566,8 @@ describe("session cache identity isolation", () => {
         ...victimState().sessionInfo!,
         user_id: liveIdentity.userId,
         space_id: liveIdentity.spaceId,
-        team_id: liveIdentity.teamId,
-        agent_id: liveIdentity.agentId,
+        team_id: liveIdentity.teamId!,
+        agent_id: liveIdentity.agentId!,
         task_id: liveIdentity.taskId,
       },
     };
@@ -1035,6 +1043,47 @@ describe("session cache identity isolation", () => {
     expect(fetchCategories).toEqual([]);
     expect(upstreamBodies).toHaveLength(0);
   });
+
+  it.each([
+    ["memory", "codebuddy", "/memory-bridge/v3/scenario/read"],
+    ["memory", "hermes", "/memory-bridge/v3/scenario/read"],
+    ["memory", "openclaw", "/memory-bridge/v3/scenario/read"],
+    ["memory", "openai", "/memory-bridge/v3/scenario/read"],
+    ["skill", "codebuddy", "/skill-bridge/v3/skill/list"],
+    ["skill", "hermes", "/skill-bridge/v3/skill/list"],
+    ["skill", "openclaw", "/skill-bridge/v3/skill/list"],
+    ["skill", "openai", "/skill-bridge/v3/skill/list"],
+  ] as const)(
+    "accepts the registered %s bridge source %s",
+    async (_bridge, source, path) => {
+      const config = configForTest();
+      const fetchCategories: string[] = [];
+      const upstreamBodies: Record<string, unknown>[] = [];
+      initAuth(config.auth);
+      vi.stubGlobal("fetch", fetchStub(fetchCategories, upstreamBodies));
+      await seedVictimSessionForSource(source);
+      const app = createApp(config);
+
+      const response = await app.request(`http://proxy${path}`, {
+        method: "POST",
+        headers: {
+          "authorization": `Bearer ${VICTIM.key}`,
+          "content-type": "application/json",
+          "x-conversation-id": VICTIM.sessionId,
+          "x-tdai-service-id": VICTIM.spaceId,
+          "x-tdai-agent-source": source,
+        },
+        body: "{}",
+      });
+      await response.text();
+
+      expect(response.status).toBe(200);
+      expect(fetchCategories[0]).toBe("auth");
+      expect(fetchCategories.slice(1).length).toBeGreaterThan(0);
+      expect(fetchCategories.slice(1).every((category) => category === "core-bridge")).toBe(true);
+      expect(upstreamBodies).toHaveLength(0);
+    },
+  );
 
   it.each([
     ["memory", "/memory-bridge/v3/scenario/read"],

@@ -373,20 +373,24 @@ model:
 
 ## 其他平台接入（通用）
 
-除 ClaudeCode / CodeBuddy / Hermes / OpenClaw 外，任何兼容 OpenAI API 的平台或自行开发的 Agent 均可接入 Proxy，获得团队记忆能力。
+使用 Chat Completions 的 OpenAI 兼容平台或自行开发的 Agent，可以通过无平台前缀的兼容路由接入。带平台前缀的路由只保留给已注册的集成；Proxy 不会根据任意 URL 首段推断平台身份。
 
 ### 接入方式
 
 将平台的 API base URL 指向 Proxy：
 
 ```text
-http://<proxy-host>:<port>/<agent-source>/<spaceId>
+http://<proxy-host>:<port>/proxy/<spaceId>
 ```
 
-- `<agent-source>`：平台标识，必须从 Proxy 支持的以下值中选用：`claude-code`、`codebuddy`、`hermes`、`openclaw`。如果使用的是其他平台，可伪装成其中某一个接入（如使用 `codebuddy` 作为标识）
-- `<spaceId>`：memory 实例 ID（本地部署固定为 `default`）
+- Anthropic Messages 平台路由使用 `claude-code`、`opencode` 或 `pi`：
+  `http://<proxy-host>:<port>/<agent-source>/<spaceId>`。
+- OpenAI Chat Completions 平台路由使用 `codebuddy`、`hermes` 或 `openclaw`：
+  `http://<proxy-host>:<port>/<agent-source>/<spaceId>`。
+- 其他 OpenAI 兼容客户端使用 `http://<proxy-host>:<port>/proxy/<spaceId>`；直接客户端也可继续使用无前缀的 `/v1/chat/completions`。
+- `<spaceId>` 是 memory 实例 ID（本地部署固定为 `default`）。
 
-请求 Path 自动拼接 `/v1/chat/completions`（OpenAI 协议）或 `/v1/messages`（Anthropic 协议）。
+不要伪装成其他平台来源。未知来源、跨协议复用来源，以及 `/v1/responses` 等未支持端点，会在请求鉴权或转发前被拒绝。
 
 ### 必须携带的 Header
 

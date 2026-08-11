@@ -32,8 +32,14 @@ import { matchSystemUserByUserId, hasSystemUsers } from "./systemUser.js";
 import { handleSystemUserPassthrough } from "./systemUserPassthrough.js";
 import {
   getAnthropicSourceBindingError,
+  isAnthropicMessageSource,
   type AnthropicMessageSource,
 } from "./agent-adapters/anthropic-platform.js";
+import {
+  getOpenAISourceBindingError,
+  isOpenAIChatSource,
+  type OpenAIChatSource,
+} from "./agent-adapters/index.js";
 import {
   buildSafeUpstreamHeaders,
   MissingUpstreamCredentialError,
@@ -146,7 +152,7 @@ function extractUsageFromResponse(
 export async function handleAuxiliaryEndpoint(
   c: Context,
   config: ProxyConfig,
-  boundAgentSource?: AnthropicMessageSource,
+  boundAgentSource?: AnthropicMessageSource | OpenAIChatSource,
 ): Promise<Response> {
   const entry = matchWhitelistEndpoint(c.req.path);
   if (!entry) {
@@ -155,14 +161,28 @@ export async function handleAuxiliaryEndpoint(
     return c.json({ error: "Unregistered endpoint" }, 404);
   }
 
-  if (entry.pathSuffix === "/v1/messages/count_tokens") {
-    const sourceBindingError = getAnthropicSourceBindingError(c.req.path, boundAgentSource);
-    if (sourceBindingError === "unbound") {
-      return c.json({ error: "Unsupported Anthropic platform route" }, 404);
-    }
-    if (sourceBindingError === "conflict") {
-      return c.json({ error: "Platform route binding mismatch" }, 400);
-    }
+  const sourceBindingError = entry.protocol === "anthropic"
+    ? getAnthropicSourceBindingError(
+        c.req.path,
+        boundAgentSource && isAnthropicMessageSource(boundAgentSource)
+          ? boundAgentSource
+          : undefined,
+      )
+    : getOpenAISourceBindingError(
+        c.req.path,
+        boundAgentSource && isOpenAIChatSource(boundAgentSource)
+          ? boundAgentSource
+          : undefined,
+      );
+  const crossProtocolBinding = Boolean(
+    boundAgentSource
+    && (entry.protocol === "anthropic") !== isAnthropicMessageSource(boundAgentSource),
+  );
+  if (sourceBindingError === "unbound" && !crossProtocolBinding) {
+    return c.json({ error: `Unsupported ${entry.protocol} platform route` }, 404);
+  }
+  if (sourceBindingError === "conflict" || crossProtocolBinding) {
+    return c.json({ error: "Platform route binding mismatch" }, 400);
   }
 
   const traceId = uuidv7();
