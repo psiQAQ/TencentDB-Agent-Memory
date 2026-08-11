@@ -51,6 +51,11 @@ export interface SessionInitState {
     agentId?: string;
     taskId?: string;
   };
+  /** Durable layers that must receive `identityClaim` before it is accepted. */
+  identityClaimPending?: {
+    l2a?: true;
+    l2b?: true;
+  };
   /** 内核 /teams 返回的嵌套结构，用于渲染 form 与解析用户答复。 */
   cachedTeams?: TeamOption[];
   /**

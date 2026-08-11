@@ -1091,6 +1091,77 @@ describe("session cache identity isolation", () => {
       .resolves.toBeUndefined();
   });
 
+  it("does not hydrate a snapshot while an earlier durable delete is queued", async () => {
+    let releaseDelete!: () => void;
+    let signalDeleteStarted!: () => void;
+    let signalDeleteFinished!: () => void;
+    const deleteReleased = new Promise<void>((resolve) => { releaseDelete = resolve; });
+    const deleteStarted = new Promise<void>((resolve) => { signalDeleteStarted = resolve; });
+    const deleteFinished = new Promise<void>((resolve) => { signalDeleteFinished = resolve; });
+    const identity = victimIdentity();
+    const key = sessionStoreKey(identity);
+    let persistedState: SessionInitState | null = victimState();
+    let persistedBinding: SessionBinding | null = {
+      outcome: "initialized",
+      userId: identity.userId,
+      teamId: identity.teamId,
+      agentId: identity.agentId,
+      taskId: identity.taskId,
+    };
+    const repo: SessionRepo = {
+      upsert: vi.fn(async () => true),
+      getBySessionId: vi.fn(async () => persistedState),
+      deleteBySessionId: vi.fn(async () => {
+        signalDeleteStarted();
+        await deleteReleased;
+        persistedState = null;
+      }),
+      loadAllInitialized: vi.fn(async () => persistedState
+        ? [{
+            spaceId: identity.spaceId!,
+            userId: identity.userId,
+            agentSource: identity.agentSource,
+            sessionId: identity.sessionId,
+            state: structuredClone(persistedState),
+          }]
+        : []),
+    };
+    const bindingRepo: BindingRepo = {
+      getBinding: vi.fn(async () => persistedBinding),
+      putBinding: vi.fn(async () => true),
+      deleteBinding: vi.fn(async () => {
+        persistedBinding = null;
+        signalDeleteFinished();
+      }),
+      touchLastSeen: vi.fn(async () => undefined),
+    };
+    const store = new SessionStore(30 * 60 * 1_000, repo, bindingRepo);
+
+    store.bind(key, identity);
+    store.delete(key);
+    await deleteStarted;
+    const hydration = store.hydrateFromDb();
+    releaseDelete();
+    await deleteFinished;
+
+    await expect(hydration).resolves.toBe(0);
+    expect(store.get(key)).toBeUndefined();
+    expect(persistedState).toBeNull();
+    expect(persistedBinding).toBeNull();
+
+    const nextOwner: FullSessionIdentity = {
+      userId: OUTSIDER.userId,
+      spaceId: OUTSIDER.spaceId,
+      agentSource: identity.agentSource,
+      sessionId: identity.sessionId,
+      teamId: OUTSIDER.teamId,
+      agentId: OUTSIDER.agentId,
+      taskId: OUTSIDER.taskId,
+    };
+    await expect(store.getOrRecover(sessionStoreKey(nextOwner), nextOwner, {}))
+      .resolves.toBeUndefined();
+  });
+
   it("promotes a successful durable set to a persisted raw owner", async () => {
     const firstIdentity = victimIdentity();
     const secondIdentity: FullSessionIdentity = {
@@ -2314,6 +2385,157 @@ describe("session cache identity isolation", () => {
       });
     },
   );
+
+  it.each(["l2a", "l2b"] as const)(
+    "fails closed when the full bypass claim cannot replace partial %s durability",
+    async (failingLayer) => {
+      let signalWrite!: () => void;
+      let releaseWrite!: () => void;
+      const writeStarted = new Promise<void>((resolve) => { signalWrite = resolve; });
+      const writeReleased = new Promise<void>((resolve) => { releaseWrite = resolve; });
+      const fullIdentity = victimIdentity();
+      const partialIdentity: SessionIdentity = {
+        userId: fullIdentity.userId,
+        spaceId: fullIdentity.spaceId,
+        agentSource: fullIdentity.agentSource,
+        sessionId: fullIdentity.sessionId,
+      };
+      const conflictingIdentity: FullSessionIdentity = {
+        ...fullIdentity,
+        teamId: OUTSIDER.teamId,
+        agentId: OUTSIDER.agentId,
+        taskId: OUTSIDER.taskId,
+      };
+      const key = sessionStoreKey(fullIdentity);
+      let persistedState: SessionInitState | null = null;
+      let persistedBinding: SessionBinding | null = null;
+      let firstStateWrite = true;
+      let firstBindingWrite = true;
+      let repoReadFails = false;
+      const upsert = vi.fn(async (_space, _user, _source, _session, state) => {
+        const isFull = state.identityClaim?.teamId === fullIdentity.teamId;
+        if (!isFull && failingLayer === "l2a" && firstStateWrite) {
+          firstStateWrite = false;
+          signalWrite();
+          await writeReleased;
+        }
+        if (isFull && failingLayer === "l2a") return false;
+        persistedState = structuredClone(state);
+        return true;
+      });
+      const putBinding = vi.fn(async (_space, _user, _source, _session, binding) => {
+        const isFull = binding.teamId === fullIdentity.teamId;
+        if (!isFull && failingLayer === "l2b" && firstBindingWrite) {
+          firstBindingWrite = false;
+          signalWrite();
+          await writeReleased;
+        }
+        if (isFull && failingLayer === "l2b") return false;
+        persistedBinding = structuredClone(binding);
+        return true;
+      });
+      const touchLastSeen = vi.fn(async () => undefined);
+      const repo: SessionRepo = {
+        upsert,
+        getBySessionId: vi.fn(async () => {
+          if (repoReadFails) throw new Error("repo unavailable sentinel");
+          return persistedState;
+        }),
+        deleteBySessionId: vi.fn(() => undefined),
+        loadAllInitialized: async () => [],
+      };
+      const bindingRepo: BindingRepo = {
+        getBinding: vi.fn(async () => persistedBinding),
+        putBinding,
+        deleteBinding: vi.fn(async () => undefined),
+        touchLastSeen,
+      };
+      const store = new SessionStore(30 * 60 * 1_000, repo, bindingRepo);
+      store.bind(key, partialIdentity);
+
+      const write = store.set(key, {
+        status: "initialized",
+        keyId: fullIdentity.sessionId,
+        startedAt: Date.now(),
+        attemptCount: 0,
+        userId: fullIdentity.userId,
+        bypassed: true,
+        sessionInfo: null,
+        agentDetail: null,
+        taskDetail: null,
+      });
+      await writeStarted;
+      store.bind(key, fullIdentity);
+      releaseWrite();
+      await expect(write).rejects.toMatchObject({ name: "SessionIdentityConflictError" });
+
+      repoReadFails = failingLayer === "l2b";
+      vi.clearAllMocks();
+      const getAgent = vi.fn();
+      const getTask = vi.fn();
+      const restarted = new SessionStore(30 * 60 * 1_000, repo, bindingRepo);
+      await expect(restarted.getOrRecover(key, conflictingIdentity, {
+        metadataClient: { getAgent, getTask } as never,
+      })).rejects.toMatchObject({ name: "SessionIdentityConflictError" });
+      expect(restarted.get(key)).toBeUndefined();
+      expect(touchLastSeen).not.toHaveBeenCalled();
+      expect(getAgent).not.toHaveBeenCalled();
+      expect(getTask).not.toHaveBeenCalled();
+    },
+  );
+
+  it("keeps a legacy bypass unaccepted when every full-claim write fails", async () => {
+    const firstIdentity = victimIdentity();
+    const conflictingIdentity: FullSessionIdentity = {
+      ...firstIdentity,
+      teamId: OUTSIDER.teamId,
+      agentId: OUTSIDER.agentId,
+      taskId: OUTSIDER.taskId,
+    };
+    const key = sessionStoreKey(firstIdentity);
+    const legacyState: SessionInitState = {
+      status: "initialized",
+      keyId: firstIdentity.sessionId,
+      startedAt: Date.now(),
+      attemptCount: 0,
+      userId: firstIdentity.userId,
+      bypassed: true,
+      sessionInfo: null,
+      agentDetail: null,
+      taskDetail: null,
+    };
+    const upsert = vi.fn(async () => false);
+    const putBinding = vi.fn(async () => false);
+    const touchLastSeen = vi.fn(async () => undefined);
+    const repo: SessionRepo = {
+      upsert,
+      getBySessionId: vi.fn(async () => structuredClone(legacyState)),
+      deleteBySessionId: vi.fn(() => undefined),
+      loadAllInitialized: async () => [],
+    };
+    const bindingRepo: BindingRepo = {
+      getBinding: vi.fn(async (): Promise<SessionBinding> => ({ outcome: "bypassed" })),
+      putBinding,
+      deleteBinding: vi.fn(async () => undefined),
+      touchLastSeen,
+    };
+
+    const firstStore = new SessionStore(30 * 60 * 1_000, repo, bindingRepo);
+    await expect(firstStore.getOrRecover(key, firstIdentity, {}))
+      .rejects.toMatchObject({ name: "SessionIdentityConflictError" });
+
+    vi.clearAllMocks();
+    const getAgent = vi.fn();
+    const getTask = vi.fn();
+    const restarted = new SessionStore(30 * 60 * 1_000, repo, bindingRepo);
+    await expect(restarted.getOrRecover(key, conflictingIdentity, {
+      metadataClient: { getAgent, getTask } as never,
+    })).rejects.toMatchObject({ name: "SessionIdentityConflictError" });
+    expect(restarted.get(key)).toBeUndefined();
+    expect(touchLastSeen).not.toHaveBeenCalled();
+    expect(getAgent).not.toHaveBeenCalled();
+    expect(getTask).not.toHaveBeenCalled();
+  });
 
   it.each([
     ["memory", "/memory-bridge/v3/scenario/read"],
