@@ -42,6 +42,15 @@ export interface SessionInitState {
   sessionInfo?: SessionInfo | null;
   /** User ID from auth/verify (not from header). */
   userId?: string;
+  /**
+   * Durable optional identity ownership for bypass states. This is never
+   * injectable session context; bypass states keep `sessionInfo` null.
+   */
+  identityClaim?: {
+    teamId?: string;
+    agentId?: string;
+    taskId?: string;
+  };
   /** 内核 /teams 返回的嵌套结构，用于渲染 form 与解析用户答复。 */
   cachedTeams?: TeamOption[];
   /**

@@ -146,9 +146,29 @@ export function persistedStateMatchesIdentity(
   if (session?.session_id && session.session_id !== identity.sessionId) return false;
   if (session?.space_id && identity.spaceId && session.space_id !== identity.spaceId) return false;
 
-  const storedTeamId = session?.team_id ?? state.selectedTeamId;
-  const storedAgentId = session?.agent_id ?? state.selectedAgentId ?? state.agentDetail?.id;
-  const storedTaskId = session?.task_id ?? state.taskDetail?.id;
+  let storedTeamId: string | undefined;
+  let storedAgentId: string | undefined;
+  let storedTaskId: string | undefined;
+  try {
+    storedTeamId = mergeIdentityValues(
+      state.identityClaim?.teamId,
+      session?.team_id,
+      state.selectedTeamId,
+    );
+    storedAgentId = mergeIdentityValues(
+      state.identityClaim?.agentId,
+      session?.agent_id,
+      state.selectedAgentId,
+      state.agentDetail?.id,
+    );
+    storedTaskId = mergeIdentityValues(
+      state.identityClaim?.taskId,
+      session?.task_id,
+      state.taskDetail?.id,
+    );
+  } catch {
+    return false;
+  }
   // A legacy bypass state has no injectable team/agent/task context. Its
   // authenticated user/space/source/session tuple remains strict, while a
   // missing optional value is compatible with the same caller claims used to
@@ -211,14 +231,67 @@ function identityClaimFromState(
   }
   return {
     ...identity,
-    teamId: mergeIdentityValues(identity.teamId, session?.team_id, state.selectedTeamId),
+    teamId: mergeIdentityValues(
+      identity.teamId,
+      state.identityClaim?.teamId,
+      session?.team_id,
+      state.selectedTeamId,
+    ),
     agentId: mergeIdentityValues(
       identity.agentId,
+      state.identityClaim?.agentId,
       session?.agent_id,
       state.selectedAgentId,
       state.agentDetail?.id,
     ),
-    taskId: mergeIdentityValues(identity.taskId, session?.task_id, state.taskDetail?.id),
+    taskId: mergeIdentityValues(
+      identity.taskId,
+      state.identityClaim?.taskId,
+      session?.task_id,
+      state.taskDetail?.id,
+    ),
+  };
+}
+
+function sameIdentityClaim(left: SessionIdentity, right: SessionIdentity): boolean {
+  return left.userId === right.userId
+    && left.agentSource === right.agentSource
+    && left.sessionId === right.sessionId
+    && spaceOf(left) === spaceOf(right)
+    && left.teamId === right.teamId
+    && left.agentId === right.agentId
+    && left.taskId === right.taskId;
+}
+
+function withDurableBypassIdentity(
+  state: SessionInitState,
+  identity: SessionIdentity,
+): SessionInitState {
+  if (!state.bypassed) return state;
+  const claim = {
+    teamId: identity.teamId,
+    agentId: identity.agentId,
+    taskId: identity.taskId,
+  };
+  if (
+    state.identityClaim?.teamId === claim.teamId
+    && state.identityClaim?.agentId === claim.agentId
+    && state.identityClaim?.taskId === claim.taskId
+  ) return state;
+  return { ...state, identityClaim: claim };
+}
+
+function terminalBinding(
+  state: SessionInitState,
+  identity: SessionIdentity,
+): SessionBinding | undefined {
+  if (state.status !== "initialized") return undefined;
+  return {
+    outcome: state.bypassed ? "bypassed" : "initialized",
+    userId: identity.userId,
+    teamId: identity.teamId,
+    agentId: identity.agentId,
+    taskId: identity.taskId,
   };
 }
 
@@ -277,6 +350,8 @@ type RawSessionClaim = "exclusive" | "persisted";
 export class SessionStore {
   private states = new Map<string, SessionInitState>();
   private stateGenerations = new Map<string, number>();
+  private mutationClock = 0;
+  private lastMutationByKey = new Map<string, number>();
   /** keyId → identity map — populated via {@link bind} to keep repo/binding writes user-namespaced. */
   private identities = new Map<string, SessionIdentity>();
   /** Raw source/session ownership: new sessions are exclusive; persisted owners may coexist. */
@@ -332,10 +407,15 @@ export class SessionStore {
     };
   }
 
+  private markMutation(keyId: string): void {
+    this.lastMutationByKey.set(keyId, ++this.mutationClock);
+  }
+
   private commitState(keyId: string, state: SessionInitState): number {
     const generation = (this.stateGenerations.get(keyId) ?? 0) + 1;
     this.states.set(keyId, state);
     this.stateGenerations.set(keyId, generation);
+    this.markMutation(keyId);
     return generation;
   }
 
@@ -352,6 +432,7 @@ export class SessionStore {
     if (expected && current !== expected) return false;
     if (current) this.states.delete(keyId);
     this.stateGenerations.set(keyId, (this.stateGenerations.get(keyId) ?? 0) + 1);
+    this.markMutation(keyId);
     return true;
   }
 
@@ -427,6 +508,7 @@ export class SessionStore {
     nextRawClaims.set(keyId, effectiveClaim);
     this.identities.set(keyId, merged);
     this.rawSessionClaims.set(rawKey, nextRawClaims);
+    this.markMutation(keyId);
     return merged;
   }
 
@@ -437,6 +519,7 @@ export class SessionStore {
     const claims = this.rawSessionClaims.get(rawKey);
     if (!claims?.delete(keyId)) return;
     if (claims.size === 0) this.rawSessionClaims.delete(rawKey);
+    this.markMutation(keyId);
   }
 
   get(keyId: string): SessionInitState | undefined {
@@ -473,7 +556,10 @@ export class SessionStore {
       );
     }
     const normalizedState = id
-      ? { ...credentialSafeState, keyId: id.sessionId, userId: id.userId }
+      ? withDurableBypassIdentity(
+          { ...credentialSafeState, keyId: id.sessionId, userId: id.userId },
+          id,
+        )
       : credentialSafeState;
     const writeGeneration = this.commitState(keyId, normalizedState);
     if (!id) {
@@ -486,60 +572,68 @@ export class SessionStore {
     // await 而非 fire-and-forget，保持与 L2a 一致的契约：
     // `await store.set(...)` return 时，L1 / L2a / L2b 三层都已 durable。
     // 每个 session 只会在初始化终态触发一次，成本可控。
-    const binding: SessionBinding | undefined = normalizedState.status === "initialized"
-      && this.bindingRepo
-      ? normalizedState.bypassed
-        ? { outcome: "bypassed", userId: normalizedState.userId, teamId: normalizedState.sessionInfo?.team_id, agentId: normalizedState.sessionInfo?.agent_id, taskId: normalizedState.sessionInfo?.task_id }
-        : {
-            outcome: "initialized",
-            userId: normalizedState.sessionInfo?.user_id || normalizedState.userId,
-            teamId: normalizedState.sessionInfo?.team_id,
-            agentId: normalizedState.sessionInfo?.agent_id,
-            taskId: normalizedState.sessionInfo?.task_id,
-          }
-      : undefined;
-    if (!this.repo && !binding) return;
+    const initialIdentity = id;
+    const writesBinding = normalizedState.status === "initialized" && Boolean(this.bindingRepo);
+    if (!this.repo && !writesBinding) return;
 
     // Serialize every state-backed durable write for this full identity. L1 is
     // still updated synchronously, while L2 observes the same invocation order.
     await this.enqueuePersistence(keyId, async () => {
-      if (!this.isCurrentState(keyId, writeGeneration, normalizedState)) return;
-      let durableIdentity = id!;
-      if (this.repo) {
-        let persisted = false;
-        try {
-          persisted = await this.repo.upsert(
-            spaceOf(durableIdentity),
-            durableIdentity.userId,
-            durableIdentity.agentSource,
-            durableIdentity.sessionId,
-            normalizedState,
-          );
-        } catch {
-          console.warn("[session] L2a upsert failed");
+      let currentState = normalizedState;
+      let currentGeneration = writeGeneration;
+      while (this.isCurrentState(keyId, currentGeneration, currentState)) {
+        const durableIdentity = this.previewIdentityClaim(keyId, initialIdentity);
+        const claimedState = withDurableBypassIdentity(currentState, durableIdentity);
+        if (claimedState !== currentState) {
+          currentState = claimedState;
+          currentGeneration = this.commitState(keyId, currentState);
         }
-        if (!this.isCurrentState(keyId, writeGeneration, normalizedState)) return;
-        if (persisted) {
-          durableIdentity = this.claimIdentity(keyId, durableIdentity, "persisted");
+
+        let l2aPersisted = false;
+        if (this.repo) {
+          try {
+            l2aPersisted = await this.repo.upsert(
+              spaceOf(durableIdentity),
+              durableIdentity.userId,
+              durableIdentity.agentSource,
+              durableIdentity.sessionId,
+              currentState,
+            );
+          } catch {
+            console.warn("[session] L2a upsert failed");
+          }
+          if (!this.isCurrentState(keyId, currentGeneration, currentState)) return;
+          if (!sameIdentityClaim(
+            durableIdentity,
+            this.previewIdentityClaim(keyId, durableIdentity),
+          )) continue;
         }
-      }
-      if (binding && this.bindingRepo) {
-        let persisted = false;
-        try {
-          persisted = await this.bindingRepo.putBinding(
-            spaceOf(durableIdentity),
-            durableIdentity.userId,
-            durableIdentity.agentSource,
-            durableIdentity.sessionId,
-            binding,
-          );
-        } catch {
-          console.warn("[session] L2b binding write failed");
+
+        let l2bPersisted = false;
+        const binding = writesBinding ? terminalBinding(currentState, durableIdentity) : undefined;
+        if (binding && this.bindingRepo) {
+          try {
+            l2bPersisted = await this.bindingRepo.putBinding(
+              spaceOf(durableIdentity),
+              durableIdentity.userId,
+              durableIdentity.agentSource,
+              durableIdentity.sessionId,
+              binding,
+            );
+          } catch {
+            console.warn("[session] L2b binding write failed");
+          }
+          if (!this.isCurrentState(keyId, currentGeneration, currentState)) return;
+          if (!sameIdentityClaim(
+            durableIdentity,
+            this.previewIdentityClaim(keyId, durableIdentity),
+          )) continue;
         }
-        if (
-          persisted
-          && this.isCurrentState(keyId, writeGeneration, normalizedState)
-        ) this.claimIdentity(keyId, durableIdentity, "persisted");
+
+        if (l2aPersisted || l2bPersisted) {
+          this.claimIdentity(keyId, durableIdentity, "persisted");
+        }
+        return;
       }
     });
   }
@@ -616,6 +710,7 @@ export class SessionStore {
   async hydrateFromDb(): Promise<number> {
     if (!this.repo) return 0;
     try {
+      const hydrateStartedAt = this.mutationClock;
       const rows = await this.repo.loadAllInitialized();
       let loaded = 0;
       for (const row of rows) {
@@ -631,18 +726,26 @@ export class SessionStore {
           agentSource: row.agentSource,
           sessionId: row.sessionId,
           spaceId: row.spaceId || undefined,
-          teamId: normalizedState.sessionInfo?.team_id ?? normalizedState.selectedTeamId,
-          agentId: normalizedState.sessionInfo?.agent_id
+          teamId: normalizedState.identityClaim?.teamId
+            ?? normalizedState.sessionInfo?.team_id
+            ?? normalizedState.selectedTeamId,
+          agentId: normalizedState.identityClaim?.agentId
+            ?? normalizedState.sessionInfo?.agent_id
             ?? normalizedState.selectedAgentId
             ?? normalizedState.agentDetail?.id,
-          taskId: normalizedState.sessionInfo?.task_id ?? normalizedState.taskDetail?.id,
+          taskId: normalizedState.identityClaim?.taskId
+            ?? normalizedState.sessionInfo?.task_id
+            ?? normalizedState.taskDetail?.id,
         };
         if (!persistedStateMatchesIdentity(row.state, identity)) {
           console.warn("[session-db] skipped session with identity conflict");
           continue;
         }
         const keyId = sessionStoreKey(identity);
-        if (!this.states.has(keyId)) {
+        if (
+          (this.lastMutationByKey.get(keyId) ?? 0) <= hydrateStartedAt
+          && !this.states.has(keyId)
+        ) {
           this.claimIdentity(keyId, identity, "persisted");
           this.commitState(keyId, normalizedState);
           if (normalizedState !== row.state) {
@@ -727,7 +830,12 @@ export class SessionStore {
       if (!persistedStateMatchesIdentity(l1, merged)) {
         throw new SessionIdentityConflictError();
       }
-      this.claimIdentity(keyId, merged, "exclusive");
+      const claimed = this.claimIdentity(keyId, merged, "exclusive");
+      const durableState = withDurableBypassIdentity(l1, claimed);
+      if (durableState !== l1) {
+        await this.set(keyId, durableState);
+        return this.states.get(keyId);
+      }
       console.log("[cache] session=<redacted> L1 hit (terminal)");
       return l1;
     }
@@ -753,20 +861,12 @@ export class SessionStore {
           throw new SessionIdentityConflictError();
         }
         const claimed = this.claimIdentity(keyId, merged, "persisted");
-        this.commitState(keyId, l2a.state);
-        if (l2a.needsMigration) {
-          const beforeMigration = this.snapshotState(keyId);
-          try {
-            await this.enqueuePersistence(keyId, () => this.repo!.upsert(
-              spaceOf(claimed), claimed.userId, claimed.agentSource, claimed.sessionId, l2a.state!,
-            ));
-          } catch {
-            // Best-effort lazy migration; L1 is already credential-free.
-          }
-          const stateAfterMigration = this.stateAfterAwait(keyId, beforeMigration, claimed);
-          if (stateAfterMigration.changed) return stateAfterMigration.state;
-          this.claimIdentity(keyId, claimed, "persisted");
+        const durableState = withDurableBypassIdentity(l2a.state, claimed);
+        if (l2a.needsMigration || durableState !== l2a.state) {
+          await this.set(keyId, durableState);
+          return this.states.get(keyId);
         }
+        this.commitState(keyId, l2a.state);
         console.log(`[cache] session=<redacted> L2a hit → promote L1${l1 ? " (override stale L1)" : ""}`);
         return l2a.state;
       }
