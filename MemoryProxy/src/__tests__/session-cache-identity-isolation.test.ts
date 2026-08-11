@@ -1352,7 +1352,7 @@ describe("session cache identity isolation", () => {
 
       await expect(store.getOrRecover(key, identity, {
         metadataClient: { getAgent, getTask } as never,
-      })).resolves.toBeUndefined();
+      })).rejects.toMatchObject({ name: "SessionIdentityConflictError" });
       expect(store.get(key)).toBeUndefined();
       expect(deleteBySessionId).toHaveBeenCalledTimes(1);
       expect(deleteBinding).toHaveBeenCalledTimes(1);
@@ -1365,6 +1365,10 @@ describe("session cache identity isolation", () => {
         deleteIntents: Map<string, number>;
       }).deleteIntents;
       expect(deleteIntents.has(key)).toBe(true);
+      const blockedDeleteIntents = (store as unknown as {
+        blockedDeleteIntents: Map<string, number>;
+      }).blockedDeleteIntents;
+      expect(blockedDeleteIntents.get(key)).toBe(deleteIntents.get(key));
     },
   );
 
@@ -1413,12 +1417,166 @@ describe("session cache identity isolation", () => {
       identityClaimPending: { l2a: true },
     })).rejects.toMatchObject({ name: "SessionIdentityConflictError" });
 
-    await expect(store.getOrRecover(key, identity, {})).resolves.toBeUndefined();
+    await expect(store.getOrRecover(key, identity, {}))
+      .rejects.toMatchObject({ name: "SessionIdentityConflictError" });
     expect(store.get(key)).toBeUndefined();
     const deleteIntents = (store as unknown as {
       deleteIntents: Map<string, number>;
     }).deleteIntents;
     expect(deleteIntents.has(key)).toBe(true);
+    const blockedDeleteIntents = (store as unknown as {
+      blockedDeleteIntents: Map<string, number>;
+    }).blockedDeleteIntents;
+    expect(blockedDeleteIntents.get(key)).toBe(deleteIntents.get(key));
+  });
+
+  it.each([
+    ["initialized", "false"],
+    ["initialized", "throw"],
+    ["bypassed", "false"],
+    ["bypassed", "throw"],
+  ] as const)(
+    "restores a failed-delete tombstone when an ordinary %s replacement writes %s",
+    async (stateKind, failureKind) => {
+      const identity = victimIdentity();
+      const key = sessionStoreKey(identity);
+      const original = victimState();
+      let persistedState: SessionInitState | null = structuredClone(original);
+      let persistedBinding: SessionBinding | null = {
+        outcome: "initialized",
+        userId: identity.userId,
+        teamId: identity.teamId,
+        agentId: identity.agentId,
+        taskId: identity.taskId,
+      };
+      let writesFail = false;
+      const failWrite = (): boolean => {
+        if (failureKind === "throw") throw new Error("replacement-write-detail");
+        return false;
+      };
+      const repo: SessionRepo = {
+        upsert: vi.fn(async (_space, _user, _source, _session, state) => {
+          if (writesFail) return failWrite();
+          persistedState = structuredClone(state);
+          return true;
+        }),
+        getBySessionId: vi.fn(async () => structuredClone(persistedState)),
+        deleteBySessionId: vi.fn(async () => false),
+        loadAllInitialized: async () => [],
+      };
+      const bindingRepo: BindingRepo = {
+        getBinding: vi.fn(async () => structuredClone(persistedBinding)),
+        putBinding: vi.fn(async (_space, _user, _source, _session, binding) => {
+          if (writesFail) return failWrite();
+          persistedBinding = structuredClone(binding);
+          return true;
+        }),
+        deleteBinding: vi.fn(async () => false),
+        touchLastSeen: vi.fn(async () => undefined),
+      };
+      const store = new SessionStore(30 * 60 * 1_000, repo, bindingRepo);
+      store.bind(key, identity);
+      await store.set(key, original);
+      store.delete(key);
+      const deleteTail = (store as unknown as {
+        persistenceTails: Map<string, Promise<void>>;
+      }).persistenceTails.get(key);
+      expect(deleteTail).toBeDefined();
+      await deleteTail;
+      writesFail = true;
+
+      const replacement: SessionInitState = stateKind === "bypassed"
+        ? {
+            status: "initialized",
+            keyId: identity.sessionId,
+            startedAt: Date.now(),
+            attemptCount: 0,
+            userId: identity.userId,
+            bypassed: true,
+            sessionInfo: null,
+            agentDetail: null,
+            taskDetail: null,
+          }
+        : {
+            ...victimState(),
+            agentDetail: {
+              id: VICTIM.agentId,
+              name: "replacement",
+              description: "replacement-state",
+            },
+          };
+      await expect(store.set(key, replacement))
+        .rejects.toMatchObject({ name: "SessionIdentityConflictError" });
+
+      await expect(store.getOrRecover(key, identity, {}))
+        .rejects.toMatchObject({ name: "SessionIdentityConflictError" });
+      expect(store.get(key)).toBeUndefined();
+      expect(persistedState?.agentDetail?.description).not.toBe("replacement-state");
+      const deleteIntents = (store as unknown as {
+        deleteIntents: Map<string, number>;
+      }).deleteIntents;
+      expect(deleteIntents.has(key)).toBe(true);
+    },
+  );
+
+  it("keeps a failed-delete tombstone active while replacement durability is pending", async () => {
+    const identity = victimIdentity();
+    const key = sessionStoreKey(identity);
+    let releaseReplacement!: (value: boolean) => void;
+    let blockReplacement = false;
+    const upsert = vi.fn(async () => {
+      if (!blockReplacement) return true;
+      return new Promise<boolean>((resolve) => {
+        releaseReplacement = resolve;
+      });
+    });
+    const repo: SessionRepo = {
+      upsert,
+      getBySessionId: vi.fn(async () => victimState()),
+      deleteBySessionId: vi.fn(async () => false),
+      loadAllInitialized: async () => [],
+    };
+    const bindingRepo: BindingRepo = {
+      getBinding: vi.fn(async () => ({
+        outcome: "initialized",
+        userId: identity.userId,
+        teamId: identity.teamId,
+        agentId: identity.agentId,
+        taskId: identity.taskId,
+      } as SessionBinding)),
+      putBinding: vi.fn(async () => true),
+      deleteBinding: vi.fn(async () => false),
+      touchLastSeen: vi.fn(async () => undefined),
+    };
+    const store = new SessionStore(30 * 60 * 1_000, repo, bindingRepo);
+    store.bind(key, identity);
+    await store.set(key, victimState());
+    store.delete(key);
+    await (store as unknown as {
+      persistenceTails: Map<string, Promise<void>>;
+    }).persistenceTails.get(key);
+
+    blockReplacement = true;
+    const replacement = {
+      ...victimState(),
+      agentDetail: {
+        id: VICTIM.agentId,
+        name: "Replacement",
+        description: "pending-replacement",
+      },
+    };
+    const write = store.set(key, replacement);
+    await vi.waitFor(() => expect(upsert).toHaveBeenCalledTimes(2));
+
+    await expect(store.getOrRecover(key, identity, {
+      metadataClient: victimMetadata() as never,
+    })).rejects.toMatchObject({ name: "SessionIdentityConflictError" });
+
+    releaseReplacement(true);
+    await expect(write).resolves.toBeUndefined();
+    await expect(store.getOrRecover(key, identity, {})).resolves.toMatchObject({
+      agentDetail: { description: "pending-replacement" },
+    });
   });
 
   it("promotes a successful durable set to a persisted raw owner", async () => {
@@ -1652,13 +1810,10 @@ describe("session cache identity isolation", () => {
         },
         { role: "user", content: "selected" },
       ],
-    })).resolves.toMatchObject(durabilityCase === "no-metadata"
-      ? { bypassed: true, sessionInfo: null }
-      : {
-          sessionInfo: { agent_id: firstIdentity.agentId },
-          agentDetail: { id: firstIdentity.agentId },
-        });
-    expect(upsert).toHaveBeenCalledTimes(durabilityCase === "handled-failure" ? 1 : 0);
+    })).resolves.toMatchObject({ bypassed: true, sessionInfo: null });
+    expect(metadataClient.getAgent).not.toHaveBeenCalled();
+    expect(metadataClient.getTask).not.toHaveBeenCalled();
+    expect(upsert).not.toHaveBeenCalled();
 
     await expect(store.getOrRecover(secondKey, secondIdentity, {}))
       .rejects.toMatchObject({ name: "SessionIdentityConflictError" });

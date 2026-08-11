@@ -18,7 +18,9 @@ import {
   type HydratedSessionRow,
 } from "./sessionRepo.js";
 import {
+  isLegacyPersistedSessionInitState,
   isPersistedSessionInitState,
+  normalizePersistedSessionInitState,
   type SessionInitState,
 } from "../session/types.js";
 import {
@@ -72,6 +74,7 @@ export class RedisSessionRepo implements SessionRepo {
     state: SessionInitState,
   ): Promise<boolean> {
     const key = KEY_PREFIX + compositeKey(spaceId, userId, agentSource, sessionId);
+    if (!isPersistedSessionInitState(state)) return false;
     // await write-through：多节点部署下 pod A 关流前 L2a 必须落盘，
     // 否则 pod B turn-2 会 L2a miss → tryHistoryScan bypass 直接透传 LLM。
     // 见 2026-07-13 修复；写失败仍静默降级（L1 依旧是权威 fast path）。
@@ -95,8 +98,9 @@ export class RedisSessionRepo implements SessionRepo {
       const currentKey = KEY_PREFIX + compositeKey(spaceId, userId, agentSource, sessionId);
       const raw = await this.redis.get(currentKey);
       if (raw !== null) {
-        const current = JSON.parse(raw) as unknown;
-        if (!isPersistedSessionInitState(current)) throw new SessionRepoReadError();
+        const parsed = JSON.parse(raw) as unknown;
+        const current = normalizePersistedSessionInitState(parsed);
+        if (!current) throw new SessionRepoReadError();
         if (!persistedStateOwnsIdentity(current, identity)) throw new SessionRepoReadError();
         return current;
       }
@@ -113,7 +117,7 @@ export class RedisSessionRepo implements SessionRepo {
       if (!legacyRaw) return null;
       if (await this.redis.ttl(legacyKey) <= 0) return null;
       const legacyState = JSON.parse(legacyRaw) as unknown;
-      if (!isPersistedSessionInitState(legacyState)) return null;
+      if (!isLegacyPersistedSessionInitState(legacyState)) return null;
       if (!persistedStateOwnsIdentity(legacyState, identity, spaceId === "")) return null;
       return legacyState;
     } catch {
@@ -142,7 +146,7 @@ export class RedisSessionRepo implements SessionRepo {
       const raw = await this.redis.get(legacyKey);
       if (!raw) return true;
       const state = JSON.parse(raw) as unknown;
-      if (!isPersistedSessionInitState(state)) return false;
+      if (!isLegacyPersistedSessionInitState(state)) return false;
       if (persistedStateOwnsIdentity(state, identity, spaceId === "")) {
         await this.redis.del(legacyKey);
       }
@@ -160,11 +164,12 @@ export class RedisSessionRepo implements SessionRepo {
       const result: HydratedSessionRow[] = [];
       for (let i = 0; i < keys.length; i++) {
         if (raws[i] === null) continue;
-        const state = JSON.parse(raws[i]!) as unknown;
+        const parsedState = JSON.parse(raws[i]!) as unknown;
+        const state = normalizePersistedSessionInitState(parsedState);
         const tail = keys[i].slice(KEY_PREFIX.length);
         const identity = parsePersistedSessionIdentityKey(tail);
         if (
-          !isPersistedSessionInitState(state)
+          !state
           || !identity
           || !persistedStateOwnsIdentity(state, identity)
         ) throw new SessionRepoReadError();

@@ -28,6 +28,7 @@ import {
 } from "./sessionRepo.js";
 import {
   isPersistedSessionInitState,
+  normalizePersistedSessionInitState,
   type SessionInitState,
 } from "../session/types.js";
 import type { ProxyStorage } from "../storage/proxy-storage.js";
@@ -60,6 +61,7 @@ export class KvSessionRepo implements SessionRepo {
     // 提前算 key —— assertKeySegment / assertAgentSource 校验会在此同步抛出，
     // 让调用方在装配层就能观测到非法参数（而不是变成静默的 async 失败）。
     const key = mainKey(spaceId, userId, agentSource, sessionId);
+    if (!isPersistedSessionInitState(state)) return false;
     try {
       await this.storage.putJSON(key, state);
       return true;
@@ -83,9 +85,10 @@ export class KvSessionRepo implements SessionRepo {
     try {
       const raw = await this.storage.getText(mainKey(spaceId, userId, agentSource, sessionId));
       if (raw === null) return null;
-      const state = JSON.parse(raw) as unknown;
+      const parsed = JSON.parse(raw) as unknown;
+      const state = normalizePersistedSessionInitState(parsed);
       if (
-        !isPersistedSessionInitState(state)
+        !state
         || !persistedStateOwnsIdentity(state, { spaceId, userId, agentSource, sessionId })
       ) throw new SessionRepoReadError();
       return state;
@@ -127,8 +130,9 @@ export class KvSessionRepo implements SessionRepo {
         const [spaceId, userId, agentSource, sessionId] = segs;
         const raw = await this.storage.getText(TTL_BUCKET_PREFIX + name);
         if (raw === null) continue;
-        const state = JSON.parse(raw) as unknown;
-        if (!isPersistedSessionInitState(state)) throw new SessionRepoReadError();
+        const parsed = JSON.parse(raw) as unknown;
+        const state = normalizePersistedSessionInitState(parsed);
+        if (!state) throw new SessionRepoReadError();
         if (!persistedStateOwnsIdentity(state, { spaceId, userId, agentSource, sessionId })) {
           throw new SessionRepoReadError();
         }

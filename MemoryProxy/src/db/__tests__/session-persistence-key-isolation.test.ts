@@ -61,6 +61,36 @@ function state(
   };
 }
 
+function incompleteInitializedState(
+  identity: readonly [string, string, string, string],
+): Record<string, unknown> {
+  const [spaceId, userId, , sessionId] = identity;
+  return {
+    status: "initialized",
+    keyId: sessionId,
+    userId,
+    sessionInfo: {
+      session_id: sessionId,
+      space_id: spaceId,
+      team_id: 7,
+      agent_id: "agent-invalid-shape",
+      user_id: userId,
+    },
+  };
+}
+
+function contextFreeLegacyCanonicalBypass(
+  identity: readonly [string, string, string, string],
+): Record<string, unknown> {
+  const [, userId, , sessionId] = identity;
+  return {
+    status: "initialized",
+    keyId: sessionId,
+    userId,
+    bypassed: true,
+  };
+}
+
 interface FakeTransaction {
   hset(
     key: string,
@@ -658,8 +688,113 @@ describe("collision-safe persisted session identity keys", () => {
       name: "SessionRepoReadError",
       message: "session repository read failed",
     });
+
+    update.run(JSON.stringify(incompleteInitializedState(FIRST)), sessionRowId(...FIRST));
+    await expect(sessions.getBySessionId(...FIRST)).rejects.toMatchObject({
+      name: "SessionRepoReadError",
+      message: "session repository read failed",
+    });
+    await expect(sessions.loadAllInitialized()).rejects.toMatchObject({
+      name: "SessionRepoReadError",
+      message: "session repository read failed",
+    });
     const emitted = [...warn.mock.calls, ...error.mock.calls].flat().join(" ");
     expect(emitted).not.toContain(detail);
+  });
+
+  it("rejects SQLite hydrate status-column disagreement before filtering", async () => {
+    const sessions = getSessionRepo();
+    expect(await sessions.upsert(...FIRST, state(FIRST, "canonical-owner"))).toBe(true);
+    getDb()!.prepare("UPDATE sessions SET status = ? WHERE session_id = ?")
+      .run("pending_form", sessionRowId(...FIRST));
+
+    await expect(sessions.getBySessionId(...FIRST)).rejects.toMatchObject({
+      name: "SessionRepoReadError",
+      message: "session repository read failed",
+    });
+    await expect(sessions.loadAllInitialized()).rejects.toMatchObject({
+      name: "SessionRepoReadError",
+      message: "session repository read failed",
+    });
+  });
+
+  it("normalizes only the context-free legacy canonical bypass shape", async () => {
+    const legacyBypass = contextFreeLegacyCanonicalBypass(FIRST);
+    const expected = {
+      status: "initialized",
+      keyId: FIRST[3],
+      userId: FIRST[1],
+      bypassed: true,
+      startedAt: 0,
+      attemptCount: 0,
+      sessionInfo: null,
+      agentDetail: null,
+      taskDetail: null,
+    };
+
+    const sqlite = getSessionRepo();
+    expect(await sqlite.upsert(...FIRST, state(FIRST, "seed"))).toBe(true);
+    getDb()!.prepare("UPDATE sessions SET state_json = ? WHERE session_id = ?")
+      .run(JSON.stringify(legacyBypass), sessionRowId(...FIRST));
+    await expect(sqlite.getBySessionId(...FIRST)).resolves.toMatchObject(expected);
+    await expect(sqlite.loadAllInitialized()).resolves.toEqual([
+      expect.objectContaining({ state: expect.objectContaining(expected) }),
+    ]);
+
+    const storage = new MemoryStorage();
+    const kv = new KvSessionRepo(storage);
+    await storage.putJSON(`ttl/${FIRST.join("/")}/inj-sess.json`, legacyBypass);
+    await expect(kv.getBySessionId(...FIRST)).resolves.toMatchObject(expected);
+    await expect(kv.loadAllInitialized()).resolves.toEqual([
+      expect.objectContaining({ state: expect.objectContaining(expected) }),
+    ]);
+
+    const redis = new FakeRedis();
+    const redisRepo = new RedisSessionRepo(redis as never);
+    redis.strings.set(
+      `inj:sess:${v2IdentityKey(FIRST)}`,
+      JSON.stringify(legacyBypass),
+    );
+    await expect(redisRepo.getBySessionId(...FIRST)).resolves.toMatchObject(expected);
+    await expect(redisRepo.loadAllInitialized()).resolves.toEqual([
+      expect.objectContaining({ state: expect.objectContaining(expected) }),
+    ]);
+  });
+
+  it("strips the sole legacy user credential from canonical adapter reads", async () => {
+    const detail = "legacy-user-key-detail-sentinel";
+    const legacyState = {
+      ...state(FIRST, "legacy-credential-owner"),
+      sessionInfo: {
+        ...state(FIRST, "legacy-credential-owner").sessionInfo!,
+        user_key: detail,
+      },
+    };
+    const assertCredentialFree = (value: unknown): void => {
+      expect(JSON.stringify(value)).not.toContain(detail);
+    };
+
+    const sqlite = getSessionRepo();
+    expect(await sqlite.upsert(...FIRST, state(FIRST, "seed"))).toBe(true);
+    getDb()!.prepare("UPDATE sessions SET state_json = ? WHERE session_id = ?")
+      .run(JSON.stringify(legacyState), sessionRowId(...FIRST));
+    assertCredentialFree(await sqlite.getBySessionId(...FIRST));
+    assertCredentialFree(await sqlite.loadAllInitialized());
+
+    const storage = new MemoryStorage();
+    const kv = new KvSessionRepo(storage);
+    await storage.putJSON(`ttl/${FIRST.join("/")}/inj-sess.json`, legacyState);
+    assertCredentialFree(await kv.getBySessionId(...FIRST));
+    assertCredentialFree(await kv.loadAllInitialized());
+
+    const redis = new FakeRedis();
+    const redisRepo = new RedisSessionRepo(redis as never);
+    redis.strings.set(
+      `inj:sess:${v2IdentityKey(FIRST)}`,
+      JSON.stringify(legacyState),
+    );
+    assertCredentialFree(await redisRepo.getBySessionId(...FIRST));
+    assertCredentialFree(await redisRepo.loadAllInitialized());
   });
 
   it("rejects present malformed and mismatched canonical KV sessions", async () => {
@@ -684,6 +819,16 @@ describe("collision-safe persisted session identity keys", () => {
     });
 
     await storage.putJSON(key, { ...state(FIRST, "owner"), status: detail });
+    await expect(sessions.getBySessionId(...FIRST)).rejects.toMatchObject({
+      name: "SessionRepoReadError",
+      message: "session repository read failed",
+    });
+    await expect(sessions.loadAllInitialized()).rejects.toMatchObject({
+      name: "SessionRepoReadError",
+      message: "session repository read failed",
+    });
+
+    await storage.putJSON(key, incompleteInitializedState(FIRST));
     await expect(sessions.getBySessionId(...FIRST)).rejects.toMatchObject({
       name: "SessionRepoReadError",
       message: "session repository read failed",
@@ -788,6 +933,16 @@ describe("collision-safe persisted session identity keys", () => {
     });
 
     redis.strings.set(key, JSON.stringify({ ...state(FIRST, "owner"), status: detail }));
+    await expect(sessions.getBySessionId(...FIRST)).rejects.toMatchObject({
+      name: "SessionRepoReadError",
+      message: "session repository read failed",
+    });
+    await expect(sessions.loadAllInitialized()).rejects.toMatchObject({
+      name: "SessionRepoReadError",
+      message: "session repository read failed",
+    });
+
+    redis.strings.set(key, JSON.stringify(incompleteInitializedState(FIRST)));
     await expect(sessions.getBySessionId(...FIRST)).rejects.toMatchObject({
       name: "SessionRepoReadError",
       message: "session repository read failed",

@@ -25,7 +25,9 @@ import type Database from "better-sqlite3";
 
 import { getDb } from "./index.js";
 import {
+  isLegacyPersistedSessionInitState,
   isPersistedSessionInitState,
+  normalizePersistedSessionInitState,
   type SessionInitState,
 } from "../session/types.js";
 import {
@@ -99,18 +101,26 @@ function rowFromState(
   };
 }
 
-function parseState(s: string | null | undefined): SessionInitState {
+function parseState(
+  s: string | null | undefined,
+  legacy = false,
+): SessionInitState {
   try {
     const parsed = JSON.parse(s ?? "") as unknown;
-    if (!isPersistedSessionInitState(parsed)) throw new SessionRepoReadError();
-    return parsed;
+    if (legacy) {
+      if (!isLegacyPersistedSessionInitState(parsed)) throw new SessionRepoReadError();
+      return parsed;
+    }
+    const normalized = normalizePersistedSessionInitState(parsed);
+    if (!normalized) throw new SessionRepoReadError();
+    return normalized;
   } catch {
     throw new SessionRepoReadError();
   }
 }
 
-function rowToState(row: PersistedSessionRow): SessionInitState {
-  const state = parseState(row.state_json);
+function rowToState(row: PersistedSessionRow, legacy = false): SessionInitState {
+  const state = parseState(row.state_json, legacy);
   if (row.status !== state.status) throw new SessionRepoReadError();
   return state;
 }
@@ -216,6 +226,7 @@ class SqliteSessionRepo implements SessionRepo {
     // better-sqlite3 是同步 API；包 async 只是为了对齐 SessionRepo 契约，
     // 让 store 侧的 await 语义统一（跨节点部署走 KvSessionRepo/RedisSessionRepo
     // 都是真异步）。
+    if (!isPersistedSessionInitState(state)) return false;
     try {
       const row = rowFromState(spaceId, userId, agentSource, sessionId, state);
       this.db.prepare(UPSERT_SQL).run(row);
@@ -255,7 +266,7 @@ class SqliteSessionRepo implements SessionRepo {
       );
       if (!legacyId) return null;
       const legacyRow = select.get(legacyId) as PersistedSessionRow | undefined;
-      const legacyState = legacyRow ? rowToState(legacyRow) : null;
+      const legacyState = legacyRow ? rowToState(legacyRow, true) : null;
       if (
         !legacyRow
         || legacyRow.session_key !== sessionId
@@ -287,7 +298,7 @@ class SqliteSessionRepo implements SessionRepo {
       );
       if (!legacyId) return true;
       const legacyRow = select.get(legacyId) as PersistedSessionRow | undefined;
-      const legacyState = legacyRow ? rowToState(legacyRow) : null;
+      const legacyState = legacyRow ? rowToState(legacyRow, true) : null;
       if (
         legacyRow?.session_key === sessionId
         && legacyState
@@ -306,15 +317,15 @@ class SqliteSessionRepo implements SessionRepo {
 
   async loadAllInitialized(): Promise<HydratedSessionRow[]> {
     try {
-      const rows = this.db
-        .prepare("SELECT * FROM sessions WHERE status = 'initialized'")
-        .all() as PersistedSessionRow[];
+      const rows = this.db.prepare("SELECT * FROM sessions").all() as PersistedSessionRow[];
       const out: HydratedSessionRow[] = [];
       for (const r of rows) {
-        const s = rowToState(r);
+        if (!r.session_id.startsWith("v2:")) continue;
         const parsed = parsePersistedSessionIdentityKey(r.session_id);
-        if (!parsed) continue;
+        if (!parsed) throw new SessionRepoReadError();
+        const s = rowToState(r);
         if (!persistedStateOwnsIdentity(s, parsed)) throw new SessionRepoReadError();
+        if (s.status !== "initialized") continue;
         out.push({ ...parsed, state: s });
       }
       return out;

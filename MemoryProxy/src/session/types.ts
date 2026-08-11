@@ -108,8 +108,96 @@ export interface SessionInitState {
   bypassed?: boolean;
 }
 
-/** Runtime boundary for persisted state before identity ownership checks. */
-export function isPersistedSessionInitState(value: unknown): value is SessionInitState {
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function isOptionalString(value: unknown): boolean {
+  return value === undefined || typeof value === "string";
+}
+
+function isOptionalId(value: unknown): boolean {
+  return value === undefined || (typeof value === "string" && value.length > 0);
+}
+
+function isPersistedIdentityClaim(value: unknown): boolean {
+  if (!isRecord(value)) return false;
+  return isOptionalId(value.teamId)
+    && isOptionalId(value.agentId)
+    && isOptionalId(value.taskId);
+}
+
+function isPersistedIdentityClaimPending(value: unknown): boolean {
+  if (!isRecord(value)) return false;
+  const l2a = value.l2a;
+  const l2b = value.l2b;
+  return (l2a === undefined || l2a === true)
+    && (l2b === undefined || l2b === true)
+    && (l2a === true || l2b === true);
+}
+
+function isPersistedSessionInfo(value: unknown): boolean {
+  if (!isRecord(value)) return false;
+  return typeof value.session_id === "string"
+    && value.session_id.length > 0
+    && typeof value.team_id === "string"
+    && value.team_id.length > 0
+    && typeof value.agent_id === "string"
+    && value.agent_id.length > 0
+    && typeof value.user_id === "string"
+    && value.user_id.length > 0
+    && isOptionalId(value.task_id)
+    && isOptionalId(value.space_id)
+    && value.user_key === undefined;
+}
+
+function isPersistedAgentDetail(value: unknown): boolean {
+  if (value === undefined || value === null) return true;
+  if (!isRecord(value)) return false;
+  return typeof value.id === "string"
+    && value.id.length > 0
+    && typeof value.name === "string"
+    && isOptionalString(value.description)
+    && isOptionalString(value.prompt);
+}
+
+function isPersistedTaskDetail(value: unknown): boolean {
+  if (value === undefined || value === null) return true;
+  if (!isRecord(value)) return false;
+  return typeof value.id === "string"
+    && value.id.length > 0
+    && typeof value.name === "string"
+    && isOptionalString(value.description)
+    && isOptionalString(value.goal);
+}
+
+function isPersistedCachedTeams(value: unknown): boolean {
+  if (value === undefined) return true;
+  if (!Array.isArray(value)) return false;
+  return value.every((team) => {
+    if (!isRecord(team)) return false;
+    return typeof team.team_id === "string"
+      && team.team_id.length > 0
+      && typeof team.team_name === "string"
+      && Array.isArray(team.agents)
+      && team.agents.every((agent) => isRecord(agent)
+        && typeof agent.agent_id === "string"
+        && agent.agent_id.length > 0
+        && typeof agent.agent_name === "string"
+        && isOptionalString(agent.description))
+      && Array.isArray(team.tasks)
+      && team.tasks.every((task) => isRecord(task)
+        && typeof task.task_id === "string"
+        && task.task_id.length > 0
+        && typeof task.task_name === "string"
+        && (task.isDefault === undefined || typeof task.isDefault === "boolean"));
+  });
+}
+
+/** Relaxed parser used only for an identity-owned pre-v2 legacy row. */
+export function isLegacyPersistedSessionInitState(
+  value: unknown,
+): value is SessionInitState {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const state = value as Record<string, unknown>;
   return isSessionInitStatus(state.status)
@@ -126,6 +214,116 @@ export function isPersistedSessionInitState(value: unknown): value is SessionIni
       || (typeof state.sessionInfo === "object" && !Array.isArray(state.sessionInfo)))
     && (state.bypassed === undefined || typeof state.bypassed === "boolean")
     && (state.contextSuppressed === undefined || typeof state.contextSuppressed === "boolean");
+}
+
+/** Strict runtime boundary for canonical v2 state before identity checks. */
+export function isPersistedSessionInitState(value: unknown): value is SessionInitState {
+  if (!isRecord(value)) return false;
+  const state = value;
+  if (
+    !isSessionInitStatus(state.status)
+    || typeof state.keyId !== "string"
+    || state.keyId.length === 0
+    || typeof state.startedAt !== "number"
+    || !Number.isFinite(state.startedAt)
+    || typeof state.attemptCount !== "number"
+    || !Number.isSafeInteger(state.attemptCount)
+    || state.attemptCount < 0
+    || typeof state.userId !== "string"
+    || state.userId.length === 0
+    || (state.bypassed !== undefined && typeof state.bypassed !== "boolean")
+    || (state.contextSuppressed !== undefined && typeof state.contextSuppressed !== "boolean")
+    || !isOptionalId(state.selectedTeamId)
+    || !isOptionalId(state.selectedAgentId)
+    || !isPersistedCachedTeams(state.cachedTeams)
+    || (state.agentPageIndex !== undefined
+      && (typeof state.agentPageIndex !== "number"
+        || !Number.isSafeInteger(state.agentPageIndex)
+        || state.agentPageIndex < 0))
+    || !isPersistedAgentDetail(state.agentDetail)
+    || !isPersistedTaskDetail(state.taskDetail)
+    || (state.identityClaim !== undefined && !isPersistedIdentityClaim(state.identityClaim))
+    || (state.identityClaimPending !== undefined
+      && (!isPersistedIdentityClaimPending(state.identityClaimPending)
+        || !isPersistedIdentityClaim(state.identityClaim)))
+  ) return false;
+
+  if (state.status !== "initialized") {
+    return state.contextSuppressed !== true
+      && state.bypassed !== true
+      && (state.sessionInfo === undefined || state.sessionInfo === null)
+      && (state.agentDetail === undefined || state.agentDetail === null)
+      && (state.taskDetail === undefined || state.taskDetail === null)
+      && state.identityClaim === undefined
+      && state.identityClaimPending === undefined;
+  }
+  if (state.bypassed === true) {
+    return state.sessionInfo === null
+      && state.agentDetail === null
+      && state.taskDetail === null
+      && state.contextSuppressed !== true;
+  }
+  return state.identityClaim === undefined
+    && state.identityClaimPending === undefined
+    && isPersistedSessionInfo(state.sessionInfo);
+}
+
+/**
+ * Normalize the one pre-schema canonical shape that is safe to migrate: an
+ * initialized bypass carrying no injectable session, agent, or task context.
+ */
+export function normalizePersistedSessionInitState(
+  value: unknown,
+): SessionInitState | null {
+  if (isPersistedSessionInitState(value)) return value;
+  if (
+    isRecord(value)
+    && isRecord(value.sessionInfo)
+    && typeof value.sessionInfo.user_key === "string"
+  ) {
+    const { user_key: _credential, ...safeSessionInfo } = value.sessionInfo;
+    const safeState = { ...value, sessionInfo: safeSessionInfo };
+    if (isPersistedSessionInitState(safeState)) return safeState;
+  }
+  if (!isLegacyPersistedSessionInitState(value)) return null;
+  const state = value as SessionInitState;
+  if (
+    state.status !== "initialized"
+    || state.bypassed !== true
+    || typeof state.keyId !== "string"
+    || state.keyId.length === 0
+    || typeof state.userId !== "string"
+    || state.userId.length === 0
+    || (state.sessionInfo !== undefined && state.sessionInfo !== null)
+    || (state.agentDetail !== undefined && state.agentDetail !== null)
+    || (state.taskDetail !== undefined && state.taskDetail !== null)
+    || state.contextSuppressed === true
+    || !isOptionalId(state.selectedTeamId)
+    || !isOptionalId(state.selectedAgentId)
+    || !isPersistedCachedTeams(state.cachedTeams)
+    || (state.agentPageIndex !== undefined
+      && (typeof state.agentPageIndex !== "number"
+        || !Number.isSafeInteger(state.agentPageIndex)
+        || state.agentPageIndex < 0))
+    || (state.identityClaim !== undefined && !isPersistedIdentityClaim(state.identityClaim))
+    || (state.identityClaimPending !== undefined
+      && (!isPersistedIdentityClaimPending(state.identityClaimPending)
+        || !isPersistedIdentityClaim(state.identityClaim)))
+  ) return null;
+  return {
+    ...state,
+    startedAt: typeof state.startedAt === "number" && Number.isFinite(state.startedAt)
+      ? state.startedAt
+      : 0,
+    attemptCount: typeof state.attemptCount === "number"
+      && Number.isSafeInteger(state.attemptCount)
+      && state.attemptCount >= 0
+      ? state.attemptCount
+      : 0,
+    sessionInfo: null,
+    agentDetail: null,
+    taskDetail: null,
+  };
 }
 
 /**
