@@ -540,6 +540,12 @@ describe("session cache identity isolation", () => {
       keyId: VICTIM.sessionId,
       userId: VICTIM.userId,
     });
+    await expect(store.getOrRecover(key, identity, {})).resolves.toMatchObject({
+      status: "initialized",
+      bypassed: true,
+      keyId: VICTIM.sessionId,
+      userId: VICTIM.userId,
+    });
     expect(touchLastSeen).toHaveBeenCalledTimes(1);
     expect(putBinding).toHaveBeenCalledWith(
       VICTIM.spaceId,
@@ -548,6 +554,41 @@ describe("session cache identity isolation", () => {
       VICTIM.sessionId,
       expect.objectContaining({ outcome: "bypassed", userId: VICTIM.userId }),
     );
+  });
+
+  it("recovers a legacy bypass state from L2a after restart", async () => {
+    let persistedState: SessionInitState | null = null;
+    const repo: SessionRepo = {
+      upsert: async (_spaceId, _userId, _source, _sessionId, state) => {
+        persistedState = state;
+      },
+      getBySessionId: async () => persistedState,
+      deleteBySessionId: () => undefined,
+      loadAllInitialized: async () => [],
+    };
+    const bindingRepo: BindingRepo = {
+      getBinding: async () => ({ outcome: "bypassed" }),
+      putBinding: async () => undefined,
+      deleteBinding: async () => undefined,
+      touchLastSeen: async () => undefined,
+    };
+    const identity = victimIdentity();
+    const key = sessionStoreKey(identity);
+    const firstStore = new SessionStore(30 * 60 * 1_000, repo, bindingRepo);
+
+    await expect(firstStore.getOrRecover(key, identity, {})).resolves.toMatchObject({
+      status: "initialized",
+      bypassed: true,
+    });
+    expect(persistedState).toMatchObject({ bypassed: true });
+
+    const restartedStore = new SessionStore(30 * 60 * 1_000, repo, bindingRepo);
+    await expect(restartedStore.getOrRecover(key, identity, {})).resolves.toMatchObject({
+      status: "initialized",
+      bypassed: true,
+      keyId: VICTIM.sessionId,
+      userId: VICTIM.userId,
+    });
   });
 
   it.each([

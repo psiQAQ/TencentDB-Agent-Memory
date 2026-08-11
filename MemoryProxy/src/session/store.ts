@@ -114,9 +114,16 @@ export function persistedStateMatchesIdentity(
   const storedTeamId = session?.team_id ?? state.selectedTeamId;
   const storedAgentId = session?.agent_id ?? state.selectedAgentId ?? state.agentDetail?.id;
   const storedTaskId = session?.task_id ?? state.taskDetail?.id;
-  return claimedIdentityMatchesStored(identity.teamId, storedTeamId)
-    && claimedIdentityMatchesStored(identity.agentId, storedAgentId)
-    && claimedIdentityMatchesStored(identity.taskId, storedTaskId);
+  // A legacy bypass state has no injectable team/agent/task context. Its
+  // authenticated user/space/source/session tuple remains strict, while a
+  // missing optional value is compatible with the same caller claims used to
+  // accept its binding. Initialized states must still prove every claim.
+  const optionalClaimMatches = state.bypassed
+    ? compatibleOptionalIdentity
+    : claimedIdentityMatchesStored;
+  return optionalClaimMatches(identity.teamId, storedTeamId)
+    && optionalClaimMatches(identity.agentId, storedAgentId)
+    && optionalClaimMatches(identity.taskId, storedTaskId);
 }
 
 function bindingMatchesIdentity(binding: SessionBinding, identity: SessionIdentity): boolean {
