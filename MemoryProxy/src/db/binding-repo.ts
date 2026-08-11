@@ -50,7 +50,7 @@ export interface BindingRepo {
     agentSource: string,
     sessionId: string,
     binding: SessionBinding,
-  ): Promise<void>;
+  ): Promise<boolean>;
   deleteBinding(
     spaceId: string,
     userId: string,
@@ -154,7 +154,7 @@ export class RedisBindingRepo implements BindingRepo {
     agentSource: string,
     sessionId: string,
     binding: SessionBinding,
-  ): Promise<void> {
+  ): Promise<boolean> {
     const now = Date.now().toString();
     try {
       const fields: Record<string, string> = {
@@ -168,13 +168,15 @@ export class RedisBindingRepo implements BindingRepo {
       if (binding.taskId) fields.task_id = binding.taskId;
 
       const key = redisKey(spaceId, userId, agentSource, sessionId);
-      await this.redis
+      const results = await this.redis
         .multi()
         .hset(key, fields)
         .expire(key, this.bindingTtlSeconds)
         .exec();
+      return results !== null && results.every(([error]) => error === null);
     } catch {
       /* ignore */
+      return false;
     }
   }
 
@@ -230,7 +232,7 @@ export class NullBindingRepo implements BindingRepo {
     _agentSource: string,
     _sessionId: string,
     _binding: SessionBinding,
-  ): Promise<void> {}
+  ): Promise<boolean> { return false; }
   async deleteBinding(
     _spaceId: string,
     _userId: string,

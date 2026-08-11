@@ -334,6 +334,14 @@ export class SessionStore {
     return generation;
   }
 
+  private isCurrentState(
+    keyId: string,
+    generation: number,
+    state: SessionInitState,
+  ): boolean {
+    return this.stateGenerations.get(keyId) === generation && this.states.get(keyId) === state;
+  }
+
   private removeState(keyId: string, expected?: SessionInitState): boolean {
     const current = this.states.get(keyId);
     if (expected && current !== expected) return false;
@@ -462,7 +470,7 @@ export class SessionStore {
     const normalizedState = id
       ? { ...credentialSafeState, keyId: id.sessionId, userId: id.userId }
       : credentialSafeState;
-    this.commitState(keyId, normalizedState);
+    const writeGeneration = this.commitState(keyId, normalizedState);
     if (!id) {
       // No identity bound → this keyId is L1-only (anonymous session, tests
       // that bypass bind, etc.). Skip repo/binding persistence rather than
@@ -490,21 +498,22 @@ export class SessionStore {
     // Serialize every state-backed durable write for this full identity. L1 is
     // still updated synchronously, while L2 observes the same invocation order.
     await this.enqueuePersistence(keyId, async () => {
+      if (!this.isCurrentState(keyId, writeGeneration, normalizedState)) return;
       let durableIdentity = id!;
       if (this.repo) {
         let persisted = false;
         try {
-          await this.repo.upsert(
+          persisted = await this.repo.upsert(
             spaceOf(durableIdentity),
             durableIdentity.userId,
             durableIdentity.agentSource,
             durableIdentity.sessionId,
             normalizedState,
           );
-          persisted = true;
         } catch {
           console.warn("[session] L2a upsert failed");
         }
+        if (!this.isCurrentState(keyId, writeGeneration, normalizedState)) return;
         if (persisted) {
           durableIdentity = this.claimIdentity(keyId, durableIdentity, "persisted");
         }
@@ -512,18 +521,20 @@ export class SessionStore {
       if (binding && this.bindingRepo) {
         let persisted = false;
         try {
-          await this.bindingRepo.putBinding(
+          persisted = await this.bindingRepo.putBinding(
             spaceOf(durableIdentity),
             durableIdentity.userId,
             durableIdentity.agentSource,
             durableIdentity.sessionId,
             binding,
           );
-          persisted = true;
         } catch {
           console.warn("[session] L2b binding write failed");
         }
-        if (persisted) this.claimIdentity(keyId, durableIdentity, "persisted");
+        if (
+          persisted
+          && this.isCurrentState(keyId, writeGeneration, normalizedState)
+        ) this.claimIdentity(keyId, durableIdentity, "persisted");
       }
     });
   }
@@ -977,7 +988,7 @@ export class SessionStore {
           description: agentR.value.description ?? undefined,
           prompt: agentR.value.prompt ?? undefined,
         };
-      }
+      } else if (binding.agentId) agentNotFound = true;
     } else {
       if (isNotFound(agentR.reason)) agentNotFound = true;
       else anyKernelError = true;
@@ -989,7 +1000,7 @@ export class SessionStore {
           name: taskR.value.title,
           description: taskR.value.description ?? undefined,
         };
-      }
+      } else if (binding.taskId) taskNotFound = true;
     } else {
       if (isNotFound(taskR.reason)) taskNotFound = true;
       else anyKernelError = true;
@@ -997,16 +1008,9 @@ export class SessionStore {
 
     // Step 4.3: dispatch
     if (agentNotFound) {
-      console.log("[session-recover] session=<redacted> agent not found, deleting binding");
-      const beforeBindingDelete = this.snapshotState(keyId);
-      await this.enqueuePersistence(keyId, async () => {
-        await this.bindingRepo?.deleteBinding(
-          spaceOf(claimed), claimed.userId, claimed.agentSource, claimed.sessionId,
-        );
-      });
-      const stateAfterBindingDelete = this.stateAfterAwait(keyId, beforeBindingDelete, claimed);
-      if (stateAfterBindingDelete.changed) return stateAfterBindingDelete.state;
-      return undefined;
+      console.log("[session-recover] session=<redacted> agent not found, retaining identity without context");
+      agentDetail = null;
+      taskDetail = null;
     }
     if (anyKernelError) {
       console.warn("[session-recover] session=<redacted> kernel unavailable, one-shot bypass");
@@ -1018,21 +1022,7 @@ export class SessionStore {
       };
     }
     if (taskNotFound) {
-      console.log("[session-recover] session=<redacted> task not found, keeping agent");
-      // Update binding to drop taskId
-      const beforeBindingUpdate = this.snapshotState(keyId);
-      await this.enqueuePersistence(keyId, async () => {
-        await this.bindingRepo?.putBinding(
-          spaceOf(claimed),
-          claimed.userId,
-          claimed.agentSource,
-          claimed.sessionId,
-          { ...binding, taskId: undefined },
-        );
-      });
-      const stateAfterBindingUpdate = this.stateAfterAwait(keyId, beforeBindingUpdate, claimed);
-      if (stateAfterBindingUpdate.changed) return stateAfterBindingUpdate.state;
-      claimed = this.claimIdentity(keyId, claimed, "persisted");
+      console.log("[session-recover] session=<redacted> task not found, retaining identity without task context");
       taskDetail = null;
     }
 
@@ -1042,7 +1032,7 @@ export class SessionStore {
       user_id: binding.userId || claimed.userId,
       team_id: binding.teamId || "",
       agent_id: binding.agentId || "",
-      task_id: taskDetail ? binding.taskId : undefined,
+      task_id: binding.taskId,
       space_id: claimed.spaceId,
       created_at: new Date().toISOString(),
     };

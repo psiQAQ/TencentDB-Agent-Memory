@@ -46,7 +46,7 @@ function legacyState(): SessionInitState {
 
 function repo(overrides: Partial<SessionRepo> = {}): SessionRepo {
   return {
-    upsert: vi.fn(async () => {}),
+    upsert: vi.fn(async () => true),
     getBySessionId: vi.fn(async () => null),
     deleteBySessionId: vi.fn(),
     loadAllInitialized: vi.fn(async () => []),

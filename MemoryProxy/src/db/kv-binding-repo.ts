@@ -77,9 +77,9 @@ export class KvBindingRepo implements BindingRepo {
     agentSource: string,
     sessionId: string,
     binding: SessionBinding,
-  ): Promise<void> {
+  ): Promise<boolean> {
     const key = keyOf(spaceId, userId, agentSource, sessionId);
-    await withPerKeyLock(lockKey(spaceId, userId, agentSource, sessionId), async () => {
+    return withPerKeyLock(lockKey(spaceId, userId, agentSource, sessionId), async () => {
       const now = Date.now();
       const record: StoredBinding = {
         outcome: binding.outcome,
@@ -93,13 +93,17 @@ export class KvBindingRepo implements BindingRepo {
       // Preserve `created_at` on overwrite (与 Redis HSET 语义等价：不会重置 created_at)
       const existing = await this.storage.getJSON<StoredBinding>(key).catch(() => null);
       if (existing?.created_at) record.created_at = existing.created_at;
-      await this.storage.putJSON(key, record).catch((err: any) => {
+      try {
+        await this.storage.putJSON(key, record);
+        return true;
+      } catch (err: any) {
         // 见 KvSessionRepo.upsert 的日志说明：失败必打日志，成功不打
         console.warn(
           `[kv-binding] putBinding FAIL key=${key}: ` +
             `${err?.statusCode ?? ""} ${err?.code ?? ""} ${err?.message ?? String(err)}`,
         );
-      });
+        return false;
+      }
     });
   }
 

@@ -65,7 +65,7 @@ interface FakeTransaction {
     ...rest: string[]
   ): FakeTransaction;
   expire(key: string, ttl: number): FakeTransaction;
-  exec(): Promise<unknown[]>;
+  exec(): Promise<Array<[Error | null, unknown]>>;
 }
 
 class FakeRedis {
@@ -177,12 +177,12 @@ class FakeRedis {
         return transaction;
       },
       exec: async () => {
-        const results: unknown[] = [];
+        const results: Array<[Error | null, unknown]> = [];
         for (const operation of operations) {
           if (operation.kind === "hset") {
-            results.push(await this.hset(...operation.args));
+            results.push([null, await this.hset(...operation.args)]);
           } else {
-            results.push(await this.expire(...operation.args));
+            results.push([null, await this.expire(...operation.args)]);
           }
         }
         return results;
@@ -510,6 +510,37 @@ describe("collision-safe persisted session identity keys", () => {
       .toThrow("invalid Redis binding TTL");
     expect(() => new RedisHookCacheRepo(redis as never, 1.5))
       .toThrow("invalid Redis hook TTL");
+  });
+
+  it("reports Redis session and binding write durability explicitly", async () => {
+    const healthyRedis = new FakeRedis();
+    const sessions = new RedisSessionRepo(healthyRedis as never);
+    const bindings = new RedisBindingRepo(healthyRedis as never);
+    expect(await sessions.upsert(...FIRST, state(FIRST, "durable-session"))).toBe(true);
+    expect(await bindings.putBinding(...FIRST, {
+      outcome: "initialized",
+      userId: FIRST[1],
+      agentId: "durable-agent",
+    })).toBe(true);
+
+    const failedSessionRedis = {
+      setex: async () => { throw new Error("handled-session-write-failure"); },
+    };
+    expect(await new RedisSessionRepo(failedSessionRedis as never)
+      .upsert(...FIRST, state(FIRST, "failed-session"))).toBe(false);
+
+    let failedTransaction!: FakeTransaction;
+    failedTransaction = {
+      hset: () => failedTransaction,
+      expire: () => failedTransaction,
+      exec: async () => [[new Error("handled-binding-write-failure"), null], [null, 1]],
+    };
+    const failedBindingRedis = { multi: () => failedTransaction };
+    expect(await new RedisBindingRepo(failedBindingRedis as never).putBinding(...FIRST, {
+      outcome: "initialized",
+      userId: FIRST[1],
+      agentId: "failed-agent",
+    })).toBe(false);
   });
 
   it("bounds Redis binding and hook legacy reads, TTL, touch, and clear", async () => {

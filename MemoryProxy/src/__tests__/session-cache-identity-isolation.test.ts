@@ -45,7 +45,7 @@ const OUTSIDER = {
 const VICTIM_CONTEXT = "victim_context_must_not_cross_identity";
 
 const NULL_SESSION_REPO: SessionRepo = {
-  upsert: async () => undefined,
+  upsert: async () => false,
   getBySessionId: async () => null,
   deleteBySessionId: () => undefined,
   loadAllInitialized: async () => [],
@@ -434,6 +434,7 @@ describe("session cache identity isolation", () => {
     const repo: SessionRepo = {
       upsert: vi.fn(async (_space, _user, _source, _session, state) => {
         persisted = state;
+        return true;
       }),
       getBySessionId: vi.fn(async () => persisted),
       deleteBySessionId,
@@ -449,7 +450,7 @@ describe("session cache identity isolation", () => {
     const touchLastSeen = vi.fn(async () => undefined);
     const bindingRepo: BindingRepo = {
       getBinding,
-      putBinding: vi.fn(async () => undefined),
+      putBinding: vi.fn(async () => true),
       deleteBinding: vi.fn(async () => undefined),
       touchLastSeen,
     };
@@ -484,7 +485,7 @@ describe("session cache identity isolation", () => {
     const identity = victimIdentity();
     const rejectedIdentity = { ...identity, taskId: OUTSIDER.taskId };
     const key = sessionStoreKey(identity);
-    const upsert = vi.fn(async () => undefined);
+    const upsert = vi.fn(async () => true);
     const deleteBySessionId = vi.fn(() => undefined);
     const getAgent = vi.fn();
     const getTask = vi.fn();
@@ -525,6 +526,7 @@ describe("session cache identity isolation", () => {
     const repo: SessionRepo = {
       upsert: vi.fn(async (_space, _user, _source, _session, state) => {
         persisted = state;
+        return true;
       }),
       getBySessionId: vi.fn(async () => persisted),
       deleteBySessionId,
@@ -540,7 +542,7 @@ describe("session cache identity isolation", () => {
     const touchLastSeen = vi.fn(async () => undefined);
     const bindingRepo: BindingRepo = {
       getBinding: vi.fn(async () => binding),
-      putBinding: vi.fn(async () => undefined),
+      putBinding: vi.fn(async () => true),
       deleteBinding: vi.fn(async () => undefined),
       touchLastSeen,
     };
@@ -574,6 +576,7 @@ describe("session cache identity isolation", () => {
     const repo: SessionRepo = {
       upsert: vi.fn(async (_space, _user, _source, _session, state) => {
         persisted = state;
+        return true;
       }),
       getBySessionId: vi.fn(async () => persisted),
       deleteBySessionId,
@@ -589,7 +592,7 @@ describe("session cache identity isolation", () => {
         await bindingReleased;
         return null;
       }),
-      putBinding: vi.fn(async () => undefined),
+      putBinding: vi.fn(async () => true),
       deleteBinding: vi.fn(async () => undefined),
       touchLastSeen: vi.fn(async () => undefined),
     };
@@ -613,7 +616,7 @@ describe("session cache identity isolation", () => {
     const readReleased = new Promise<void>((resolve) => { releaseRead = resolve; });
     let signalRead!: () => void;
     const readStarted = new Promise<void>((resolve) => { signalRead = resolve; });
-    const upsert = vi.fn(async () => undefined);
+    const upsert = vi.fn(async () => true);
     const repo: SessionRepo = {
       upsert,
       getBySessionId: vi.fn(async () => {
@@ -691,7 +694,7 @@ describe("session cache identity isolation", () => {
       state: SessionInitState;
     }> = [];
     const repo: SessionRepo = {
-      upsert: vi.fn(async () => undefined),
+      upsert: vi.fn(async () => true),
       getBySessionId: vi.fn(async () => null),
       deleteBySessionId,
       loadAllInitialized: async () => hydratedRows,
@@ -838,7 +841,7 @@ describe("session cache identity isolation", () => {
       agentDetail: { id: secondIdentity.agentId!, name: "Second Agent" },
       taskDetail: { id: secondIdentity.taskId!, name: "Second Task" },
     };
-    const upsert = vi.fn(async () => undefined);
+    const upsert = vi.fn(async () => true);
     const repo: SessionRepo = {
       upsert,
       getBySessionId: vi.fn(async (_space, userId) => userId === secondIdentity.userId
@@ -884,12 +887,12 @@ describe("session cache identity isolation", () => {
         agent_id: secondIdentity.agentId!,
         task_id: secondIdentity.taskId,
       },
+      agentDetail: { id: secondIdentity.agentId!, name: "Second Agent" },
+      taskDetail: { id: secondIdentity.taskId!, name: "Second Task" },
     };
-    let rejectWrites = true;
     const repo: SessionRepo = {
-      upsert: vi.fn(async () => {
-        if (rejectWrites) throw new Error("durable-write-rejected");
-      }),
+      // A real backend reports a handled write failure without throwing.
+      upsert: vi.fn(async () => false),
       getBySessionId: vi.fn(async (_space, userId) => userId === secondIdentity.userId
         ? secondState
         : null),
@@ -902,13 +905,54 @@ describe("session cache identity isolation", () => {
 
     store.bind(firstKey, firstIdentity);
     await store.set(firstKey, victimState());
-    rejectWrites = false;
 
     await expect(store.getOrRecover(secondKey, secondIdentity, {}))
       .rejects.toMatchObject({ name: "SessionIdentityConflictError" });
     expect(store.getBoundIdentity(firstKey)).toEqual(firstIdentity);
     expect(store.getBoundIdentity(secondKey)).toBeUndefined();
     expect(store.get(firstKey)).toMatchObject({ userId: firstIdentity.userId });
+    expect(store.get(secondKey)).toBeUndefined();
+  });
+
+  it("does not promote a raw owner when its binding write reports failure", async () => {
+    const firstIdentity = victimIdentity();
+    const secondIdentity: FullSessionIdentity = {
+      userId: OUTSIDER.userId,
+      agentSource: VICTIM.source,
+      sessionId: VICTIM.sessionId,
+      spaceId: OUTSIDER.spaceId,
+      teamId: OUTSIDER.teamId,
+      agentId: OUTSIDER.agentId,
+      taskId: OUTSIDER.taskId,
+    };
+    const bindingRepo: BindingRepo = {
+      getBinding: vi.fn(async (_space, userId): Promise<SessionBinding | null> => (
+        userId === secondIdentity.userId
+          ? {
+              outcome: "initialized",
+              userId: secondIdentity.userId,
+              teamId: secondIdentity.teamId,
+              agentId: secondIdentity.agentId,
+              taskId: secondIdentity.taskId,
+            }
+          : null
+      )),
+      // A real backend reports a handled write failure without throwing.
+      putBinding: vi.fn(async () => false),
+      deleteBinding: vi.fn(async () => undefined),
+      touchLastSeen: vi.fn(async () => undefined),
+    };
+    const store = new SessionStore(30 * 60 * 1_000, undefined, bindingRepo);
+    const firstKey = sessionStoreKey(firstIdentity);
+    const secondKey = sessionStoreKey(secondIdentity);
+
+    store.bind(firstKey, firstIdentity);
+    await store.set(firstKey, victimState());
+
+    await expect(store.getOrRecover(secondKey, secondIdentity, {}))
+      .rejects.toMatchObject({ name: "SessionIdentityConflictError" });
+    expect(store.getBoundIdentity(firstKey)).toEqual(firstIdentity);
+    expect(store.getBoundIdentity(secondKey)).toBeUndefined();
     expect(store.get(secondKey)).toBeUndefined();
   });
 
@@ -920,7 +964,7 @@ describe("session cache identity isolation", () => {
     const identity = victimIdentity();
     const key = sessionStoreKey(identity);
     const touchLastSeen = vi.fn(async () => undefined);
-    const putBinding = vi.fn(async () => undefined);
+    const putBinding = vi.fn(async () => true);
     const bindingRepo: BindingRepo = {
       getBinding: vi.fn(async (): Promise<SessionBinding> => ({
         outcome: "initialized",
@@ -962,60 +1006,108 @@ describe("session cache identity isolation", () => {
     expect(putBinding).not.toHaveBeenCalled();
   });
 
-  it("keeps a newer state installed while a stale task-binding update waits", async () => {
-    let signalTaskDrop!: () => void;
-    let releaseTaskDrop!: () => void;
-    const taskDropStarted = new Promise<void>((resolve) => { signalTaskDrop = resolve; });
-    const taskDropReleased = new Promise<void>((resolve) => { releaseTaskDrop = resolve; });
+  it("preserves a missing agent identity across L1 and restart recovery", async () => {
     const identity = victimIdentity();
     const key = sessionStoreKey(identity);
-    const touchLastSeen = vi.fn(async () => undefined);
-    let persistedBinding: SessionBinding | null = null;
+    let persistedBinding: SessionBinding | null = {
+      outcome: "initialized",
+      userId: identity.userId,
+      teamId: identity.teamId,
+      agentId: identity.agentId,
+      taskId: identity.taskId,
+    };
     const putBinding = vi.fn(async (_space, _user, _source, _session, binding: SessionBinding) => {
-      if (!binding.taskId) {
-        signalTaskDrop();
-        await taskDropReleased;
-      }
       persistedBinding = binding;
+      return true;
     });
+    const deleteBinding = vi.fn(async () => { persistedBinding = null; });
     const bindingRepo: BindingRepo = {
-      getBinding: vi.fn(async (): Promise<SessionBinding> => ({
+      getBinding: vi.fn(async () => persistedBinding),
+      putBinding,
+      deleteBinding,
+      touchLastSeen: vi.fn(async () => undefined),
+    };
+    const metadataClient = {
+      getAgent: vi.fn(async () => { throw { notFound: true }; }),
+      getTask: vi.fn(async () => ({ task_id: identity.taskId!, title: "Recovered Task" })),
+    };
+    const store = new SessionStore(30 * 60 * 1_000, undefined, bindingRepo);
+
+    const first = await store.getOrRecover(key, identity, {
+      metadataClient: metadataClient as never,
+    });
+    expect(first).toMatchObject({
+      sessionInfo: { agent_id: identity.agentId, task_id: identity.taskId },
+      agentDetail: null,
+    });
+    await expect(store.getOrRecover(key, identity, {})).resolves.toBe(first);
+    expect(deleteBinding).not.toHaveBeenCalled();
+    expect(putBinding).not.toHaveBeenCalled();
+    expect(() => store.bind(key, { ...identity, agentId: OUTSIDER.agentId }))
+      .toThrowError(expect.objectContaining({ name: "SessionIdentityConflictError" }));
+
+    const restarted = new SessionStore(30 * 60 * 1_000, undefined, bindingRepo);
+    await expect(restarted.getOrRecover(key, identity, {
+      metadataClient: metadataClient as never,
+    })).resolves.toMatchObject({
+      sessionInfo: { agent_id: identity.agentId, task_id: identity.taskId },
+      agentDetail: null,
+    });
+  });
+
+  it.each(["not-found", "null"] as const)(
+    "preserves a missing task identity across L1 and restart recovery (%s)",
+    async (taskResult) => {
+      const identity = victimIdentity();
+      const key = sessionStoreKey(identity);
+      let persistedBinding: SessionBinding = {
         outcome: "initialized",
         userId: identity.userId,
         teamId: identity.teamId,
         agentId: identity.agentId,
         taskId: identity.taskId,
-      })),
-      putBinding,
-      deleteBinding: vi.fn(async () => undefined),
-      touchLastSeen,
-    };
-    const metadataClient = {
-      getAgent: vi.fn(async () => ({ agent_id: identity.agentId!, name: "Recovered Agent" })),
-      getTask: vi.fn(async () => { throw { notFound: true }; }),
-    };
-    const store = new SessionStore(30 * 60 * 1_000, undefined, bindingRepo);
+      };
+      const putBinding = vi.fn(async (_space, _user, _source, _session, binding: SessionBinding) => {
+        persistedBinding = binding;
+        return true;
+      });
+      const bindingRepo: BindingRepo = {
+        getBinding: vi.fn(async () => persistedBinding),
+        putBinding,
+        deleteBinding: vi.fn(async () => undefined),
+        touchLastSeen: vi.fn(async () => undefined),
+      };
+      const metadataClient = {
+        getAgent: vi.fn(async () => ({ agent_id: identity.agentId!, name: "Recovered Agent" })),
+        getTask: vi.fn(async () => {
+          if (taskResult === "not-found") throw { notFound: true };
+          return null;
+        }),
+      };
+      const store = new SessionStore(30 * 60 * 1_000, undefined, bindingRepo);
 
-    const recovery = store.getOrRecover(key, identity, { metadataClient: metadataClient as never });
-    await taskDropStarted;
-    const newerState: SessionInitState = {
-      ...victimState(),
-      agentDetail: { id: identity.agentId!, name: "Newer Agent" },
-      taskDetail: { id: identity.taskId!, name: "Newer Task" },
-    };
-    const newerWrite = store.set(key, newerState);
-    await Promise.resolve();
-    const installed = store.get(key);
-    releaseTaskDrop();
+      const first = await store.getOrRecover(key, identity, {
+        metadataClient: metadataClient as never,
+      });
+      expect(first).toMatchObject({
+        sessionInfo: { agent_id: identity.agentId, task_id: identity.taskId },
+        agentDetail: { id: identity.agentId },
+        taskDetail: null,
+      });
+      await expect(store.getOrRecover(key, identity, {})).resolves.toBe(first);
+      expect(putBinding).not.toHaveBeenCalled();
+      expect(() => store.bind(key, { ...identity, taskId: OUTSIDER.taskId }))
+        .toThrowError(expect.objectContaining({ name: "SessionIdentityConflictError" }));
 
-    await expect(recovery).resolves.toBe(installed);
-    await newerWrite;
-    expect(store.get(key)).toBe(installed);
-    expect(store.getBoundIdentity(key)).toEqual(identity);
-    expect(touchLastSeen).toHaveBeenCalledTimes(1);
-    expect(putBinding).toHaveBeenCalledTimes(2);
-    expect(persistedBinding).toMatchObject({ taskId: identity.taskId });
-  });
+      const restarted = new SessionStore(30 * 60 * 1_000, undefined, bindingRepo);
+      await expect(restarted.getOrRecover(key, identity, {
+        metadataClient: metadataClient as never,
+      })).resolves.toMatchObject({
+        sessionInfo: { agent_id: identity.agentId, task_id: identity.taskId },
+        taskDetail: null,
+      });
+    },
+  );
 
   it("serializes concurrent set persistence so the latest L1 state wins L2", async () => {
     let signalOldWrite!: () => void;
@@ -1040,6 +1132,7 @@ describe("session cache identity isolation", () => {
           await oldWriteReleased;
         }
         durable.state = state;
+        return true;
       }),
       getBySessionId: vi.fn(async () => durable.state),
       deleteBySessionId: vi.fn(() => undefined),
@@ -1076,6 +1169,7 @@ describe("session cache identity isolation", () => {
     const durable = { state: null as SessionInitState | null };
     const upsert = vi.fn(async (_space, _user, _source, _session, state) => {
       durable.state = state;
+      return true;
     });
     const repo: SessionRepo = {
       upsert,
@@ -1091,7 +1185,7 @@ describe("session cache identity isolation", () => {
     const deleteBinding = vi.fn(async () => undefined);
     const bindingRepo: BindingRepo = {
       getBinding: vi.fn(async () => null),
-      putBinding: vi.fn(async () => undefined),
+      putBinding: vi.fn(async () => true),
       deleteBinding,
       touchLastSeen: vi.fn(async () => undefined),
     };
@@ -1110,6 +1204,51 @@ describe("session cache identity isolation", () => {
     await newerWrite;
     expect(deleteBinding).toHaveBeenCalledTimes(1);
     expect(durable.state?.agentDetail?.name).toBe("Newer Agent");
+  });
+
+  it("does not restore a raw owner after delete overtakes an in-flight set", async () => {
+    let signalWrite!: () => void;
+    let releaseWrite!: () => void;
+    let signalDeleteFinished!: () => void;
+    const writeStarted = new Promise<void>((resolve) => { signalWrite = resolve; });
+    const writeReleased = new Promise<void>((resolve) => { releaseWrite = resolve; });
+    const deleteFinished = new Promise<void>((resolve) => { signalDeleteFinished = resolve; });
+    const firstIdentity = victimIdentity();
+    const secondIdentity: FullSessionIdentity = {
+      userId: OUTSIDER.userId,
+      agentSource: firstIdentity.agentSource,
+      sessionId: firstIdentity.sessionId,
+      spaceId: OUTSIDER.spaceId,
+      teamId: OUTSIDER.teamId,
+      agentId: OUTSIDER.agentId,
+      taskId: OUTSIDER.taskId,
+    };
+    const repo: SessionRepo = {
+      upsert: vi.fn(async () => {
+        signalWrite();
+        await writeReleased;
+        return true;
+      }),
+      getBySessionId: vi.fn(async () => null),
+      deleteBySessionId: vi.fn(async () => { signalDeleteFinished(); }),
+      loadAllInitialized: async () => [],
+    };
+    const store = new SessionStore(30 * 60 * 1_000, repo);
+    const firstKey = sessionStoreKey(firstIdentity);
+    const secondKey = sessionStoreKey(secondIdentity);
+    store.bind(firstKey, firstIdentity);
+
+    const write = store.set(firstKey, victimState());
+    await writeStarted;
+    store.delete(firstKey);
+    expect(store.get(firstKey)).toBeUndefined();
+    releaseWrite();
+    await write;
+    await deleteFinished;
+
+    await expect(store.getOrRecover(secondKey, secondIdentity, {})).resolves.toBeUndefined();
+    expect(store.getBoundIdentity(secondKey)).toEqual(secondIdentity);
+    expect(store.get(secondKey)).toBeUndefined();
   });
 
   it.each(["before-wait", "after-wait"] as const)(
@@ -1136,6 +1275,7 @@ describe("session cache identity isolation", () => {
             await oldWriteReleased;
           }
           if (!staleRebuild || oldWriteOrder === "after-wait") durable.state = state;
+          return true;
         }),
         getBySessionId: vi.fn(async () => null),
         deleteBySessionId: vi.fn(() => undefined),
@@ -1149,7 +1289,7 @@ describe("session cache identity isolation", () => {
           agentId: identity.agentId,
           taskId: identity.taskId,
         })),
-        putBinding: vi.fn(async () => undefined),
+        putBinding: vi.fn(async () => true),
         deleteBinding: vi.fn(async () => undefined),
         touchLastSeen: vi.fn(async () => undefined),
       };
@@ -1200,7 +1340,7 @@ describe("session cache identity isolation", () => {
             agentId: OUTSIDER.agentId,
             taskId: OUTSIDER.taskId,
           },
-      putBinding: async () => undefined,
+      putBinding: async () => true,
       deleteBinding: async () => undefined,
       touchLastSeen: async () => undefined,
     };
@@ -1273,7 +1413,7 @@ describe("session cache identity isolation", () => {
     const firstStarted = new Promise<void>((resolve) => { signalFirst = resolve; });
     const secondStarted = new Promise<void>((resolve) => { signalSecond = resolve; });
     const touchLastSeen = vi.fn(async () => undefined);
-    const putBinding = vi.fn(async () => undefined);
+    const putBinding = vi.fn(async () => true);
     const bindingRepo: BindingRepo = {
       getBinding: vi.fn(async (_space, userId) => {
         if (userId === firstIdentity.userId) {
@@ -1322,7 +1462,7 @@ describe("session cache identity isolation", () => {
     const secondStarted = new Promise<void>((resolve) => { signalSecond = resolve; });
     let bindingRead = 0;
     const touchLastSeen = vi.fn(async () => undefined);
-    const putBinding = vi.fn(async () => undefined);
+    const putBinding = vi.fn(async () => true);
     const bindingRepo: BindingRepo = {
       getBinding: vi.fn(async (): Promise<SessionBinding | null> => {
         const current = bindingRead++;
@@ -1359,7 +1499,7 @@ describe("session cache identity isolation", () => {
 
   it("rejects a mismatched bypass binding before touch or cache write", async () => {
     const touchLastSeen = vi.fn(async () => undefined);
-    const putBinding = vi.fn(async () => undefined);
+    const putBinding = vi.fn(async () => true);
     let binding: SessionBinding = {
       outcome: "bypassed",
       userId: VICTIM.userId,
@@ -1408,7 +1548,7 @@ describe("session cache identity isolation", () => {
 
   it("accepts and rebinds a legacy bypass binding with no embedded identity", async () => {
     const touchLastSeen = vi.fn(async () => undefined);
-    const putBinding = vi.fn(async () => undefined);
+    const putBinding = vi.fn(async () => true);
     const bindingRepo: BindingRepo = {
       getBinding: async () => ({ outcome: "bypassed" }),
       putBinding,
@@ -1461,9 +1601,9 @@ describe("session cache identity isolation", () => {
     const firstStarted = new Promise<void>((resolve) => { signalFirst = resolve; });
     const secondStarted = new Promise<void>((resolve) => { signalSecond = resolve; });
     let bindingRead = 0;
-    const upsert = vi.fn(async () => undefined);
+    const upsert = vi.fn(async () => true);
     const touchLastSeen = vi.fn(async () => undefined);
-    const putBinding = vi.fn(async () => undefined);
+    const putBinding = vi.fn(async () => true);
     const repo: SessionRepo = {
       upsert,
       getBySessionId: vi.fn(async () => null),
@@ -1517,6 +1657,7 @@ describe("session cache identity isolation", () => {
     const repo: SessionRepo = {
       upsert: async (_spaceId, _userId, _source, _sessionId, state) => {
         persistedState = state;
+        return true;
       },
       getBySessionId: async () => persistedState,
       deleteBySessionId: () => undefined,
@@ -1524,7 +1665,7 @@ describe("session cache identity isolation", () => {
     };
     const bindingRepo: BindingRepo = {
       getBinding: async () => ({ outcome: "bypassed" }),
-      putBinding: async () => undefined,
+      putBinding: async () => true,
       deleteBinding: async () => undefined,
       touchLastSeen: async () => undefined,
     };
@@ -1628,7 +1769,7 @@ describe("session cache identity isolation", () => {
         agentId: VICTIM.agentId,
         taskId: VICTIM.taskId,
       }),
-      putBinding: async () => undefined,
+      putBinding: async () => true,
       deleteBinding: async () => undefined,
       touchLastSeen,
     };

@@ -165,7 +165,7 @@ export interface SessionRepo {
    * `tryHistoryScan` 兜底 → bypass → 请求透传 LLM，session 状态机被跳过。
    *
    * 实现细节：写失败不 throw（保留"L1 是权威、L2a 是持久化备份"的降级契约），
-   * 但要 await 完成，因为跨节点场景下 L2a 才是真正的共享状态。
+   * 但必须返回明确 durability result；只有 true 可作为跨 identity owner proof。
    */
   upsert(
     spaceId: string,
@@ -173,7 +173,7 @@ export interface SessionRepo {
     agentSource: string,
     sessionId: string,
     state: SessionInitState,
-  ): Promise<void>;
+  ): Promise<boolean>;
   getBySessionId(
     spaceId: string,
     userId: string,
@@ -198,18 +198,20 @@ class SqliteSessionRepo implements SessionRepo {
     agentSource: string,
     sessionId: string,
     state: SessionInitState,
-  ): Promise<void> {
+  ): Promise<boolean> {
     // better-sqlite3 是同步 API；包 async 只是为了对齐 SessionRepo 契约，
     // 让 store 侧的 await 语义统一（跨节点部署走 KvSessionRepo/RedisSessionRepo
     // 都是真异步）。
     try {
       const row = rowFromState(spaceId, userId, agentSource, sessionId, state);
       this.db.prepare(UPSERT_SQL).run(row);
+      return true;
     } catch (err) {
       console.warn(
         "[session-db] upsert failed:",
         err instanceof Error ? err.message : String(err),
       );
+      return false;
     }
   }
 
@@ -311,7 +313,7 @@ class SqliteSessionRepo implements SessionRepo {
 
 /** Null repo used when SQLite init fails — silently no-ops on writes. */
 class NullSessionRepo implements SessionRepo {
-  async upsert(): Promise<void> {}
+  async upsert(): Promise<boolean> { return false; }
   async getBySessionId(): Promise<SessionInitState | null> {
     return null;
   }

@@ -62,15 +62,17 @@ export class RedisSessionRepo implements SessionRepo {
     agentSource: string,
     sessionId: string,
     state: SessionInitState,
-  ): Promise<void> {
+  ): Promise<boolean> {
     const key = KEY_PREFIX + compositeKey(spaceId, userId, agentSource, sessionId);
     // await write-through：多节点部署下 pod A 关流前 L2a 必须落盘，
     // 否则 pod B turn-2 会 L2a miss → tryHistoryScan bypass 直接透传 LLM。
     // 见 2026-07-13 修复；写失败仍静默降级（L1 依旧是权威 fast path）。
     try {
       await this.redis.setex(key, this.ttl, JSON.stringify(state));
+      return true;
     } catch {
       /* silent — L1 authoritative fast path 仍然生效 */
+      return false;
     }
   }
 

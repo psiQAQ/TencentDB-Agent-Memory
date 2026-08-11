@@ -48,12 +48,13 @@ export class KvSessionRepo implements SessionRepo {
     agentSource: string,
     sessionId: string,
     state: SessionInitState,
-  ): Promise<void> {
+  ): Promise<boolean> {
     // 提前算 key —— assertKeySegment / assertAgentSource 校验会在此同步抛出，
     // 让调用方在装配层就能观测到非法参数（而不是变成静默的 async 失败）。
     const key = mainKey(spaceId, userId, agentSource, sessionId);
     try {
       await this.storage.putJSON(key, state);
+      return true;
     } catch (err) {
       // 静默降级：L1 仍是权威 write-through 目标；L2a 写失败不阻塞主流程。
       const e = err as { statusCode?: number; code?: string; message?: string };
@@ -61,6 +62,7 @@ export class KvSessionRepo implements SessionRepo {
         `[kv-session] upsert FAIL key=${key}: ` +
           `${e?.statusCode ?? ""} ${e?.code ?? ""} ${e?.message ?? String(err)}`,
       );
+      return false;
     }
   }
 
