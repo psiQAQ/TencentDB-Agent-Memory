@@ -15,8 +15,38 @@ import type { AgentAdapter } from "./types.js";
 import { claudeCodeAdapter } from "./claude-code.js";
 import { codebuddyAdapter } from "./codebuddy.js";
 import { defaultAdapter, opencodeAdapter, piAdapter } from "./default.js";
+import {
+  ANTHROPIC_MESSAGE_SOURCES,
+  extractAgentSourceFromPath,
+} from "./anthropic-platform.js";
 
 export type { AgentAdapter, AgentKind, RequestKind } from "./types.js";
+
+export const OPENAI_CHAT_SOURCES = ["codebuddy"] as const;
+export type OpenAIChatSource = (typeof OPENAI_CHAT_SOURCES)[number];
+
+/** Product platforms with an explicit adapter and protocol route binding. */
+export const REGISTERED_AGENT_SOURCES = [
+  ...ANTHROPIC_MESSAGE_SOURCES,
+  ...OPENAI_CHAT_SOURCES,
+] as const;
+
+export function isRegisteredAgentSource(value: string): boolean {
+  return (REGISTERED_AGENT_SOURCES as readonly string[]).includes(value);
+}
+
+export function isOpenAIChatSource(value: string): value is OpenAIChatSource {
+  return (OPENAI_CHAT_SOURCES as readonly string[]).includes(value);
+}
+
+export function getOpenAISourceBindingError(
+  path: string,
+  boundSource?: OpenAIChatSource,
+): "unbound" | "conflict" | null {
+  if (!boundSource) return "unbound";
+  const pathSource = extractAgentSourceFromPath(path);
+  return pathSource && pathSource !== boundSource ? "conflict" : null;
+}
 
 export function resolveAgentAdapter(agentSource: string): AgentAdapter {
   switch (agentSource) {

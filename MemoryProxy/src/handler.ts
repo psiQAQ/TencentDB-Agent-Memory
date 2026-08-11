@@ -55,6 +55,10 @@ import {
   sameOrigin,
 } from "./upstream-headers.js";
 import { SessionIdentityConflictError, sessionStoreKey } from "./session/store.js";
+import {
+  getOpenAISourceBindingError,
+  type OpenAIChatSource,
+} from "./agent-adapters/index.js";
 
 /**
  * Build a per-request TdaiClient. `spaceId` (extracted from the request path
@@ -422,7 +426,24 @@ async function forwardWithRetry(
 export async function handleChatCompletions(
   c: Context,
   config: ProxyConfig,
+  boundAgentSource?: OpenAIChatSource,
 ): Promise<Response> {
+  // The URL route, not a caller header or arbitrary path prefix, binds the
+  // product platform. Reject before auth, body parsing, cache/Core or logs.
+  const sourceBindingError = getOpenAISourceBindingError(c.req.path, boundAgentSource);
+  if (sourceBindingError === "unbound") {
+    return c.json(
+      { error: { type: "not_found_error", message: "Unsupported OpenAI platform route" } },
+      404,
+    );
+  }
+  if (sourceBindingError === "conflict") {
+    return c.json(
+      { error: { type: "invalid_request_error", message: "Platform route binding mismatch" } },
+      400,
+    );
+  }
+  const agentSource = boundAgentSource!;
   const startTime = new Date().toISOString();
   const traceId = uuidv7();
 
@@ -513,12 +534,6 @@ export async function handleChatCompletions(
       toolMessageCount,
     });
   }
-
-  // ── Resolve agent source from URL path (e.g. /claude-code/v1/chat/completions) ──
-  const pathParts = c.req.path.split("/").filter(Boolean);
-  const agentFromPath = pathParts[0] && !["v1", "proxy", "skill-bridge", "memory-bridge"].includes(pathParts[0])
-    ? pathParts[0] : undefined;
-  const agentSource = agentFromPath ?? "claude-code";
 
   // ── Identity inspection ──────────────────────────────────────────────────
   const reqHeaders: Record<string, string> = {};
@@ -899,7 +914,7 @@ export async function handleChatCompletions(
   // upstream.agents[agent] is a single map keyed by agent name — same lookup
   // as anthropicHandler. Empty / missing entry → fall back to upstream.url,
   // preserving legacy behavior for configs that don't declare `agents:` at all.
-  const agentUpstreamEntry = agentFromPath ? config.upstream.agents?.[agentFromPath] : undefined;
+  const agentUpstreamEntry = config.upstream.agents?.[agentSource];
   // Caller credentials terminate at MemoryProxy. URL-only agent entries use
   // the global server key; if no server key exists, forwarding fails closed.
   const credentialOrigin = agentUpstreamEntry?.url ?? config.upstream.url;
@@ -929,7 +944,7 @@ export async function handleChatCompletions(
     // markerOptIn=true (test env): only requests with the `/cost-guard`
     //   segment activate the router; bare paths passthrough.
     useGuard: config.costGuard.markerOptIn ? hasCostGuardMarker(c.req.path) : true,
-    agentName: agentFromPath,
+    agentName: agentSource,
   });
 
   // ── Create pipeline logger ──────────────────────────────────────────────

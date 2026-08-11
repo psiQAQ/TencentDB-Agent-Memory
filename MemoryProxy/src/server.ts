@@ -11,6 +11,7 @@ import { createInstanceDestroyHandler } from "./routes/instance-destroy.js";
 import { createRateLimitHandlers } from "./routes/rate-limits.js";
 import { hasCostGuardMarker } from "./routes/whitelist.js";
 import { isAnthropicMessageSource } from "./agent-adapters/anthropic-platform.js";
+import { isOpenAIChatSource } from "./agent-adapters/index.js";
 import { tryActivateStorage, tryActivateRedis } from "./injection/index.js";
 import { getEffectiveBackend } from "./storage/factory.js";
 import type { ProxyConfig } from "./types.js";
@@ -168,7 +169,10 @@ export function createApp(config: ProxyConfig): Hono {
         isAnthropicMessageSource(source) ? source : undefined,
       );
     });
-    app.post("/:agent/:spaceId/cost-guard/v1/chat/completions", (c) => handleChatCompletions(c, config));
+    app.post("/:agent/:spaceId/cost-guard/v1/chat/completions", (c) => {
+      const source = c.req.param("agent");
+      return handleChatCompletions(c, config, isOpenAIChatSource(source) ? source : undefined);
+    });
   }
 
   // `/analyse` marker (asset-reflection 内部效果评估) —— 跟 cost-guard 完全对称：
@@ -189,7 +193,10 @@ export function createApp(config: ProxyConfig): Hono {
         isAnthropicMessageSource(source) ? source : undefined,
       );
     });
-    app.post("/:agent/:spaceId/analyse/v1/chat/completions", (c) => handleChatCompletions(c, config));
+    app.post("/:agent/:spaceId/analyse/v1/chat/completions", (c) => {
+      const source = c.req.param("agent");
+      return handleChatCompletions(c, config, isOpenAIChatSource(source) ? source : undefined);
+    });
   }
 
   app.post("/claude-code/:spaceId/v1/messages", (c) =>
@@ -198,6 +205,8 @@ export function createApp(config: ProxyConfig): Hono {
     handleAnthropicMessages(c, config, "opencode"));
   app.post("/pi/:spaceId/v1/messages", (c) =>
     handleAnthropicMessages(c, config, "pi"));
+  app.post("/codebuddy/:spaceId/v1/chat/completions", (c) =>
+    handleChatCompletions(c, config, "codebuddy"));
   app.post("/claude-code/:spaceId/v1/messages/count_tokens", (c) =>
     handleAuxiliaryEndpoint(c, config, "claude-code"));
   app.post("/opencode/:spaceId/v1/messages/count_tokens", (c) =>
@@ -215,6 +224,8 @@ export function createApp(config: ProxyConfig): Hono {
 
   // Agent-prefixed routes without spaceId (deprecated: no credit reporting)
   app.post("/:agent/v1/messages", (c) => handleAnthropicMessages(c, config));
+  app.post("/codebuddy/v1/chat/completions", (c) =>
+    handleChatCompletions(c, config, "codebuddy"));
   app.post("/:agent/v1/chat/completions", (c) => handleChatCompletions(c, config));
 
   // Legacy /proxy/<spaceId>/ prefix — no agent info, defaults to Claude Code.

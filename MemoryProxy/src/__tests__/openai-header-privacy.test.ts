@@ -1,5 +1,6 @@
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
+import { Hono } from "hono";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("../guard-adapter.js", async (importOriginal) => {
@@ -13,6 +14,7 @@ vi.mock("../guard-adapter.js", async (importOriginal) => {
 import { initAuth } from "../auth.js";
 import { DEFAULT_CONFIG } from "../config.js";
 import { resolveForwardTarget, type ForwardTarget } from "../guard-adapter.js";
+import { handleChatCompletions } from "../handler.js";
 import { createApp } from "../server.js";
 
 const configuredOrigin = "https://configured.invalid";
@@ -140,21 +142,72 @@ describe("OpenAI upstream header privacy", () => {
     vi.restoreAllMocks();
   });
 
-  it.each(["codebuddy", "cursor", "openai"])(
-    "sanitizes the %s main request with server authentication",
+  it("sanitizes the registered codebuddy request with server authentication", async () => {
+    const value = config();
+    initAuth(value.auth);
+    const response = await createApp(value).request(
+      "http://proxy/codebuddy/space-1/v1/chat/completions",
+      { method: "POST", headers: privateHeaders(), body: requestBody() },
+    );
+
+    expect(response.status).toBe(200);
+    expect(upstreamHeaders).toHaveLength(1);
+    assertSafe(upstreamHeaders[0]!, "Bearer server-global-key");
+  });
+
+  it.each(["cursor", "openai", "opencode", "pi", "codex", "unknown"])(
+    "rejects the unregistered %s OpenAI source before auth or body parsing",
     async (source) => {
       const value = config();
+      value.auth = { enabled: true, url: "https://auth.invalid", timeoutMs: 1_000 };
       initAuth(value.auth);
       const response = await createApp(value).request(
         `http://proxy/${source}/space-1/v1/chat/completions`,
-        { method: "POST", headers: privateHeaders(), body: requestBody() },
+        { method: "POST", headers: privateHeaders(), body: "not-json" },
       );
 
-      expect(response.status).toBe(200);
-      expect(upstreamHeaders).toHaveLength(1);
-      assertSafe(upstreamHeaders[0]!, "Bearer server-global-key");
+      expect(response.status).toBe(404);
+      expect(upstreamUrls).toEqual([]);
+      expect(upstreamHeaders).toEqual([]);
+      expect(resolveForwardTarget).not.toHaveBeenCalled();
     },
   );
+
+  it("rejects a valid-looking but unbound OpenAI source before side effects", async () => {
+    const value = config();
+    initAuth(value.auth);
+    const app = new Hono();
+    app.post("/codebuddy/:spaceId/v1/chat/completions", (c) =>
+      handleChatCompletions(c, value),
+    );
+
+    const response = await app.request(
+      "http://proxy/codebuddy/space-1/v1/chat/completions",
+      { method: "POST", headers: privateHeaders(), body: requestBody() },
+    );
+
+    expect(response.status).toBe(404);
+    expect(upstreamUrls).toEqual([]);
+    expect(resolveForwardTarget).not.toHaveBeenCalled();
+  });
+
+  it("rejects an OpenAI path/source binding conflict before side effects", async () => {
+    const value = config();
+    initAuth(value.auth);
+    const app = new Hono();
+    app.post("/cursor/:spaceId/v1/chat/completions", (c) =>
+      handleChatCompletions(c, value, "codebuddy"),
+    );
+
+    const response = await app.request(
+      "http://proxy/cursor/space-1/v1/chat/completions",
+      { method: "POST", headers: privateHeaders(), body: requestBody() },
+    );
+
+    expect(response.status).toBe(400);
+    expect(upstreamUrls).toEqual([]);
+    expect(resolveForwardTarget).not.toHaveBeenCalled();
+  });
 
   it.each([
     {
