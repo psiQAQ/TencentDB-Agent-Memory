@@ -543,8 +543,10 @@ export class SessionStore {
     }
     const current = this.states.get(keyId);
     if (!current || this.isExpired(current)) return { changed: true };
-    if (current.identityClaimPending) throw new SessionIdentityConflictError();
     const merged = identityClaimFromState(this.previewIdentityClaim(keyId, identity), current);
+    if (bypassClaimNeedsPersistence(current, merged)) {
+      throw new SessionIdentityConflictError();
+    }
     // A concurrent L1 winner is not itself durable proof. Preserve an existing
     // persisted claim, but do not upgrade an exclusive claim until its writer
     // completes a SessionRepo or BindingRepo operation successfully.

@@ -2477,6 +2477,114 @@ describe("session cache identity isolation", () => {
     expect(getTask).not.toHaveBeenCalled();
   });
 
+  it("does not expose a legacy bypass restored before an awaiting recovery resumes", async () => {
+    let signalRead!: () => void;
+    let releaseRead!: () => void;
+    const readStarted = new Promise<void>((resolve) => { signalRead = resolve; });
+    const readReleased = new Promise<void>((resolve) => { releaseRead = resolve; });
+    const fullIdentity = victimIdentity();
+    const partialIdentity: SessionIdentity = {
+      userId: fullIdentity.userId,
+      spaceId: fullIdentity.spaceId,
+      agentSource: fullIdentity.agentSource,
+      sessionId: fullIdentity.sessionId,
+    };
+    const key = sessionStoreKey(fullIdentity);
+    const legacyState: SessionInitState = {
+      status: "initialized",
+      keyId: fullIdentity.sessionId,
+      startedAt: Date.now(),
+      attemptCount: 0,
+      userId: fullIdentity.userId,
+      bypassed: true,
+      sessionInfo: null,
+      agentDetail: null,
+      taskDetail: null,
+    };
+    const repo: SessionRepo = {
+      upsert: vi.fn(async (_space, _user, _source, _session, state) => (
+        state.identityClaim?.teamId ? false : true
+      )),
+      getBySessionId: vi.fn(async () => {
+        signalRead();
+        await readReleased;
+        return null;
+      }),
+      deleteBySessionId: vi.fn(() => undefined),
+      loadAllInitialized: async () => [],
+    };
+    const getAgent = vi.fn();
+    const getTask = vi.fn();
+    const store = new SessionStore(30 * 60 * 1_000, repo);
+
+    const awaitingRecovery = store.getOrRecover(key, fullIdentity, {
+      metadataClient: { getAgent, getTask } as never,
+    });
+    await readStarted;
+    store.bind(key, partialIdentity);
+    await store.set(key, legacyState);
+    store.bind(key, fullIdentity);
+    await expect(store.getOrRecover(key, fullIdentity, {}))
+      .rejects.toMatchObject({ name: "SessionIdentityConflictError" });
+    releaseRead();
+
+    await expect(awaitingRecovery)
+      .rejects.toMatchObject({ name: "SessionIdentityConflictError" });
+    expect(getAgent).not.toHaveBeenCalled();
+    expect(getTask).not.toHaveBeenCalled();
+  });
+
+  it("does not expose a weak legacy bypass hydrated during a recovery await", async () => {
+    let signalRead!: () => void;
+    let releaseRead!: () => void;
+    const readStarted = new Promise<void>((resolve) => { signalRead = resolve; });
+    const readReleased = new Promise<void>((resolve) => { releaseRead = resolve; });
+    const fullIdentity = victimIdentity();
+    const key = sessionStoreKey(fullIdentity);
+    const legacyState: SessionInitState = {
+      status: "initialized",
+      keyId: fullIdentity.sessionId,
+      startedAt: Date.now(),
+      attemptCount: 0,
+      userId: fullIdentity.userId,
+      bypassed: true,
+      sessionInfo: null,
+      agentDetail: null,
+      taskDetail: null,
+    };
+    const repo: SessionRepo = {
+      upsert: vi.fn(async () => true),
+      getBySessionId: vi.fn(async () => {
+        signalRead();
+        await readReleased;
+        return null;
+      }),
+      deleteBySessionId: vi.fn(() => undefined),
+      loadAllInitialized: vi.fn(async () => [{
+        spaceId: fullIdentity.spaceId!,
+        userId: fullIdentity.userId,
+        agentSource: fullIdentity.agentSource,
+        sessionId: fullIdentity.sessionId,
+        state: structuredClone(legacyState),
+      }]),
+    };
+    const getAgent = vi.fn();
+    const getTask = vi.fn();
+    const store = new SessionStore(30 * 60 * 1_000, repo);
+
+    const awaitingRecovery = store.getOrRecover(key, fullIdentity, {
+      metadataClient: { getAgent, getTask } as never,
+    });
+    await readStarted;
+    await expect(store.hydrateFromDb()).resolves.toBe(1);
+    releaseRead();
+
+    await expect(awaitingRecovery)
+      .rejects.toMatchObject({ name: "SessionIdentityConflictError" });
+    expect(getAgent).not.toHaveBeenCalled();
+    expect(getTask).not.toHaveBeenCalled();
+  });
+
   it("preserves a concurrent persisted raw owner when another claim rolls back", async () => {
     let signalWrite!: () => void;
     let releaseWrite!: () => void;
