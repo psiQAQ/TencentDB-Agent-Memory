@@ -683,6 +683,45 @@ describe("collision-safe persisted session identity keys", () => {
     });
   });
 
+  it("rejects malformed and mismatched canonical Redis hydrate rows", async () => {
+    const detail = "malformed-redis-hydrate-detail-sentinel";
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const error = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const redis = new FakeRedis();
+    const sessions = new RedisSessionRepo(redis as never);
+    const key = `inj:sess:${v2IdentityKey(FIRST)}`;
+
+    redis.strings.set(key, `{${detail}`);
+    await expect(sessions.loadAllInitialized()).rejects.toMatchObject({
+      name: "SessionRepoReadError",
+      message: "session repository read failed",
+    });
+    expect(redis.strings.get(key)).toBe(`{${detail}`);
+
+    redis.strings.set(key, JSON.stringify(state(SECOND, "wrong-owner")));
+    await expect(sessions.loadAllInitialized()).rejects.toMatchObject({
+      name: "SessionRepoReadError",
+      message: "session repository read failed",
+    });
+    const emitted = [...warn.mock.calls, ...error.mock.calls].flat().join(" ");
+    expect(emitted).not.toContain(detail);
+  });
+
+  it.each(["scan", "mget"] as const)(
+    "fails closed when Redis hydrate %s fails",
+    async (operation) => {
+      const redis = new FakeRedis();
+      const sessions = new RedisSessionRepo(redis as never);
+      redis.strings.set(`inj:sess:${v2IdentityKey(FIRST)}`, JSON.stringify(state(FIRST, "owner")));
+      vi.spyOn(redis, operation).mockRejectedValue(new Error("redis-hydrate-backend-detail"));
+
+      await expect(sessions.loadAllInitialized()).rejects.toMatchObject({
+        name: "SessionRepoReadError",
+        message: "session repository read failed",
+      });
+    },
+  );
+
   it("bounds Redis binding and hook legacy reads, TTL, touch, and clear", async () => {
     const redis = new FakeRedis();
     const bindings = new RedisBindingRepo(redis as never, 30);

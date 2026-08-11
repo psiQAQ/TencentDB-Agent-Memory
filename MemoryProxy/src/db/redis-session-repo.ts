@@ -153,23 +153,25 @@ export class RedisSessionRepo implements SessionRepo {
       const result: HydratedSessionRow[] = [];
       for (let i = 0; i < keys.length; i++) {
         if (!raws[i]) continue;
-        try {
-          const state = JSON.parse(raws[i]!) as SessionInitState;
-          if (state.status !== "initialized") continue;
-          const tail = keys[i].slice(KEY_PREFIX.length);
-          const identity = parsePersistedSessionIdentityKey(tail);
-          if (!identity || !persistedStateOwnsIdentity(state, identity)) continue;
-          result.push({
-            ...identity,
-            state,
-          });
-        } catch {
-          /* skip corrupt */
-        }
+        const state = JSON.parse(raws[i]!) as SessionInitState;
+        const tail = keys[i].slice(KEY_PREFIX.length);
+        const identity = parsePersistedSessionIdentityKey(tail);
+        if (
+          !state
+          || typeof state !== "object"
+          || Array.isArray(state)
+          || !identity
+          || !persistedStateOwnsIdentity(state, identity)
+        ) throw new SessionRepoReadError();
+        if (state.status !== "initialized") continue;
+        result.push({
+          ...identity,
+          state,
+        });
       }
       return result;
     } catch {
-      return [];
+      throw new SessionRepoReadError();
     }
   }
 
