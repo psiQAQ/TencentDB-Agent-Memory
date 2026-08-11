@@ -366,6 +366,58 @@ describe("session cache identity isolation", () => {
     await expect(store.getOrRecover(key, { ...identity }, {})).resolves.toEqual(state);
   });
 
+  it("does not expire a stale L1 entry before rejecting a bound identity conflict", async () => {
+    let persisted: SessionInitState | null = null;
+    const deleteBySessionId = vi.fn(() => { persisted = null; });
+    const repo: SessionRepo = {
+      upsert: vi.fn(async (_space, _user, _source, _session, state) => {
+        persisted = state;
+      }),
+      getBySessionId: vi.fn(async () => persisted),
+      deleteBySessionId,
+      loadAllInitialized: async () => [],
+    };
+    const getBinding = vi.fn(async (): Promise<SessionBinding> => ({
+      outcome: "bypassed",
+      userId: VICTIM.userId,
+      teamId: VICTIM.teamId,
+      agentId: VICTIM.agentId,
+      taskId: VICTIM.taskId,
+    }));
+    const touchLastSeen = vi.fn(async () => undefined);
+    const bindingRepo: BindingRepo = {
+      getBinding,
+      putBinding: vi.fn(async () => undefined),
+      deleteBinding: vi.fn(async () => undefined),
+      touchLastSeen,
+    };
+    const identity = victimIdentity();
+    const key = sessionStoreKey(identity);
+    const stale: SessionInitState = {
+      ...victimState(),
+      status: "pending_task_select",
+      startedAt: 0,
+    };
+    const store = new SessionStore(1, repo, bindingRepo);
+    store.bind(key, identity);
+    await store.set(key, stale);
+    vi.clearAllMocks();
+
+    await expect(store.getOrRecover(key, { ...identity, taskId: OUTSIDER.taskId }, {}))
+      .rejects.toMatchObject({ name: "SessionIdentityConflictError" });
+    expect(deleteBySessionId).not.toHaveBeenCalled();
+    expect(getBinding).not.toHaveBeenCalled();
+    expect(touchLastSeen).not.toHaveBeenCalled();
+    expect(store.getBoundIdentity(key)).toEqual(identity);
+
+    await expect(store.getOrRecover(key, identity, {})).resolves.toMatchObject({
+      status: "initialized",
+      bypassed: true,
+    });
+    expect(deleteBySessionId).toHaveBeenCalled();
+    expect(getBinding).toHaveBeenCalledTimes(1);
+  });
+
   it("does not bind a rejected L2a identity and allows the valid caller", async () => {
     const identity = victimIdentity();
     const rejectedIdentity = { ...identity, taskId: OUTSIDER.taskId };
@@ -398,6 +450,54 @@ describe("session cache identity isolation", () => {
     expect(store.getBoundIdentity(key)).toEqual(identity);
   });
 
+  it("does not delete an expired L2a row before rejecting a binding conflict", async () => {
+    const identity = victimIdentity();
+    const key = sessionStoreKey(identity);
+    const expired: SessionInitState = {
+      ...victimState(),
+      status: "pending_task_select",
+      startedAt: 0,
+    };
+    let persisted: SessionInitState | null = expired;
+    const deleteBySessionId = vi.fn(() => { persisted = null; });
+    const repo: SessionRepo = {
+      upsert: vi.fn(async (_space, _user, _source, _session, state) => {
+        persisted = state;
+      }),
+      getBySessionId: vi.fn(async () => persisted),
+      deleteBySessionId,
+      loadAllInitialized: async () => [],
+    };
+    let binding: SessionBinding = {
+      outcome: "bypassed",
+      userId: VICTIM.userId,
+      teamId: VICTIM.teamId,
+      agentId: VICTIM.agentId,
+      taskId: OUTSIDER.taskId,
+    };
+    const touchLastSeen = vi.fn(async () => undefined);
+    const bindingRepo: BindingRepo = {
+      getBinding: vi.fn(async () => binding),
+      putBinding: vi.fn(async () => undefined),
+      deleteBinding: vi.fn(async () => undefined),
+      touchLastSeen,
+    };
+    const store = new SessionStore(1, repo, bindingRepo);
+
+    await expect(store.getOrRecover(key, identity, {}))
+      .rejects.toMatchObject({ name: "SessionIdentityConflictError" });
+    expect(deleteBySessionId).not.toHaveBeenCalled();
+    expect(touchLastSeen).not.toHaveBeenCalled();
+    expect(store.getBoundIdentity(key)).toBeUndefined();
+
+    binding = { ...binding, taskId: VICTIM.taskId };
+    await expect(store.getOrRecover(key, identity, {})).resolves.toMatchObject({
+      status: "initialized",
+      bypassed: true,
+    });
+    expect(deleteBySessionId).toHaveBeenCalledTimes(1);
+  });
+
   it("does not bind a rejected raw-session collision or disturb the owner", async () => {
     const store = new SessionStore();
     const identity = victimIdentity();
@@ -422,6 +522,71 @@ describe("session cache identity isolation", () => {
     expect(store.get(collidingKey)).toBeUndefined();
     expect(store.getBoundIdentity(key)).toEqual(identity);
     await expect(store.getOrRecover(key, identity, {})).resolves.toEqual(state);
+  });
+
+  it("scans raw-session conflicts without expiring another identity's state", async () => {
+    const deleteBySessionId = vi.fn(() => undefined);
+    const repo: SessionRepo = {
+      upsert: vi.fn(async () => undefined),
+      getBySessionId: vi.fn(async () => null),
+      deleteBySessionId,
+      loadAllInitialized: async () => [],
+    };
+    const store = new SessionStore(1, repo);
+    const expiredIdentity = victimIdentity();
+    const expiredKey = sessionStoreKey(expiredIdentity);
+    store.bind(expiredKey, expiredIdentity);
+    await store.set(expiredKey, {
+      ...victimState(),
+      status: "pending_task_select",
+      startedAt: 0,
+    });
+
+    const liveIdentity: FullSessionIdentity = {
+      ...expiredIdentity,
+      userId: "user_live",
+      spaceId: "space_live",
+      teamId: "team_live",
+      agentId: "agent_live",
+      taskId: "task_live",
+    };
+    const liveKey = sessionStoreKey(liveIdentity);
+    const liveState: SessionInitState = {
+      ...victimState(),
+      userId: liveIdentity.userId,
+      sessionInfo: {
+        ...victimState().sessionInfo!,
+        user_id: liveIdentity.userId,
+        space_id: liveIdentity.spaceId,
+        team_id: liveIdentity.teamId,
+        agent_id: liveIdentity.agentId,
+        task_id: liveIdentity.taskId,
+      },
+    };
+    store.bind(liveKey, liveIdentity);
+    await store.set(liveKey, liveState);
+    vi.clearAllMocks();
+
+    const rejectedIdentity: FullSessionIdentity = {
+      ...expiredIdentity,
+      userId: OUTSIDER.userId,
+      spaceId: OUTSIDER.spaceId,
+      teamId: OUTSIDER.teamId,
+      agentId: OUTSIDER.agentId,
+      taskId: OUTSIDER.taskId,
+    };
+    await expect(store.getOrRecover(
+      sessionStoreKey(rejectedIdentity),
+      rejectedIdentity,
+      {},
+    )).rejects.toMatchObject({ name: "SessionIdentityConflictError" });
+    expect(deleteBySessionId).not.toHaveBeenCalled();
+    expect(store.getBoundIdentity(expiredKey)).toEqual(expiredIdentity);
+    expect(store.getBoundIdentity(liveKey)).toEqual(liveIdentity);
+    expect(store.get(liveKey)).toEqual(liveState);
+
+    await expect(store.getOrRecover(liveKey, liveIdentity, {})).resolves.toEqual(liveState);
+    expect(deleteBySessionId).not.toHaveBeenCalled();
   });
 
   it("hydrates both users that share a source and raw session id", async () => {

@@ -166,6 +166,11 @@ export interface RecoveryContext {
   messages?: Record<string, unknown>[];
 }
 
+interface L2aProbeResult {
+  state?: SessionInitState;
+  expired: boolean;
+}
+
 export class SessionStore {
   private states = new Map<string, SessionInitState>();
   /** keyId → identity map — populated via {@link bind} to keep repo/binding writes user-namespaced. */
@@ -218,10 +223,8 @@ export class SessionStore {
     const state = this.states.get(keyId);
     if (!state) return undefined;
 
-    if (state.status !== "initialized" && Date.now() - state.startedAt > this.ttlMs) {
-      this.states.delete(keyId);
-      const id = this.identities.get(keyId);
-      if (id) this.repo?.deleteBySessionId(spaceOf(id), id.userId, id.agentSource, id.sessionId);
+    if (this.isExpired(state)) {
+      this.discardExpiredState(keyId, state);
       return undefined;
     }
 
@@ -307,8 +310,8 @@ export class SessionStore {
    * probes miss.
    */
   private hasRawSessionConflict(keyId: string, identity: SessionIdentity): boolean {
-    for (const [otherKey] of this.states) {
-      if (otherKey === keyId || !this.get(otherKey)) continue;
+    for (const [otherKey, state] of this.states) {
+      if (otherKey === keyId || this.isExpired(state)) continue;
       const other = this.identities.get(otherKey);
       if (
         other
@@ -319,6 +322,39 @@ export class SessionStore {
       }
     }
     return false;
+  }
+
+  private isExpired(state: SessionInitState): boolean {
+    return state.status !== "initialized" && Date.now() - state.startedAt > this.ttlMs;
+  }
+
+  private discardExpiredState(keyId: string, state: SessionInitState): void {
+    // Recovery can await L2 reads before reaching this point. Do not delete a
+    // newer state installed by another request while those reads were in flight.
+    if (this.states.get(keyId) !== state || !this.isExpired(state)) return;
+    this.states.delete(keyId);
+    const id = this.identities.get(keyId);
+    if (id) this.repo?.deleteBySessionId(spaceOf(id), id.userId, id.agentSource, id.sessionId);
+  }
+
+  private discardExpiredRecovery(
+    keyId: string,
+    cachedState: SessionInitState | undefined,
+    l2aExpired: boolean,
+    identity: SessionIdentity,
+  ): void {
+    if (cachedState) {
+      this.discardExpiredState(keyId, cachedState);
+      return;
+    }
+    if (l2aExpired) {
+      this.repo?.deleteBySessionId(
+        spaceOf(identity),
+        identity.userId,
+        identity.agentSource,
+        identity.sessionId,
+      );
+    }
   }
 
   cleanup(): void {
@@ -432,15 +468,19 @@ export class SessionStore {
     // 代价：pending_* 每轮多一次 storage GET（~1-2ms Redis / ~50ms COS）。
     // pending 轮次只在初始化 form 阶段出现，每个 session 顶多 2-4 次，可接受；
     // initialized 快路径仍是纯内存零 IO。
-    const l1 = this.get(keyId);
+    const cachedState = this.states.get(keyId);
     const boundIdentity = this.identities.get(keyId);
-    const rawSessionConflict = !l1 && this.hasRawSessionConflict(keyId, identity);
     if (
       (boundIdentity && !boundIdentityMatchesIdentity(boundIdentity, identity))
-      || (l1 && !persistedStateMatchesIdentity(l1, identity))
+      || (cachedState && !persistedStateMatchesIdentity(cachedState, identity))
     ) {
       throw new SessionIdentityConflictError();
     }
+    // Inspect expiry without deleting anything. A later raw/L2 binding conflict
+    // must reject without letting the caller mutate this or another identity's
+    // cache entry as a side effect of the conflict check.
+    const l1 = cachedState && !this.isExpired(cachedState) ? cachedState : undefined;
+    const rawSessionConflict = !l1 && this.hasRawSessionConflict(keyId, identity);
 
     if (l1 && l1.status === "initialized") {
       this.identities.set(keyId, identity);
@@ -455,12 +495,14 @@ export class SessionStore {
     // `metadataClient.getAgent/getTask` roundtrip, even though the full
     // agentDetail/taskDetail is sitting in the storage layer. Pending 状态也
     // 必须命中就返回 —— 见上面 Step 1 的多节点陈旧 L1 注释。
+    let l2aExpired = false;
     if (this.repo) {
       const l2a = await this.probeL2a(keyId, identity);
-      if (l2a) {
+      l2aExpired = l2a.expired;
+      if (l2a.state) {
         this.identities.set(keyId, identity);
         console.log(`[cache] session=<redacted> L2a hit → promote L1${l1 ? " (override stale L1)" : ""}`);
-        return l2a;
+        return l2a.state;
       }
     }
 
@@ -483,6 +525,7 @@ export class SessionStore {
     // Step 3: L2b Binding
     if (!this.bindingRepo) {
       if (rawSessionConflict) throw new SessionIdentityConflictError();
+      this.discardExpiredRecovery(keyId, cachedState, l2aExpired, identity);
       this.identities.set(keyId, identity);
       console.log("[cache] session=<redacted> miss (no bindingRepo) → history-scan");
       return this.tryHistoryScan(keyId, identity, ctx);
@@ -500,6 +543,7 @@ export class SessionStore {
     }
     if (!binding) {
       if (rawSessionConflict) throw new SessionIdentityConflictError();
+      this.discardExpiredRecovery(keyId, cachedState, l2aExpired, identity);
       this.identities.set(keyId, identity);
       console.log("[cache] session=<redacted> miss (no binding) → history-scan");
       return this.tryHistoryScan(keyId, identity, ctx);
@@ -507,6 +551,7 @@ export class SessionStore {
     if (!bindingMatchesIdentity(binding, identity)) {
       throw new SessionIdentityConflictError();
     }
+    this.discardExpiredRecovery(keyId, cachedState, l2aExpired, identity);
     // Bind only after all applicable L1, L2a, raw-session and L2b identity
     // checks pass. A rejected caller must never poison a later recovery.
     this.identities.set(keyId, identity);
@@ -556,7 +601,7 @@ export class SessionStore {
   private async probeL2a(
     keyId: string,
     identity: SessionIdentity,
-  ): Promise<SessionInitState | undefined> {
+  ): Promise<L2aProbeResult> {
     let row: SessionInitState | null;
     try {
       row = await this.repo!.getBySessionId(
@@ -566,9 +611,9 @@ export class SessionStore {
         identity.sessionId,
       );
     } catch {
-      return undefined;
+      return { expired: false };
     }
-    if (!row) return undefined;
+    if (!row) return { expired: false };
     const persistedRow = row;
     row = withoutPersistedCredential(row);
 
@@ -584,14 +629,9 @@ export class SessionStore {
       Date.now() - row.startedAt > this.ttlMs
     ) {
       console.log(
-        `[session-recover] session=<redacted> L2a pending expired (status=${row.status}), invalidating`,
+        `[session-recover] session=<redacted> L2a pending expired (status=${row.status}), deferring invalidation`,
       );
-      try {
-        this.repo!.deleteBySessionId(spaceOf(identity), identity.userId, identity.agentSource, identity.sessionId);
-      } catch {
-        /* best-effort */
-      }
-      return undefined;
+      return { expired: true };
     }
 
     // Promote back to L1 so subsequent turns don't hit the repo at all.
@@ -615,7 +655,7 @@ export class SessionStore {
     console.log(
       `[session-recover] session=<redacted> L2a hit status=${row.status} agent=${row.sessionInfo?.agent_id ? "present" : "none"} task=${row.sessionInfo?.task_id ? "present" : "none"}`,
     );
-    return normalizedRow;
+    return { state: normalizedRow, expired: false };
   }
 
   /** In-flight promise deduplication: same keyId → same rebuild promise. */
