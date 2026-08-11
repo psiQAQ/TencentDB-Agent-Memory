@@ -8,10 +8,15 @@
  * 删除（详见 `2026-07-10-cos-ttl-nottl-split-plan.md`），本实现也一并
  * 删除反向索引写入。
  *
- * All errors degrade silently — the in-memory Map is always authoritative.
+ * Writes degrade explicitly via `false`; read failures throw a fixed error so
+ * callers never confuse an outage with an authoritative miss.
  */
 import type { Redis } from "ioredis";
-import type { SessionRepo, HydratedSessionRow } from "./sessionRepo.js";
+import {
+  SessionRepoReadError,
+  type SessionRepo,
+  type HydratedSessionRow,
+} from "./sessionRepo.js";
 import type { SessionInitState } from "../session/types.js";
 import {
   legacyPersistedSessionIdentityKey,
@@ -106,7 +111,7 @@ export class RedisSessionRepo implements SessionRepo {
       if (!persistedStateOwnsIdentity(legacyState, identity, spaceId === "")) return null;
       return legacyState;
     } catch {
-      return null;
+      throw new SessionRepoReadError();
     }
   }
 

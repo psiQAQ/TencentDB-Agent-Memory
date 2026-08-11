@@ -398,7 +398,7 @@ interface ClaimMutationSnapshot {
   state?: SessionInitState;
   identity?: SessionIdentity;
   rawKey: string;
-  rawClaims?: Map<string, RawSessionClaim>;
+  rawClaim?: RawSessionClaim;
   durableLayers?: DurableClaimLayers;
 }
 
@@ -472,7 +472,7 @@ export class SessionStore {
       state: this.states.get(keyId),
       identity: this.identities.get(keyId),
       rawKey,
-      rawClaims: rawClaims ? new Map(rawClaims) : undefined,
+      rawClaim: rawClaims?.get(keyId),
       durableLayers: this.durableLayersByKey.get(keyId),
     };
   }
@@ -482,7 +482,12 @@ export class SessionStore {
     else this.removeState(keyId);
     if (snapshot.identity) this.identities.set(keyId, snapshot.identity);
     else this.identities.delete(keyId);
-    if (snapshot.rawClaims) this.rawSessionClaims.set(snapshot.rawKey, snapshot.rawClaims);
+    // Restore only this key's claim. Other full identities may have acquired or
+    // released ownership while the durable write was awaiting I/O.
+    const rawClaims = new Map(this.rawSessionClaims.get(snapshot.rawKey));
+    if (snapshot.rawClaim) rawClaims.set(keyId, snapshot.rawClaim);
+    else rawClaims.delete(keyId);
+    if (rawClaims.size > 0) this.rawSessionClaims.set(snapshot.rawKey, rawClaims);
     else this.rawSessionClaims.delete(snapshot.rawKey);
     if (snapshot.durableLayers) {
       this.durableLayersByKey.set(keyId, snapshot.durableLayers);
@@ -538,6 +543,7 @@ export class SessionStore {
     }
     const current = this.states.get(keyId);
     if (!current || this.isExpired(current)) return { changed: true };
+    if (current.identityClaimPending) throw new SessionIdentityConflictError();
     const merged = identityClaimFromState(this.previewIdentityClaim(keyId, identity), current);
     // A concurrent L1 winner is not itself durable proof. Preserve an existing
     // persisted claim, but do not upgrade an exclusive claim until its writer

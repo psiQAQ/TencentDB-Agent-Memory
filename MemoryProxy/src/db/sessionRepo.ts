@@ -156,6 +156,14 @@ export interface HydratedSessionRow {
   state: SessionInitState;
 }
 
+/** Fixed, non-sensitive signal that a durable session read failed. */
+export class SessionRepoReadError extends Error {
+  constructor() {
+    super("session repository read failed");
+    this.name = "SessionRepoReadError";
+  }
+}
+
 export interface SessionRepo {
   /**
    * Write-through 语义：await 完成时 L2a 已落盘（或失败已被静默降级）。
@@ -174,6 +182,7 @@ export interface SessionRepo {
     sessionId: string,
     state: SessionInitState,
   ): Promise<boolean>;
+  /** `null` is an authoritative miss; backend failures reject with a fixed read error. */
   getBySessionId(
     spaceId: string,
     userId: string,
@@ -249,7 +258,7 @@ class SqliteSessionRepo implements SessionRepo {
       ) return null;
       return legacyState;
     } catch {
-      return null;
+      throw new SessionRepoReadError();
     }
   }
 

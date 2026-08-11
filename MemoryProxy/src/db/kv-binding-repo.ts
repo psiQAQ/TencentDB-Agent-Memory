@@ -11,7 +11,11 @@
  * `touchLastSeen` 从 Redis HSET 单字段变成本层 R-M-W；用 per-key mutex
  * 消除单节点内竞争。跨节点场景下 last_seen 可能覆盖丢失（业务可接受）。
  */
-import type { BindingRepo, SessionBinding } from "./binding-repo.js";
+import {
+  BindingRepoReadError,
+  type BindingRepo,
+  type SessionBinding,
+} from "./binding-repo.js";
 import type { ProxyStorage } from "../storage/proxy-storage.js";
 import { withPerKeyLock } from "../storage/per-key-mutex.js";
 import { sessionDirOf } from "../storage/key-utils.js";
@@ -67,7 +71,7 @@ export class KvBindingRepo implements BindingRepo {
         taskId: raw.taskId,
       };
     } catch {
-      return null;
+      throw new BindingRepoReadError();
     }
   }
 

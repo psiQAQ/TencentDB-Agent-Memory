@@ -37,7 +37,16 @@ export interface SessionBinding {
   taskId?: string;
 }
 
+/** Fixed, non-sensitive signal that a durable binding read failed. */
+export class BindingRepoReadError extends Error {
+  constructor() {
+    super("binding repository read failed");
+    this.name = "BindingRepoReadError";
+  }
+}
+
 export interface BindingRepo {
+  /** `null` is an authoritative miss; backend failures reject with a fixed read error. */
   getBinding(
     spaceId: string,
     userId: string,
@@ -144,7 +153,7 @@ export class RedisBindingRepo implements BindingRepo {
       if (await this.redis.ttl(legacyKey) <= 0) return null;
       return bindingFromHash(legacy);
     } catch {
-      return null;
+      throw new BindingRepoReadError();
     }
   }
 

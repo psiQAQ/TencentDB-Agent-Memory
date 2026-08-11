@@ -14,14 +14,18 @@
  * 落到 pod B 的 turn-2 因 L2a miss 掉入 tryHistoryScan 兜底 → bypass）。
  * 写失败保留静默降级：catch 后仅 warn，不 throw —— 上层 L1 仍是权威。
  *
- * 读接口 async，miss 返回 null，不抛。
+ * 读接口 async；miss 返回 null，后端失败抛出固定、无敏感细节的错误。
  *
  * `loadAllInitialized`：
  *   - CosStorage 后端下强制返回 [] （关闭启动 hydrate，走 probeL2a 懒加载）
  *   - SqliteStorage / FsStorage / MemoryStorage 走 listNames + getJSON，
  *     从 key 里反解回 (spaceId, userId, agentSource, sessionId) 四段身份
  */
-import type { SessionRepo, HydratedSessionRow } from "./sessionRepo.js";
+import {
+  SessionRepoReadError,
+  type SessionRepo,
+  type HydratedSessionRow,
+} from "./sessionRepo.js";
 import type { SessionInitState } from "../session/types.js";
 import type { ProxyStorage } from "../storage/proxy-storage.js";
 import { sessionDirOf } from "../storage/key-utils.js";
@@ -77,7 +81,7 @@ export class KvSessionRepo implements SessionRepo {
         mainKey(spaceId, userId, agentSource, sessionId),
       );
     } catch {
-      return null;
+      throw new SessionRepoReadError();
     }
   }
 

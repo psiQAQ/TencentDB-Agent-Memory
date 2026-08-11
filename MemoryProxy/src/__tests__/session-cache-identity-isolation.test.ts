@@ -2386,6 +2386,183 @@ describe("session cache identity isolation", () => {
     },
   );
 
+  it("does not expose an unsettled bypass claim to an awaiting recovery", async () => {
+    let signalRead!: () => void;
+    let releaseRead!: () => void;
+    let signalPartialWrite!: () => void;
+    let releasePartialWrite!: () => void;
+    let signalPendingWrite!: () => void;
+    let releasePendingWrite!: () => void;
+    const readStarted = new Promise<void>((resolve) => { signalRead = resolve; });
+    const readReleased = new Promise<void>((resolve) => { releaseRead = resolve; });
+    const partialWriteStarted = new Promise<void>((resolve) => { signalPartialWrite = resolve; });
+    const partialWriteReleased = new Promise<void>((resolve) => { releasePartialWrite = resolve; });
+    const pendingWriteStarted = new Promise<void>((resolve) => { signalPendingWrite = resolve; });
+    const pendingWriteReleased = new Promise<void>((resolve) => { releasePendingWrite = resolve; });
+    const fullIdentity = victimIdentity();
+    const partialIdentity: SessionIdentity = {
+      userId: fullIdentity.userId,
+      spaceId: fullIdentity.spaceId,
+      agentSource: fullIdentity.agentSource,
+      sessionId: fullIdentity.sessionId,
+    };
+    const key = sessionStoreKey(fullIdentity);
+    let writeCount = 0;
+    const repo: SessionRepo = {
+      upsert: vi.fn(async (_space, _user, _source, _session, state) => {
+        writeCount++;
+        if (writeCount === 1) {
+          signalPartialWrite();
+          await partialWriteReleased;
+          return true;
+        }
+        if (state.identityClaimPending) {
+          signalPendingWrite();
+          await pendingWriteReleased;
+          return false;
+        }
+        return true;
+      }),
+      getBySessionId: vi.fn(async () => {
+        signalRead();
+        await readReleased;
+        return null;
+      }),
+      deleteBySessionId: vi.fn(() => undefined),
+      loadAllInitialized: async () => [],
+    };
+    const getAgent = vi.fn();
+    const getTask = vi.fn();
+    const store = new SessionStore(30 * 60 * 1_000, repo);
+
+    const awaitingRecovery = store.getOrRecover(key, fullIdentity, {
+      metadataClient: { getAgent, getTask } as never,
+    });
+    await readStarted;
+    store.bind(key, partialIdentity);
+    const write = store.set(key, {
+      status: "initialized",
+      keyId: fullIdentity.sessionId,
+      startedAt: Date.now(),
+      attemptCount: 0,
+      userId: fullIdentity.userId,
+      bypassed: true,
+      sessionInfo: null,
+      agentDetail: null,
+      taskDetail: null,
+    });
+    await partialWriteStarted;
+    store.bind(key, fullIdentity);
+    releasePartialWrite();
+    await pendingWriteStarted;
+    releaseRead();
+
+    const recoveryResult = await awaitingRecovery.then(
+      (state) => ({ state }),
+      (error: unknown) => ({ error }),
+    );
+    releasePendingWrite();
+    const writeResult = await write.then(
+      () => ({}),
+      (error: unknown) => ({ error }),
+    );
+
+    expect(recoveryResult).toMatchObject({
+      error: { name: "SessionIdentityConflictError" },
+    });
+    expect(writeResult).toMatchObject({
+      error: { name: "SessionIdentityConflictError" },
+    });
+    expect(getAgent).not.toHaveBeenCalled();
+    expect(getTask).not.toHaveBeenCalled();
+  });
+
+  it("preserves a concurrent persisted raw owner when another claim rolls back", async () => {
+    let signalWrite!: () => void;
+    let releaseWrite!: () => void;
+    const writeStarted = new Promise<void>((resolve) => { signalWrite = resolve; });
+    const writeReleased = new Promise<void>((resolve) => { releaseWrite = resolve; });
+    const firstIdentity = victimIdentity();
+    const concurrentIdentity: FullSessionIdentity = {
+      userId: OUTSIDER.userId,
+      spaceId: OUTSIDER.spaceId,
+      agentSource: firstIdentity.agentSource,
+      sessionId: firstIdentity.sessionId,
+      teamId: OUTSIDER.teamId,
+      agentId: OUTSIDER.agentId,
+      taskId: OUTSIDER.taskId,
+    };
+    const thirdIdentity: FullSessionIdentity = {
+      userId: "third-user",
+      spaceId: "third-space",
+      agentSource: firstIdentity.agentSource,
+      sessionId: firstIdentity.sessionId,
+      teamId: "third-team",
+      agentId: "third-agent",
+      taskId: "third-task",
+    };
+    const partialState: SessionInitState = {
+      status: "initialized",
+      keyId: firstIdentity.sessionId,
+      startedAt: Date.now(),
+      attemptCount: 0,
+      userId: firstIdentity.userId,
+      bypassed: true,
+      sessionInfo: null,
+      agentDetail: null,
+      taskDetail: null,
+    };
+    const repo: SessionRepo = {
+      upsert: vi.fn(async (_space, userId) => {
+        if (userId === firstIdentity.userId) {
+          signalWrite();
+          await writeReleased;
+          return false;
+        }
+        return true;
+      }),
+      getBySessionId: vi.fn(async (_space, userId) => (
+        userId === firstIdentity.userId ? structuredClone(partialState) : null
+      )),
+      deleteBySessionId: vi.fn(() => undefined),
+      loadAllInitialized: async () => [],
+    };
+    const bindingRepo: BindingRepo = {
+      getBinding: vi.fn(async (_space, userId): Promise<SessionBinding | null> => (
+        userId === concurrentIdentity.userId
+          ? {
+              outcome: "initialized",
+              userId: concurrentIdentity.userId,
+              teamId: concurrentIdentity.teamId,
+              agentId: concurrentIdentity.agentId,
+              taskId: concurrentIdentity.taskId,
+            }
+          : null
+      )),
+      putBinding: vi.fn(async () => true),
+      deleteBinding: vi.fn(async () => undefined),
+      touchLastSeen: vi.fn(async () => undefined),
+    };
+    const store = new SessionStore(30 * 60 * 1_000, repo, bindingRepo);
+
+    const first = store.getOrRecover(sessionStoreKey(firstIdentity), firstIdentity, {});
+    await writeStarted;
+    await expect(store.getOrRecover(
+      sessionStoreKey(concurrentIdentity),
+      concurrentIdentity,
+      {},
+    )).resolves.toMatchObject({ bypassed: true });
+    expect(store.get(sessionStoreKey(concurrentIdentity))).toBeUndefined();
+    releaseWrite();
+    await expect(first).rejects.toMatchObject({ name: "SessionIdentityConflictError" });
+
+    await expect(store.getOrRecover(sessionStoreKey(thirdIdentity), thirdIdentity, {}))
+      .rejects.toMatchObject({ name: "SessionIdentityConflictError" });
+    expect(store.getBoundIdentity(sessionStoreKey(concurrentIdentity)))
+      .toEqual(concurrentIdentity);
+    expect(store.getBoundIdentity(sessionStoreKey(thirdIdentity))).toBeUndefined();
+  });
+
   it.each(["l2a", "l2b"] as const)(
     "fails closed when the full bypass claim cannot replace partial %s durability",
     async (failingLayer) => {

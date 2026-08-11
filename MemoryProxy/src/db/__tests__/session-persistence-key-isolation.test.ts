@@ -10,6 +10,8 @@ import {
   getHookCacheRepo,
 } from "../hookCacheRepo.js";
 import { __resetDbForTests, getDb } from "../index.js";
+import { KvBindingRepo } from "../kv-binding-repo.js";
+import { KvSessionRepo } from "../kv-session-repo.js";
 import { RedisHookCacheRepo } from "../redis-hook-cache-repo.js";
 import { RedisSessionRepo } from "../redis-session-repo.js";
 import {
@@ -541,6 +543,45 @@ describe("collision-safe persisted session identity keys", () => {
       userId: FIRST[1],
       agentId: "failed-agent",
     })).toBe(false);
+  });
+
+  it("distinguishes durable read failures from missing rows", async () => {
+    const rawDetail = "raw-backend-read-detail-sentinel";
+    const failedRedisSession = new RedisSessionRepo({
+      get: async () => { throw new Error(rawDetail); },
+    } as never);
+    const failedRedisBinding = new RedisBindingRepo({
+      hgetall: async () => { throw new Error(rawDetail); },
+    } as never);
+    const failedStorage = {
+      getJSON: async () => { throw new Error(rawDetail); },
+    } as never;
+
+    await expect(failedRedisSession.getBySessionId(...FIRST)).rejects.toMatchObject({
+      name: "SessionRepoReadError",
+      message: "session repository read failed",
+    });
+    await expect(failedRedisBinding.getBinding(...FIRST)).rejects.toMatchObject({
+      name: "BindingRepoReadError",
+      message: "binding repository read failed",
+    });
+    await expect(new KvSessionRepo(failedStorage).getBySessionId(...FIRST))
+      .rejects.toMatchObject({
+        name: "SessionRepoReadError",
+        message: "session repository read failed",
+      });
+    await expect(new KvBindingRepo(failedStorage).getBinding(...FIRST))
+      .rejects.toMatchObject({
+        name: "BindingRepoReadError",
+        message: "binding repository read failed",
+      });
+
+    const sqliteSession = getSessionRepo();
+    getDb()!.close();
+    await expect(sqliteSession.getBySessionId(...FIRST)).rejects.toMatchObject({
+      name: "SessionRepoReadError",
+      message: "session repository read failed",
+    });
   });
 
   it("bounds Redis binding and hook legacy reads, TTL, touch, and clear", async () => {
