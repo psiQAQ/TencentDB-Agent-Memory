@@ -1114,6 +1114,51 @@ describe("session cache identity isolation", () => {
     },
   );
 
+  it("rechecks a bind-only mutation before a queued weak hydrate rewrite", async () => {
+    let releasePersistence!: () => void;
+    const persistenceReleased = new Promise<void>((resolve) => {
+      releasePersistence = resolve;
+    });
+    const identity = victimIdentity();
+    const key = sessionStoreKey(identity);
+    const weakState = normalizePersistedSessionInitState({
+      status: "initialized",
+      keyId: identity.sessionId,
+      userId: identity.userId,
+      bypassed: true,
+    });
+    expect(weakState).not.toBeNull();
+    const upsert = vi.fn(async () => true);
+    const repo: SessionRepo = {
+      upsert,
+      getBySessionId: vi.fn(async () => null),
+      deleteBySessionId: vi.fn(async () => true),
+      loadAllInitialized: vi.fn(async () => [{
+        spaceId: identity.spaceId!,
+        userId: identity.userId,
+        agentSource: identity.agentSource,
+        sessionId: identity.sessionId,
+        state: weakState!,
+      }]),
+    };
+    const store = new SessionStore(30 * 60 * 1_000, repo);
+    const queuedBeforeHydrate = persistenceReleased.then(() => undefined);
+    const persistenceTails = (store as unknown as {
+      persistenceTails: Map<string, Promise<void>>;
+    }).persistenceTails;
+    persistenceTails.set(key, queuedBeforeHydrate);
+
+    const hydration = store.hydrateFromDb();
+    await vi.waitFor(() => expect(persistenceTails.get(key)).not.toBe(queuedBeforeHydrate));
+    store.bind(key, identity);
+    releasePersistence();
+
+    await expect(hydration).resolves.toBe(0);
+    expect(upsert).not.toHaveBeenCalled();
+    expect(store.getBoundIdentity(key)).toEqual(identity);
+    expect(store.get(key)).toBeUndefined();
+  });
+
   it("keeps delete final when hydrate finishes before deletion", async () => {
     let signalDelete!: () => void;
     const deleteFinished = new Promise<void>((resolve) => { signalDelete = resolve; });

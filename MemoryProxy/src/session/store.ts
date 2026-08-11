@@ -738,6 +738,14 @@ export class SessionStore {
   }
 
   get(keyId: string): SessionInitState | undefined {
+    // Replacement state is provisional until the queued durable write settles.
+    // Direct consumers must observe the same fail-closed fence as recovery.
+    if (
+      this.blockedDeleteIntents.has(keyId)
+      || this.pendingDeleteReplacements.has(keyId)
+    ) {
+      return undefined;
+    }
     const state = this.states.get(keyId);
     if (!state) return undefined;
 
@@ -1191,9 +1199,14 @@ export class SessionStore {
             && (adapterNormalized || normalizedState !== row.state)
           ) {
             try {
-              await this.enqueuePersistence(keyId, () => this.repo!.upsert(
-                row.spaceId, row.userId, row.agentSource, row.sessionId, normalizedState,
-              ));
+              await this.enqueuePersistence(keyId, () => {
+                if (this.mutatedKeys.has(keyId) || this.states.has(keyId)) {
+                  return Promise.resolve(false);
+                }
+                return this.repo!.upsert(
+                  row.spaceId, row.userId, row.agentSource, row.sessionId, normalizedState,
+                );
+              });
             } catch {
               // Best-effort schema rewrite; weak identity remains out of L1.
             }

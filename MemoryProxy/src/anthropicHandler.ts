@@ -937,6 +937,11 @@ export async function handleAnthropicMessages(
         thinking: thinkingEnabled,
       });
 
+      if (!memResult.success) {
+        console.log("[mem-command] completed session=<redacted> success=false");
+        return memResult.response;
+      }
+
       // Step 20: L0 写入 — 保证对话时间线完整。
       //   同步 await 保证 L0 落盘再返回，避免响应先返回后进程未 flush 就退出丢失。
       //   注意：只有 mem 命令时全网只有这一次落盘，跟主对话路径不同（那边有 SIGTERM

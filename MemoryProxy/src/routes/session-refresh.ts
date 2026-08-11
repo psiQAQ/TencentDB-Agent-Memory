@@ -57,9 +57,15 @@ async function refreshAgentTaskDetail(
   config: ProxyConfig,
   spaceIdFromCaller: string,
   callerUserKey: string | undefined,
-): Promise<{ agentRefreshed: boolean; taskRefreshed: boolean }> {
+): Promise<{
+  agentRefreshed: boolean;
+  taskRefreshed: boolean;
+  invalidated: boolean;
+}> {
   const sessionInfo = state.sessionInfo;
-  if (!sessionInfo) return { agentRefreshed: false, taskRefreshed: false };
+  if (!sessionInfo) {
+    return { agentRefreshed: false, taskRefreshed: false, invalidated: true };
+  }
 
   // ServiceId (space) 取自 sessionInfo；调用方传入的 spaceId 作为兜底。
   const serviceId = sessionInfo.space_id || spaceIdFromCaller || "";
@@ -68,7 +74,7 @@ async function refreshAgentTaskDetail(
 
   if (!serviceId || !userKey || !config.coreSkill?.endpoint) {
     // 缺少 kernel 调用要素 → 直接跳过 detail 刷新，不视为错误。
-    return { agentRefreshed: false, taskRefreshed: false };
+    return { agentRefreshed: false, taskRefreshed: false, invalidated: false };
   }
 
   const client = getMetadataClient(config.coreSkill, serviceId, userKey);
@@ -94,6 +100,12 @@ async function refreshAgentTaskDetail(
         } as TaskDetail))
       : Promise.resolve(null as TaskDetail | null),
   ]);
+
+  // Metadata lookup yields. Do not let an older refresh write across a
+  // delete/replacement that changed authoritative session visibility.
+  if (getSessionStore().get(compositeKey) !== state) {
+    return { agentRefreshed: false, taskRefreshed: false, invalidated: true };
+  }
 
   let agentRefreshed = false;
   let taskRefreshed = false;
@@ -126,14 +138,15 @@ async function refreshAgentTaskDetail(
     };
     try {
       await getSessionStore().set(compositeKey, nextState);
-    } catch (err) {
+    } catch {
       console.warn(
         "[session-refresh] store.set failed",
       );
+      return { agentRefreshed: false, taskRefreshed: false, invalidated: true };
     }
   }
 
-  return { agentRefreshed, taskRefreshed };
+  return { agentRefreshed, taskRefreshed, invalidated: false };
 }
 
 /**
@@ -193,12 +206,20 @@ export async function refreshSessionCache(input: RefreshInput): Promise<RefreshR
 
   // Step 1: 尝试重拉 agent/task detail 并覆写 SessionStore。
   //         失败不阻断 hook 缓存刷新，只是最终返回值里 agentRefreshed/taskRefreshed 为 false。
-  const { agentRefreshed, taskRefreshed } = await refreshAgentTaskDetail(
+  const detailResult = await refreshAgentTaskDetail(
     state, compositeKey, config, spaceId, callerUserKey,
   );
 
   // Step 2: 用最新 state 里的 agent/task detail 构造 PrewarmInput。
-  const latestState = store.get(compositeKey) ?? state;
+  const latestState = store.get(compositeKey);
+  if (detailResult.invalidated || !latestState || !latestState.sessionInfo) {
+    return {
+      success: false, refreshed: [], skipped: [],
+      agentRefreshed: false, taskRefreshed: false,
+      tookMs: Date.now() - t0, error: "Session changed while refresh was running",
+    };
+  }
+  const { agentRefreshed, taskRefreshed } = detailResult;
   const sessionInfo = latestState.sessionInfo!;
   const agentDetail = latestState.agentDetail ?? null;
   const taskDetail = latestState.taskDetail ?? null;

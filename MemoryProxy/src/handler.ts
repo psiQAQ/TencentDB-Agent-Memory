@@ -830,6 +830,11 @@ export async function handleChatCompletions(
         // OpenAI 协议无 extended thinking 概念，恒 false
       });
 
+      if (!memResult.success) {
+        console.log("[mem-command] completed session=<redacted> success=false");
+        return memResult.response;
+      }
+
       // L0 写入 — 同步 await 保证落盘再返回（跟主对话路径的 trackWrite/withL0Retry
       // 兜底不同，这里 mem 命令是"仅这一次"路径，必须显式等）。
       const tdaiClientForMem = createTdaiClient(config, spaceId);
