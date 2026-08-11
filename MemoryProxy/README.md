@@ -190,7 +190,7 @@ Anthropic Messages client:
 | `POST` | `/proxy/<spaceId>/v1/chat/completions` | OpenAI-compatible main-model call (with memory instance id) |
 | `POST` | `/proxy/<spaceId>/v1/messages` | Anthropic Messages main-model call |
 | `POST` | `/v1/messages` | Anthropic Messages API (fallback without spaceId) |
-| `POST` | `/*` | OpenAI-compatible chat endpoint (catch-all) |
+| `POST` | `/v1/chat/completions` | Source-less OpenAI-compatible main-model call |
 | `ALL`  | `/skill-bridge/**` | reverse-proxy for MemoryCore skill HTTP tools |
 | `ALL`  | `/memory-bridge/**` | reverse-proxy for MemoryCore memory HTTP tools |
 | `POST` | `/v3/instance/proxy-destroy` | ops endpoint: clear COS cache on instance destroy |

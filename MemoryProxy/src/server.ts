@@ -10,7 +10,10 @@ import { createMemoryBridgeHandler } from "./memory/memory-bridge.js";
 import { createInstanceDestroyHandler } from "./routes/instance-destroy.js";
 import { createRateLimitHandlers } from "./routes/rate-limits.js";
 import { hasCostGuardMarker } from "./routes/whitelist.js";
-import { isAnthropicMessageSource } from "./agent-adapters/anthropic-platform.js";
+import {
+  isAnthropicMessageSource,
+  type AnthropicMessageSource,
+} from "./agent-adapters/anthropic-platform.js";
 import {
   isOpenAIPlatformSource,
   type OpenAIChatSource,
@@ -23,6 +26,11 @@ import type { ProxyConfig } from "./types.js";
 function bindOpenAISpaceRoute(source: string): OpenAIChatSource | undefined {
   if (source === "proxy") return "openai";
   return isOpenAIPlatformSource(source) ? source : undefined;
+}
+
+function bindAnthropicSpaceRoute(source: string): AnthropicMessageSource | undefined {
+  if (source === "proxy") return "claude-code";
+  return isAnthropicMessageSource(source) ? source : undefined;
 }
 
 export function createApp(config: ProxyConfig): Hono {
@@ -175,9 +183,11 @@ export function createApp(config: ProxyConfig): Hono {
       return handleAnthropicMessages(
         c,
         config,
-        isAnthropicMessageSource(source) ? source : undefined,
+        bindAnthropicSpaceRoute(source),
       );
     });
+    app.post("/codebuddy/:spaceId/cost-guard/chat/completions", (c) =>
+      handleChatCompletions(c, config, "codebuddy"));
     app.post("/:agent/:spaceId/cost-guard/v1/chat/completions", (c) => {
       const source = c.req.param("agent");
       return handleChatCompletions(c, config, bindOpenAISpaceRoute(source));
@@ -199,7 +209,7 @@ export function createApp(config: ProxyConfig): Hono {
       return handleAnthropicMessages(
         c,
         config,
-        isAnthropicMessageSource(source) ? source : undefined,
+        bindAnthropicSpaceRoute(source),
       );
     });
     app.post("/:agent/:spaceId/analyse/v1/chat/completions", (c) => {
@@ -224,8 +234,14 @@ export function createApp(config: ProxyConfig): Hono {
     handleAuxiliaryEndpoint(c, config, "pi"));
   // Keep the generic shape only as an explicit fail-closed guard for unknown
   // Anthropic-style prefixes. It has no platform binding and cannot forward.
-  app.post("/:agent/:spaceId/v1/messages", (c) => handleAnthropicMessages(c, config));
-  app.post("/:agent/:spaceId/v1/messages/count_tokens", (c) => handleAuxiliaryEndpoint(c, config));
+  app.post("/:agent/:spaceId/v1/messages", (c) => {
+    const source = c.req.param("agent");
+    return handleAnthropicMessages(c, config, bindAnthropicSpaceRoute(source));
+  });
+  app.post("/:agent/:spaceId/v1/messages/count_tokens", (c) => {
+    const source = c.req.param("agent");
+    return handleAuxiliaryEndpoint(c, config, bindAnthropicSpaceRoute(source));
+  });
   app.post("/:agent/:spaceId/v1/embeddings", (c) => {
     const source = c.req.param("agent");
     return handleAuxiliaryEndpoint(c, config, bindOpenAISpaceRoute(source));

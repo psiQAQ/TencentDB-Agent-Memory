@@ -172,6 +172,20 @@ describe("OpenAI upstream header privacy", () => {
     },
   );
 
+  it("preserves the CodeBuddy cost-guard bare-tail compatibility route", async () => {
+    const value = config();
+    value.costGuard.markerOptIn = true;
+    initAuth(value.auth);
+    const response = await createApp(value).request(
+      "http://proxy/codebuddy/space-1/cost-guard/chat/completions",
+      { method: "POST", headers: privateHeaders(), body: requestBody() },
+    );
+
+    expect(response.status).toBe(200);
+    expect(upstreamHeaders).toHaveLength(1);
+    assertSafe(upstreamHeaders[0]!, "Bearer server-global-key");
+  });
+
   it.each([
     "/proxy/space-1/v1/chat/completions",
     "/v1/chat/completions",

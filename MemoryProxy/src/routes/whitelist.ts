@@ -96,6 +96,9 @@ const SORTED_BY_SUFFIX_LEN: readonly WhitelistEndpoint[] = [...WHITELIST_ENDPOIN
 
 /** `/proxy/{spaceId}` 前缀正则：仅剥离一层，避免误伤路径中的 "proxy" 字面量。 */
 const PROXY_PREFIX_RE = /^\/proxy\/[^/]+/;
+/** CodeBuddy historically appends a bare `/chat/completions` tail in guard mode. */
+const CODEBUDDY_GUARD_BARE_CHAT_RE =
+  /^\/codebuddy\/[^/]+\/cost-guard\/chat\/completions$/i;
 /**
  * Agent 前缀正则：匹配 `/{agent}[/{spaceId}]/v1/...` 两种形态。
  *   - `/claude-code/v1/messages`              → 剥 `/claude-code`
@@ -173,6 +176,9 @@ export function hasAnalyseMarker(requestPath: string): boolean {
 export function normalizeWhitelistRequestPath(requestPath: string): string {
   if (!requestPath) return "";
   const withoutQuery = requestPath.split("?", 1)[0] ?? "";
+  if (CODEBUDDY_GUARD_BARE_CHAT_RE.test(withoutQuery)) {
+    return "/v1/chat/completions";
+  }
   // Order matters: strip `/cost-guard` / `/analyse` markers FIRST while the
   // surrounding `/{prefix}/{spaceId}` context is still intact — the markers'
   // lookbehind requires ≥ 2 leading segments. Then AGENT/PROXY prefixes see

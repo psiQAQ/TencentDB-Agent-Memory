@@ -190,7 +190,7 @@ Anthropic Messages 客户端：
 | `POST` | `/proxy/<spaceId>/v1/chat/completions` | OpenAI 兼容主模型调用（带 memory 实例 id） |
 | `POST` | `/proxy/<spaceId>/v1/messages` | Anthropic Messages 主模型调用 |
 | `POST` | `/v1/messages` | Anthropic Messages API（无 spaceId 兜底） |
-| `POST` | `/*` | OpenAI 兼容聊天接口（catch-all） |
+| `POST` | `/v1/chat/completions` | 无平台前缀的 OpenAI 兼容主模型调用 |
 | `ALL`  | `/skill-bridge/**` | 反向代理 MemoryCore skill HTTP 工具 |
 | `ALL`  | `/memory-bridge/**` | 反向代理 MemoryCore memory HTTP 工具 |
 | `POST` | `/v3/instance/proxy-destroy` | 运维口：实例销毁时清 COS 缓存 |

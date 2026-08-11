@@ -105,6 +105,23 @@ describe("native Anthropic platform routes", () => {
     expect(resolveAgentAdapter(source).agentKind).toBe(source);
   });
 
+  it("preserves the documented source-less /proxy/<space>/v1/messages route", async () => {
+    const config = configWithAuth();
+    initAuth(config.auth);
+    const app = createApp(config);
+
+    const response = await app.request(
+      "http://proxy/proxy/space-1/v1/messages",
+      messagesRequest("session_proxy_compat"),
+    );
+
+    expect(response.status).toBe(200);
+    expect(calls).toEqual([
+      "https://memory-core.invalid/v3/meta/auth/verify",
+      "https://claude-code.upstream.invalid/anthropic/v1/messages",
+    ]);
+  });
+
   it.each(SOURCES)("does not forward private headers on the %s main route", async (source) => {
     const config = configWithAuth();
     initAuth(config.auth);
