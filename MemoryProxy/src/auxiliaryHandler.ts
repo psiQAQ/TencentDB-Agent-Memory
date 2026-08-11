@@ -243,10 +243,10 @@ export async function handleAuxiliaryEndpoint(
       body: rawBody,
       redirect: "manual",
     });
-  } catch (err: unknown) {
-    pipe.error("AUX_FORWARD", err instanceof Error ? err : new Error(String(err)));
+  } catch {
+    pipe.error("AUX_FORWARD", "transport_error");
     return c.json(
-      { error: "Upstream request failed", detail: err instanceof Error ? err.message : String(err) },
+      { error: "Upstream request failed", detail: "upstream_transport_error" },
       502,
     );
   }
@@ -263,7 +263,10 @@ export async function handleAuxiliaryEndpoint(
   if (isStream) {
     // Stream 分支：直接 pipe，本期不做 SSE tap 提取 usage
     // （credit 会在客户端断开或 tap 逻辑二期补齐时再实现）
-    log.debug("aux.stream.passthrough", { path: c.req.path, upstreamUrl });
+    log.debug("aux.stream.passthrough", {
+      protocol: entry.protocol,
+      upstreamConfigured: upstreamUrl.length > 0,
+    });
     return new Response(upstreamResp.body, {
       status: upstreamResp.status,
       headers: filterResponseHeaders(upstreamResp.headers),
@@ -287,12 +290,11 @@ export async function handleAuxiliaryEndpoint(
         upstreamUrl,
         "usage",
       );
-    } catch (err: unknown) {
-      log.error(
-        "aux.credit_report_failed",
-        { path: c.req.path, upstreamUrl },
-        err instanceof Error ? err : new Error(String(err)),
-      );
+    } catch {
+      log.error("aux.credit_report_failed", {
+        category: "report_error",
+        protocol: entry.protocol,
+      });
     }
 
     // JSONL + ClickHouse usage 落表（复用主 handler 的路径）
