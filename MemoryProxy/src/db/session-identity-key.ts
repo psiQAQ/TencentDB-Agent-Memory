@@ -72,12 +72,19 @@ export function persistedStateOwnsIdentity(
   );
   if (owners.length === 0 || owners.some((owner) => owner !== identity.userId)) return false;
 
-  const sessions = [state.keyId, state.sessionInfo?.session_id].filter(
-    (value): value is string => typeof value === "string" && value.length > 0,
-  );
-  if (sessions.length === 0 || sessions.some((session) => session !== identity.sessionId)) {
-    return false;
-  }
+  const legacyRecoveryKeyId = `${identity.agentSource}:${identity.sessionId}`;
+  if (
+    typeof state.keyId === "string"
+    && state.keyId.length > 0
+    && state.keyId !== identity.sessionId
+    && state.keyId !== legacyRecoveryKeyId
+  ) return false;
+  if (
+    typeof state.sessionInfo?.session_id === "string"
+    && state.sessionInfo.session_id.length > 0
+    && state.sessionInfo.session_id !== identity.sessionId
+  ) return false;
+  if (!state.keyId && !state.sessionInfo?.session_id) return false;
 
   const storedSpace = state.sessionInfo?.space_id;
   if (requireExplicitSpace) return storedSpace === identity.spaceId;

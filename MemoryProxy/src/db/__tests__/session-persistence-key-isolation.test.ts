@@ -442,6 +442,31 @@ describe("collision-safe persisted session identity keys", () => {
     expect(await sessions.getBySessionId(...literalDefault)).toBeNull();
   });
 
+  it("reads and deletes legacy recovery-only rows with an exact source-prefixed keyId", async () => {
+    const identity = ["space", "user", "claude-code", "legacy-recovery"] as const;
+    const recoveryState = state(identity, "legacy-recovery-agent");
+    recoveryState.keyId = `${identity[2]}:${identity[3]}`;
+
+    insertLegacySession(identity, recoveryState);
+    const sqlite = getSessionRepo();
+    expect((await sqlite.getBySessionId(...identity))?.agentDetail?.id)
+      .toBe("legacy-recovery-agent");
+    sqlite.deleteBySessionId(...identity);
+    expect(getDb()!.prepare("SELECT COUNT(*) AS count FROM sessions WHERE session_id = ?")
+      .get(legacyIdentityKey(identity))).toEqual({ count: 0 });
+
+    const redis = new FakeRedis();
+    const redisRepo = new RedisSessionRepo(redis as never);
+    const legacyRedisKey = `inj:sess:${legacyIdentityKey(identity)}`;
+    redis.strings.set(legacyRedisKey, JSON.stringify(recoveryState));
+    redis.ttls.set(legacyRedisKey, 60);
+    expect((await redisRepo.getBySessionId(...identity))?.agentDetail?.id)
+      .toBe("legacy-recovery-agent");
+    redisRepo.deleteBySessionId(...identity);
+    await settle();
+    expect(redis.strings.has(legacyRedisKey)).toBe(false);
+  });
+
   it("never falls back to legacy Redis state after a conflicting v2 row", async () => {
     const redis = new FakeRedis();
     const sessions = new RedisSessionRepo(redis as never);
