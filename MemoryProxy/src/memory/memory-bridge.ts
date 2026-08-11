@@ -79,7 +79,12 @@ function toIdFields(
   state: import("../session/types.js").SessionInitState | undefined,
   identity: SessionIdentity,
 ): SessionIdFields | null {
-  if (!state || state.status !== "initialized" || !state.sessionInfo) return null;
+  if (
+    !state
+    || state.status !== "initialized"
+    || state.contextSuppressed
+    || !state.sessionInfo
+  ) return null;
   const s = state.sessionInfo;
   if (!s.user_id || !s.team_id || !s.agent_id || !s.session_id) return null;
   if (

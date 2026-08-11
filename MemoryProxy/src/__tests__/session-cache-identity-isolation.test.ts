@@ -209,6 +209,20 @@ function fetchStub(fetchCategories: string[], upstreamBodies: Record<string, unk
         stop_reason: "end_turn",
       });
     }
+    if (url === "https://codebuddy.upstream.invalid/v1/chat/completions") {
+      fetchCategories.push("model-upstream");
+      upstreamBodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+      return Response.json({
+        id: "chatcmpl-test",
+        object: "chat.completion",
+        model: "test-model",
+        choices: [{
+          index: 0,
+          message: { role: "assistant", content: "ok" },
+          finish_reason: "stop",
+        }],
+      });
+    }
     if (url.startsWith("https://core.invalid/")) {
       fetchCategories.push("core-bridge");
       return Response.json({ code: 0, data: { items: [] } });
@@ -281,6 +295,58 @@ describe("session cache identity isolation", () => {
     for (const method of Object.values(metadataClient)) {
       expect(method).not.toHaveBeenCalled();
     }
+  });
+
+  it.each([
+    ["anthropic", VICTIM.source, `/${VICTIM.source}/${VICTIM.spaceId}/v1/messages`],
+    ["openai", "codebuddy", `/codebuddy/${VICTIM.spaceId}/v1/chat/completions`],
+  ] as const)("rejects a context-suppressed %s session before downstream work", async (
+    protocol,
+    agentSource,
+    path,
+  ) => {
+    const config = configForTest();
+    config.upstream.agents!.codebuddy = {
+      url: "https://codebuddy.upstream.invalid/v1",
+      apiKey: "codebuddy-server-key",
+    };
+    config.injection.enabled = true;
+    config.injection.injectors = ["skill"];
+    config.extraction = { enabled: true, extractors: ["skill", "tdai-memory"] };
+    config.tdai.enabled = true;
+    config.tdai.memory.enabled = true;
+    config.tdai.memory.writeL0 = true;
+    const fetchCategories: string[] = [];
+    const upstreamBodies: Record<string, unknown>[] = [];
+    initAuth(config.auth);
+    vi.stubGlobal("fetch", fetchStub(fetchCategories, upstreamBodies));
+
+    const identity = { ...victimIdentity(), agentSource };
+    const key = sessionStoreKey(identity);
+    const store = getSessionStore();
+    store.bind(key, identity);
+    await store.set(key, {
+      ...victimState(),
+      contextSuppressed: true,
+    } as SessionInitState);
+    const app = createApp(config);
+    const request = mainRequest(VICTIM.key, VICTIM.userId, VICTIM);
+    if (protocol === "openai") {
+      const headers = new Headers(request.headers);
+      headers.delete("x-api-key");
+      headers.set("authorization", `Bearer ${VICTIM.key}`);
+      request.headers = headers;
+    }
+
+    const response = await app.request(
+      `http://proxy${path}`,
+      request,
+    );
+
+    expect(response.status).toBe(409);
+    await expect(response.json()).resolves.toEqual({ error: "session_context_unavailable" });
+    expect(fetchCategories).toEqual(["auth"]);
+    expect(upstreamBodies).toHaveLength(0);
   });
 
   it.each([
@@ -956,6 +1022,113 @@ describe("session cache identity isolation", () => {
     expect(store.get(secondKey)).toBeUndefined();
   });
 
+  it.each(["handled-failure", "no-session-repo", "no-metadata"] as const)(
+    "does not treat a history-derived binding as durable without proof (%s)",
+    async (durabilityCase) => {
+    const firstIdentity: FullSessionIdentity = {
+      userId: VICTIM.userId,
+      agentSource: VICTIM.source,
+      sessionId: VICTIM.sessionId,
+      spaceId: VICTIM.spaceId,
+      agentId: VICTIM.agentId,
+    };
+    const secondIdentity: FullSessionIdentity = {
+      userId: OUTSIDER.userId,
+      agentSource: firstIdentity.agentSource,
+      sessionId: firstIdentity.sessionId,
+      spaceId: OUTSIDER.spaceId,
+      teamId: OUTSIDER.teamId,
+      agentId: OUTSIDER.agentId,
+      taskId: OUTSIDER.taskId,
+    };
+    const secondState: SessionInitState = {
+      ...victimState(),
+      userId: secondIdentity.userId,
+      sessionInfo: {
+        ...victimState().sessionInfo!,
+        user_id: secondIdentity.userId,
+        space_id: secondIdentity.spaceId,
+        team_id: secondIdentity.teamId!,
+        agent_id: secondIdentity.agentId!,
+        task_id: secondIdentity.taskId,
+      },
+      agentDetail: { id: secondIdentity.agentId!, name: "Second Agent" },
+      taskDetail: { id: secondIdentity.taskId!, name: "Second Task" },
+    };
+    const upsert = vi.fn(async () => false);
+    const repo: SessionRepo | undefined = durabilityCase === "handled-failure"
+      ? {
+          upsert,
+          getBySessionId: vi.fn(async (_space, userId) => userId === secondIdentity.userId
+            ? secondState
+            : null),
+          deleteBySessionId: vi.fn(() => undefined),
+          loadAllInitialized: async () => [],
+        }
+      : undefined;
+    const bindingRepo: BindingRepo | undefined = durabilityCase !== "handled-failure"
+      ? {
+          getBinding: vi.fn(async (_space, userId): Promise<SessionBinding | null> => (
+            userId === secondIdentity.userId
+              ? {
+                  outcome: "initialized",
+                  userId: secondIdentity.userId,
+                  teamId: secondIdentity.teamId,
+                  agentId: secondIdentity.agentId,
+                  taskId: secondIdentity.taskId,
+                }
+              : null
+          )),
+          putBinding: vi.fn(async () => true),
+          deleteBinding: vi.fn(async () => undefined),
+          touchLastSeen: vi.fn(async () => undefined),
+        }
+      : undefined;
+    const store = new SessionStore(30 * 60 * 1_000, repo, bindingRepo);
+    const firstKey = sessionStoreKey(firstIdentity);
+    const secondKey = sessionStoreKey(secondIdentity);
+    const metadataClient = {
+      getAgent: vi.fn(async () => ({
+        agent_id: firstIdentity.agentId!,
+        name: "History Agent",
+      })),
+      getTask: vi.fn(async () => null),
+    };
+
+    await expect(store.getOrRecover(firstKey, firstIdentity, {
+      metadataClient: durabilityCase === "no-metadata" ? undefined : metadataClient as never,
+      messages: [
+        { role: "user", content: "first turn" },
+        {
+          role: "assistant",
+          content: [{
+            type: "tool_use",
+            id: "toolu_cc_session_init_history",
+            name: "AskUserQuestion",
+            input: {
+              question: "Select Agent",
+              options: [`History Agent (${firstIdentity.agentId})`],
+            },
+          }],
+        },
+        { role: "user", content: "selected" },
+      ],
+    })).resolves.toMatchObject(durabilityCase === "no-metadata"
+      ? { bypassed: true, sessionInfo: null }
+      : {
+          sessionInfo: { agent_id: firstIdentity.agentId },
+          agentDetail: { id: firstIdentity.agentId },
+        });
+    expect(upsert).toHaveBeenCalledTimes(durabilityCase === "handled-failure" ? 1 : 0);
+
+    await expect(store.getOrRecover(secondKey, secondIdentity, {}))
+      .rejects.toMatchObject({ name: "SessionIdentityConflictError" });
+    expect(store.getBoundIdentity(firstKey)).toMatchObject(firstIdentity);
+    expect(store.getBoundIdentity(secondKey)).toBeUndefined();
+    expect(store.get(secondKey)).toBeUndefined();
+    },
+  );
+
   it("keeps a newer same-identity state installed while metadata recovery waits", async () => {
     let signalMetadata!: () => void;
     let releaseMetadata!: () => void;
@@ -1037,6 +1210,7 @@ describe("session cache identity isolation", () => {
       metadataClient: metadataClient as never,
     });
     expect(first).toMatchObject({
+      contextSuppressed: true,
       sessionInfo: { agent_id: identity.agentId, task_id: identity.taskId },
       agentDetail: null,
     });
@@ -1050,6 +1224,7 @@ describe("session cache identity isolation", () => {
     await expect(restarted.getOrRecover(key, identity, {
       metadataClient: metadataClient as never,
     })).resolves.toMatchObject({
+      contextSuppressed: true,
       sessionInfo: { agent_id: identity.agentId, task_id: identity.taskId },
       agentDetail: null,
     });
@@ -1090,6 +1265,7 @@ describe("session cache identity isolation", () => {
         metadataClient: metadataClient as never,
       });
       expect(first).toMatchObject({
+        contextSuppressed: true,
         sessionInfo: { agent_id: identity.agentId, task_id: identity.taskId },
         agentDetail: { id: identity.agentId },
         taskDetail: null,
@@ -1103,6 +1279,7 @@ describe("session cache identity isolation", () => {
       await expect(restarted.getOrRecover(key, identity, {
         metadataClient: metadataClient as never,
       })).resolves.toMatchObject({
+        contextSuppressed: true,
         sessionInfo: { agent_id: identity.agentId, task_id: identity.taskId },
         taskDetail: null,
       });
@@ -1688,6 +1865,42 @@ describe("session cache identity isolation", () => {
     });
     expect(restartedStore.getBoundIdentity(key)).toEqual(identity);
     expect(restartedStore.get(key)).toMatchObject({ bypassed: true, userId: VICTIM.userId });
+  });
+
+  it.each([
+    ["memory", "/memory-bridge/v3/scenario/read"],
+    ["skill", "/skill-bridge/v3/skill/list"],
+  ] as const)("rejects a context-suppressed %s bridge session before Core", async (_bridge, path) => {
+    const config = configForTest();
+    const fetchCategories: string[] = [];
+    const upstreamBodies: Record<string, unknown>[] = [];
+    initAuth(config.auth);
+    vi.stubGlobal("fetch", fetchStub(fetchCategories, upstreamBodies));
+    const identity = victimIdentity();
+    const key = sessionStoreKey(identity);
+    const store = getSessionStore();
+    store.bind(key, identity);
+    await store.set(key, {
+      ...victimState(),
+      contextSuppressed: true,
+    } as SessionInitState);
+    const app = createApp(config);
+
+    const response = await app.request(`http://proxy${path}`, {
+      method: "POST",
+      headers: {
+        "authorization": `Bearer ${VICTIM.key}`,
+        "content-type": "application/json",
+        "x-conversation-id": VICTIM.sessionId,
+        "x-tdai-service-id": VICTIM.spaceId,
+        "x-tdai-agent-source": VICTIM.source,
+      },
+      body: "{}",
+    });
+
+    expect(response.status).toBe(401);
+    expect(fetchCategories).toEqual(["auth"]);
+    expect(upstreamBodies).toHaveLength(0);
   });
 
   it.each([

@@ -222,7 +222,11 @@ function identityClaimFromState(
   };
 }
 
-function recoveryIdentityKey(keyId: string, identity: SessionIdentity): string {
+function recoveryIdentityKey(
+  keyId: string,
+  identity: SessionIdentity,
+  bindingClaim: RawSessionClaim,
+): string {
   return JSON.stringify([
     keyId,
     identity.userId,
@@ -232,6 +236,7 @@ function recoveryIdentityKey(keyId: string, identity: SessionIdentity): string {
     identity.teamId ?? "",
     identity.agentId ?? "",
     identity.taskId ?? "",
+    bindingClaim,
   ]);
 }
 
@@ -854,7 +859,7 @@ export class SessionStore {
     }
 
     // Step 3.2: initialized outcome → rebuild via kernel
-    return this.rebuildFromBinding(keyId, claimed, binding, ctx);
+    return this.rebuildFromBinding(keyId, claimed, binding, "persisted", ctx);
   }
 
   /**
@@ -923,12 +928,13 @@ export class SessionStore {
     keyId: string,
     identity: SessionIdentity,
     binding: SessionBinding,
+    bindingClaim: RawSessionClaim,
     ctx: RecoveryContext,
   ): Promise<SessionInitState | undefined> {
-    const inFlightKey = recoveryIdentityKey(keyId, identity);
+    const inFlightKey = recoveryIdentityKey(keyId, identity, bindingClaim);
     const inFlight = this.recoveryInFlight.get(inFlightKey);
     if (inFlight) return inFlight;
-    const p = this.doRebuild(keyId, identity, binding, ctx)
+    const p = this.doRebuild(keyId, identity, binding, bindingClaim, ctx)
       .finally(() => this.recoveryInFlight.delete(inFlightKey));
     this.recoveryInFlight.set(inFlightKey, p);
     return p;
@@ -938,6 +944,7 @@ export class SessionStore {
     keyId: string,
     identity: SessionIdentity,
     binding: SessionBinding,
+    bindingClaim: RawSessionClaim,
     ctx: RecoveryContext,
   ): Promise<SessionInitState | undefined> {
     // Step 4.1: never rebuild a binding under a conflicting caller identity.
@@ -945,7 +952,11 @@ export class SessionStore {
     if (!bindingMatchesIdentity(binding, claimed)) {
       throw new SessionIdentityConflictError();
     }
-    claimed = this.claimIdentity(keyId, identityClaimFromBinding(claimed, binding), "persisted");
+    claimed = this.claimIdentity(
+      keyId,
+      identityClaimFromBinding(claimed, binding),
+      bindingClaim,
+    );
 
     if (!ctx.metadataClient) {
       // No client → can't recover, degrade to one-shot bypass
@@ -969,7 +980,11 @@ export class SessionStore {
     if (!bindingMatchesIdentity(binding, claimed)) {
       throw new SessionIdentityConflictError();
     }
-    claimed = this.claimIdentity(keyId, identityClaimFromBinding(claimed, binding), "persisted");
+    claimed = this.claimIdentity(
+      keyId,
+      identityClaimFromBinding(claimed, binding),
+      bindingClaim,
+    );
 
     const isNotFound = (e: unknown): boolean =>
       typeof e === "object" && e !== null && (e as { notFound?: boolean }).notFound === true;
@@ -1047,6 +1062,7 @@ export class SessionStore {
       userId: binding.userId,
       agentDetail,
       taskDetail,
+      ...(agentNotFound || taskNotFound ? { contextSuppressed: true } : {}),
     };
 
     // Step 4.5: write back to L1 + L2a
@@ -1057,8 +1073,9 @@ export class SessionStore {
     // 防御性 catch 见 `set()` 头注释。
     if (this.repo) {
       const beforePersist = this.snapshotState(keyId);
+      let statePersisted = false;
       try {
-        await this.enqueuePersistence(keyId, () => this.repo!.upsert(
+        statePersisted = await this.enqueuePersistence(keyId, () => this.repo!.upsert(
           spaceOf(claimed), claimed.userId, claimed.agentSource, claimed.sessionId, rebuilt,
         ));
       } catch {
@@ -1066,7 +1083,7 @@ export class SessionStore {
       }
       const stateAfterPersist = this.stateAfterAwait(keyId, beforePersist, claimed);
       if (stateAfterPersist.changed) return stateAfterPersist.state;
-      this.claimIdentity(keyId, claimed, "persisted");
+      if (statePersisted) this.claimIdentity(keyId, claimed, "persisted");
     }
 
     console.log(`[session-recover] session=<redacted> rebuilt from binding agent=${binding.agentId ? "present" : "none"} task=${binding.taskId ? "present" : "none"}`);
@@ -1195,7 +1212,7 @@ export class SessionStore {
       agentId: foundAgentId,
       taskId: foundTaskId,
     };
-    return this.rebuildFromBinding(keyId, identity, binding, ctx);
+    return this.rebuildFromBinding(keyId, identity, binding, "exclusive", ctx);
   }
 }
 

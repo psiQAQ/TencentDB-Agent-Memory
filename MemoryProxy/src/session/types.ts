@@ -70,6 +70,13 @@ export interface SessionInitState {
   /** Resolved task detail (cached after selection), used to inject context every request. */
   taskDetail?: TaskDetail | null;
   /**
+   * The bound identity remains monotonic, but Core authoritatively reported
+   * that its Agent or Task no longer exists. Consumers must fail closed before
+   * capability, injection, extraction, bridge, or model work; `sessionInfo`
+   * is retained only as an ownership claim for conflict checks and restart.
+   */
+  contextSuppressed?: boolean;
+  /**
    * 用户明确选择了"跳过"（本次不关联）。状态设为 initialized 防止重复弹窗，
    * 但 agentDetail/taskDetail 为 null，后续请求只 strip 不 inject。
    */

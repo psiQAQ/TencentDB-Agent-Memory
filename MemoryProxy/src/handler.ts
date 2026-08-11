@@ -621,6 +621,10 @@ export async function handleChatCompletions(
         metadataClient,
         messages: body.messages as Array<Record<string, unknown>> ?? [],
       });
+      if (recovered?.contextSuppressed) {
+        console.warn("[session-init] request rejected reason=context_unavailable");
+        return c.json({ error: "session_context_unavailable" }, 409);
+      }
 
       let initResult: Awaited<ReturnType<typeof handleSessionInit>>;
       // Only treat the session as "recovered" when it's in a terminal state
