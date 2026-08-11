@@ -15,9 +15,19 @@
  */
 
 import type { Redis } from "ioredis";
+import {
+  legacyPersistedSessionIdentityKey,
+  persistedSessionIdentityKey,
+} from "./session-identity-key.js";
 
 const REDIS_KEY_PREFIX = "inj:binding:";
 const DEFAULT_BINDING_TTL_DAYS = 30;
+const TOUCH_IF_PRESENT_SCRIPT = `
+if redis.call("EXISTS", KEYS[1]) == 0 then return 0 end
+redis.call("HSET", KEYS[1], "last_seen", ARGV[1])
+redis.call("EXPIRE", KEYS[1], ARGV[2])
+return 1
+`;
 
 export interface SessionBinding {
   outcome: "initialized" | "bypassed";
@@ -65,15 +75,51 @@ function redisKey(
   agentSource: string,
   sessionId: string,
 ): string {
-  const sp = spaceId || "_default";
-  return `${REDIS_KEY_PREFIX}${sp}:${userId}:${agentSource}:${sessionId}`;
+  return REDIS_KEY_PREFIX
+    + persistedSessionIdentityKey(spaceId, userId, agentSource, sessionId);
+}
+
+function legacyRedisKey(
+  spaceId: string,
+  userId: string,
+  agentSource: string,
+  sessionId: string,
+): string | null {
+  // Legacy binding hashes have no space metadata, so `_default` cannot prove
+  // whether it represented an empty space or the literal `_default` space.
+  if (spaceId === "") return null;
+  const tail = legacyPersistedSessionIdentityKey(
+    spaceId,
+    userId,
+    agentSource,
+    sessionId,
+  );
+  return tail ? REDIS_KEY_PREFIX + tail : null;
+}
+
+function bindingFromHash(all: Record<string, string>): SessionBinding {
+  return {
+    outcome: (all.outcome as "initialized" | "bypassed") || "initialized",
+    userId: all.user_id || undefined,
+    teamId: all.team_id || undefined,
+    agentId: all.agent_id || undefined,
+    taskId: all.task_id || undefined,
+  };
 }
 
 export class RedisBindingRepo implements BindingRepo {
+  private readonly bindingTtlSeconds: number;
+
   constructor(
     private redis: Redis,
-    private bindingTtlDays: number = DEFAULT_BINDING_TTL_DAYS,
-  ) {}
+    bindingTtlDays: number = DEFAULT_BINDING_TTL_DAYS,
+  ) {
+    const seconds = ttlSeconds(bindingTtlDays);
+    if (!Number.isSafeInteger(seconds) || seconds <= 0) {
+      throw new Error("invalid Redis binding TTL");
+    }
+    this.bindingTtlSeconds = seconds;
+  }
 
   async getBinding(
     spaceId: string,
@@ -82,15 +128,21 @@ export class RedisBindingRepo implements BindingRepo {
     sessionId: string,
   ): Promise<SessionBinding | null> {
     try {
-      const all = await this.redis.hgetall(redisKey(spaceId, userId, agentSource, sessionId));
-      if (!all || Object.keys(all).length === 0) return null;
-      return {
-        outcome: (all.outcome as "initialized" | "bypassed") || "initialized",
-        userId: all.user_id || undefined,
-        teamId: all.team_id || undefined,
-        agentId: all.agent_id || undefined,
-        taskId: all.task_id || undefined,
-      };
+      const currentKey = redisKey(spaceId, userId, agentSource, sessionId);
+      const current = await this.redis.hgetall(currentKey);
+      if (current && Object.keys(current).length > 0) {
+        if (current.user_id && current.user_id !== userId) return null;
+        return bindingFromHash(current);
+      }
+
+      const legacyKey = legacyRedisKey(spaceId, userId, agentSource, sessionId);
+      if (!legacyKey) return null;
+      const legacy = await this.redis.hgetall(legacyKey);
+      if (!legacy || Object.keys(legacy).length === 0 || legacy.user_id !== userId) {
+        return null;
+      }
+      if (await this.redis.ttl(legacyKey) <= 0) return null;
+      return bindingFromHash(legacy);
     } catch {
       return null;
     }
@@ -116,8 +168,11 @@ export class RedisBindingRepo implements BindingRepo {
       if (binding.taskId) fields.task_id = binding.taskId;
 
       const key = redisKey(spaceId, userId, agentSource, sessionId);
-      await this.redis.hset(key, fields);
-      await this.redis.expire(key, ttlSeconds(this.bindingTtlDays));
+      await this.redis
+        .multi()
+        .hset(key, fields)
+        .expire(key, this.bindingTtlSeconds)
+        .exec();
     } catch {
       /* ignore */
     }
@@ -131,6 +186,10 @@ export class RedisBindingRepo implements BindingRepo {
   ): Promise<void> {
     try {
       await this.redis.del(redisKey(spaceId, userId, agentSource, sessionId));
+      const legacyKey = legacyRedisKey(spaceId, userId, agentSource, sessionId);
+      if (!legacyKey) return;
+      const legacy = await this.redis.hgetall(legacyKey);
+      if (legacy.user_id === userId) await this.redis.del(legacyKey);
     } catch {
       /* ignore */
     }
@@ -144,8 +203,13 @@ export class RedisBindingRepo implements BindingRepo {
   ): Promise<void> {
     try {
       const key = redisKey(spaceId, userId, agentSource, sessionId);
-      await this.redis.hset(key, "last_seen", Date.now().toString());
-      await this.redis.expire(key, ttlSeconds(this.bindingTtlDays));
+      await this.redis.eval(
+        TOUCH_IF_PRESENT_SCRIPT,
+        1,
+        key,
+        Date.now().toString(),
+        this.bindingTtlSeconds.toString(),
+      );
     } catch {
       /* ignore */
     }

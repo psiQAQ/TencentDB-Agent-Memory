@@ -25,6 +25,13 @@ import type Database from "better-sqlite3";
 
 import { getDb } from "./index.js";
 import type { SessionInitState } from "../session/types.js";
+import {
+  legacyPersistedSessionIdentityKey,
+  parsePersistedSessionIdentityKey,
+  persistedSessionIdentityKey,
+  persistedStateOwnsIdentity,
+  type PersistedSessionIdentity,
+} from "./session-identity-key.js";
 
 export interface PersistedSessionRow {
   session_id: string;
@@ -43,11 +50,8 @@ export interface PersistedSessionRow {
 }
 
 /**
- * Stable id used in the `sessions` table for a given state.
- *
- * 复合键：`${spaceId}:${userId}:${agentSource}:${sessionId}` —— spaceId 段是
- * P4 新增，用于 kernel-sts 模式下按 space 隔离。空 spaceId 用 `_default` 兜底
- * 段（老部署继续能跑）。Sqlite schema 不变，只是主键字符串多一段。
+ * Collision-safe, versioned id used in the `sessions` table for a state.
+ * The raw identity fields are kept inside one canonical encoded tuple.
  */
 export function sessionRowId(
   spaceId: string,
@@ -55,8 +59,7 @@ export function sessionRowId(
   agentSource: string,
   sessionId: string,
 ): string {
-  const sp = spaceId || "_default";
-  return `${sp}:${userId}:${agentSource}:${sessionId}`;
+  return persistedSessionIdentityKey(spaceId, userId, agentSource, sessionId);
 }
 
 function jsonOrNull<T>(v: T | null | undefined): string | null {
@@ -107,18 +110,13 @@ function rowToState(row: PersistedSessionRow): SessionInitState | null {
   return parsed;
 }
 
-/**
- * 从复合主键反解出 (spaceId, userId, agentSource, sessionId)。
- * 复合主键格式：`{spaceId}:{userId}:{agentSource}:{sessionId}`。
- * spaceId 段为 `_default` 表示老 caller 缺失 spaceId 上下文。
- */
-function parseSessionRowId(
-  id: string,
-): { spaceId: string; userId: string; agentSource: string; sessionId: string } | null {
-  const parts = id.split(":");
-  if (parts.length < 4) return null;
-  const [spaceId, userId, agentSource, ...rest] = parts;
-  return { spaceId, userId, agentSource, sessionId: rest.join(":") };
+function identityOf(
+  spaceId: string,
+  userId: string,
+  agentSource: string,
+  sessionId: string,
+): PersistedSessionIdentity {
+  return { spaceId, userId, agentSource, sessionId };
 }
 
 const UPSERT_SQL = `
@@ -222,12 +220,32 @@ class SqliteSessionRepo implements SessionRepo {
     sessionId: string,
   ): Promise<SessionInitState | null> {
     try {
-      const row = this.db
-        .prepare("SELECT * FROM sessions WHERE session_id = ?")
-        .get(sessionRowId(spaceId, userId, agentSource, sessionId)) as
+      const select = this.db.prepare("SELECT * FROM sessions WHERE session_id = ?");
+      const identity = identityOf(spaceId, userId, agentSource, sessionId);
+      const row = select.get(sessionRowId(spaceId, userId, agentSource, sessionId)) as
         | PersistedSessionRow
         | undefined;
-      return row ? rowToState(row) : null;
+      if (row) {
+        const state = rowToState(row);
+        return state && persistedStateOwnsIdentity(state, identity) ? state : null;
+      }
+
+      const legacyId = legacyPersistedSessionIdentityKey(
+        spaceId,
+        userId,
+        agentSource,
+        sessionId,
+      );
+      if (!legacyId) return null;
+      const legacyRow = select.get(legacyId) as PersistedSessionRow | undefined;
+      const legacyState = legacyRow ? rowToState(legacyRow) : null;
+      if (
+        !legacyRow
+        || legacyRow.session_key !== sessionId
+        || !legacyState
+        || !persistedStateOwnsIdentity(legacyState, identity, spaceId === "")
+      ) return null;
+      return legacyState;
     } catch {
       return null;
     }
@@ -240,9 +258,28 @@ class SqliteSessionRepo implements SessionRepo {
     sessionId: string,
   ): void {
     try {
-      this.db
-        .prepare("DELETE FROM sessions WHERE session_id = ?")
-        .run(sessionRowId(spaceId, userId, agentSource, sessionId));
+      const select = this.db.prepare("SELECT * FROM sessions WHERE session_id = ?");
+      const remove = this.db.prepare("DELETE FROM sessions WHERE session_id = ?");
+      remove.run(sessionRowId(spaceId, userId, agentSource, sessionId));
+
+      const legacyId = legacyPersistedSessionIdentityKey(
+        spaceId,
+        userId,
+        agentSource,
+        sessionId,
+      );
+      if (!legacyId) return;
+      const legacyRow = select.get(legacyId) as PersistedSessionRow | undefined;
+      const legacyState = legacyRow ? rowToState(legacyRow) : null;
+      if (
+        legacyRow?.session_key === sessionId
+        && legacyState
+        && persistedStateOwnsIdentity(
+          legacyState,
+          identityOf(spaceId, userId, agentSource, sessionId),
+          spaceId === "",
+        )
+      ) remove.run(legacyId);
     } catch (err) {
       console.warn(
         "[session-db] delete failed:",
@@ -260,8 +297,9 @@ class SqliteSessionRepo implements SessionRepo {
       for (const r of rows) {
         const s = rowToState(r);
         if (!s) continue;
-        const parsed = parseSessionRowId(r.session_id);
+        const parsed = parsePersistedSessionIdentityKey(r.session_id);
         if (!parsed) continue;
+        if (!persistedStateOwnsIdentity(s, parsed)) continue;
         out.push({ ...parsed, state: s });
       }
       return out;
