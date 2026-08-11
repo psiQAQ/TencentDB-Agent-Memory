@@ -442,11 +442,8 @@ export class SessionStore {
       throw new SessionIdentityConflictError();
     }
 
-    // Bind only after validating an existing L1 entry. A conflicting caller
-    // must never replace the victim's write-through identity.
-    this.identities.set(keyId, identity);
-
     if (l1 && l1.status === "initialized") {
+      this.identities.set(keyId, identity);
       console.log("[cache] session=<redacted> L1 hit (terminal)");
       return l1;
     }
@@ -461,6 +458,7 @@ export class SessionStore {
     if (this.repo) {
       const l2a = await this.probeL2a(keyId, identity);
       if (l2a) {
+        this.identities.set(keyId, identity);
         console.log(`[cache] session=<redacted> L2a hit → promote L1${l1 ? " (override stale L1)" : ""}`);
         return l2a;
       }
@@ -477,6 +475,7 @@ export class SessionStore {
     // zombie / user-mismatch 已在 `this.get()` 与 `probeL2a` 内部各自 invalidate，
     // 走到这里的 l1 一定是 fresh + user 匹配的。
     if (l1) {
+      this.identities.set(keyId, identity);
       console.log("[cache] session=<redacted> L1 hit (pending, L2a miss fallback)");
       return l1;
     }
@@ -484,6 +483,7 @@ export class SessionStore {
     // Step 3: L2b Binding
     if (!this.bindingRepo) {
       if (rawSessionConflict) throw new SessionIdentityConflictError();
+      this.identities.set(keyId, identity);
       console.log("[cache] session=<redacted> miss (no bindingRepo) → history-scan");
       return this.tryHistoryScan(keyId, identity, ctx);
     }
@@ -500,12 +500,16 @@ export class SessionStore {
     }
     if (!binding) {
       if (rawSessionConflict) throw new SessionIdentityConflictError();
+      this.identities.set(keyId, identity);
       console.log("[cache] session=<redacted> miss (no binding) → history-scan");
       return this.tryHistoryScan(keyId, identity, ctx);
     }
     if (!bindingMatchesIdentity(binding, identity)) {
       throw new SessionIdentityConflictError();
     }
+    // Bind only after all applicable L1, L2a, raw-session and L2b identity
+    // checks pass. A rejected caller must never poison a later recovery.
+    this.identities.set(keyId, identity);
     console.log(`[cache] session=<redacted> L2b binding hit outcome=${binding.outcome} → rebuild`);
 
     // Async touch (refresh 30d TTL, don't await)

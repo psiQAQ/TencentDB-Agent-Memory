@@ -8,7 +8,7 @@ import {
   type SessionRepo,
 } from "../db/sessionRepo.js";
 import { setMetadataClient } from "../meta/client.js";
-import type { BindingRepo } from "../db/binding-repo.js";
+import type { BindingRepo, SessionBinding } from "../db/binding-repo.js";
 import { renderTdaiMemoryToolsBlock } from "../injection/injectors/tdai-tools-injector.js";
 import { renderSkillToolsBlock } from "../injection/injectors/skill-tools-injector.js";
 import { createApp } from "../server.js";
@@ -366,6 +366,64 @@ describe("session cache identity isolation", () => {
     await expect(store.getOrRecover(key, { ...identity }, {})).resolves.toEqual(state);
   });
 
+  it("does not bind a rejected L2a identity and allows the valid caller", async () => {
+    const identity = victimIdentity();
+    const rejectedIdentity = { ...identity, taskId: OUTSIDER.taskId };
+    const key = sessionStoreKey(identity);
+    const upsert = vi.fn(async () => undefined);
+    const deleteBySessionId = vi.fn(() => undefined);
+    const getAgent = vi.fn();
+    const getTask = vi.fn();
+    const repo: SessionRepo = {
+      upsert,
+      getBySessionId: async () => victimState(),
+      deleteBySessionId,
+      loadAllInitialized: async () => [],
+    };
+    const store = new SessionStore(30 * 60 * 1_000, repo);
+
+    await expect(store.getOrRecover(key, rejectedIdentity, {
+      metadataClient: { getAgent, getTask } as never,
+    })).rejects.toMatchObject({ name: "SessionIdentityConflictError" });
+    expect(store.getBoundIdentity(key)).toBeUndefined();
+    expect(store.get(key)).toBeUndefined();
+    expect(upsert).not.toHaveBeenCalled();
+    expect(deleteBySessionId).not.toHaveBeenCalled();
+    expect(getAgent).not.toHaveBeenCalled();
+    expect(getTask).not.toHaveBeenCalled();
+
+    await expect(store.getOrRecover(key, identity, {})).resolves.toMatchObject({
+      sessionInfo: expect.objectContaining({ task_id: VICTIM.taskId }),
+    });
+    expect(store.getBoundIdentity(key)).toEqual(identity);
+  });
+
+  it("does not bind a rejected raw-session collision or disturb the owner", async () => {
+    const store = new SessionStore();
+    const identity = victimIdentity();
+    const key = sessionStoreKey(identity);
+    const state = victimState();
+    store.bind(key, identity);
+    await store.set(key, state);
+    const collidingIdentity: FullSessionIdentity = {
+      userId: OUTSIDER.userId,
+      spaceId: OUTSIDER.spaceId,
+      agentSource: VICTIM.source,
+      sessionId: VICTIM.sessionId,
+      teamId: OUTSIDER.teamId,
+      agentId: OUTSIDER.agentId,
+      taskId: OUTSIDER.taskId,
+    };
+    const collidingKey = sessionStoreKey(collidingIdentity);
+
+    await expect(store.getOrRecover(collidingKey, collidingIdentity, {}))
+      .rejects.toMatchObject({ name: "SessionIdentityConflictError" });
+    expect(store.getBoundIdentity(collidingKey)).toBeUndefined();
+    expect(store.get(collidingKey)).toBeUndefined();
+    expect(store.getBoundIdentity(key)).toEqual(identity);
+    await expect(store.getOrRecover(key, identity, {})).resolves.toEqual(state);
+  });
+
   it("hydrates both users that share a source and raw session id", async () => {
     const outsiderIdentity: FullSessionIdentity = {
       userId: OUTSIDER.userId,
@@ -498,27 +556,50 @@ describe("session cache identity isolation", () => {
   it("rejects a mismatched bypass binding before touch or cache write", async () => {
     const touchLastSeen = vi.fn(async () => undefined);
     const putBinding = vi.fn(async () => undefined);
+    let binding: SessionBinding = {
+      outcome: "bypassed",
+      userId: VICTIM.userId,
+      teamId: VICTIM.teamId,
+      agentId: VICTIM.agentId,
+      taskId: VICTIM.taskId,
+    };
     const bindingRepo: BindingRepo = {
-      getBinding: async () => ({
-        outcome: "bypassed",
-        userId: OUTSIDER.userId,
-        teamId: OUTSIDER.teamId,
-        agentId: OUTSIDER.agentId,
-        taskId: OUTSIDER.taskId,
-      }),
+      getBinding: async () => binding,
       putBinding,
       deleteBinding: async () => undefined,
       touchLastSeen,
     };
     const store = new SessionStore(30 * 60 * 1_000, undefined, bindingRepo);
     const identity = victimIdentity();
+    const rejectedIdentity = { ...identity, taskId: OUTSIDER.taskId };
     const key = sessionStoreKey(identity);
 
-    await expect(store.getOrRecover(key, identity, {}))
+    await expect(store.getOrRecover(key, rejectedIdentity, {}))
       .rejects.toMatchObject({ name: "SessionIdentityConflictError" });
     expect(touchLastSeen).not.toHaveBeenCalled();
     expect(putBinding).not.toHaveBeenCalled();
+    expect(store.getBoundIdentity(key)).toBeUndefined();
     expect(store.get(key)).toBeUndefined();
+
+    binding = { ...binding, outcome: "initialized" };
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const getAgent = vi.fn(async () => {
+      await gate;
+      return { agent_id: VICTIM.agentId, name: "Victim Agent" };
+    });
+    const getTask = vi.fn(async () => ({ task_id: VICTIM.taskId, title: "Victim Task" }));
+    const ctx = { metadataClient: { getAgent, getTask } as never };
+    const first = store.getOrRecover(key, identity, ctx);
+    const second = store.getOrRecover(key, identity, ctx);
+    release();
+    const recovered = await Promise.all([first, second]);
+
+    expect(recovered).toHaveLength(2);
+    expect(getAgent).toHaveBeenCalledTimes(1);
+    expect(getTask).toHaveBeenCalledTimes(1);
+    expect(store.getBoundIdentity(key)).toEqual(identity);
+    expect(store.get(key)?.sessionInfo?.task_id).toBe(VICTIM.taskId);
   });
 
   it("accepts and rebinds a legacy bypass binding with no embedded identity", async () => {
