@@ -21,7 +21,10 @@ import {
   SessionStore,
   type SessionIdentity,
 } from "../session/store.js";
-import type { SessionInitState } from "../session/types.js";
+import {
+  normalizePersistedSessionInitState,
+  type SessionInitState,
+} from "../session/types.js";
 import type { ProxyConfig } from "../types.js";
 import { MemoryStorage } from "../storage/memory-storage.js";
 
@@ -1044,6 +1047,73 @@ describe("session cache identity isolation", () => {
       .resolves.toBeUndefined();
   });
 
+  it.each(["delete", "set"] as const)(
+    "does not rewrite a weak hydrate snapshot after a concurrent %s",
+    async (mutation) => {
+      let signalLoadStarted!: () => void;
+      let releaseLoad!: () => void;
+      const loadStarted = new Promise<void>((resolve) => { signalLoadStarted = resolve; });
+      const loadReleased = new Promise<void>((resolve) => { releaseLoad = resolve; });
+      const identity = victimIdentity();
+      const key = sessionStoreKey(identity);
+      const durable: { state: SessionInitState | null } = {
+        state: {
+          status: "initialized",
+          keyId: identity.sessionId,
+          userId: identity.userId,
+          bypassed: true,
+        } as SessionInitState,
+      };
+      const repo: SessionRepo = {
+        upsert: vi.fn(async (_space, _user, _source, _session, state) => {
+          durable.state = structuredClone(state);
+          return true;
+        }),
+        getBySessionId: vi.fn(async () => structuredClone(durable.state)),
+        deleteBySessionId: vi.fn(async () => {
+          durable.state = null;
+          return true;
+        }),
+        loadAllInitialized: vi.fn(async () => {
+          const captured = normalizePersistedSessionInitState(
+            structuredClone(durable.state),
+          );
+          expect(captured).not.toBeNull();
+          signalLoadStarted();
+          await loadReleased;
+          return [{
+            spaceId: identity.spaceId!,
+            userId: identity.userId,
+            agentSource: identity.agentSource,
+            sessionId: identity.sessionId,
+            state: captured!,
+          }];
+        }),
+      };
+      const store = new SessionStore(30 * 60 * 1_000, repo);
+      const hydration = store.hydrateFromDb();
+      await loadStarted;
+      store.bind(key, identity);
+      if (mutation === "delete") {
+        store.delete(key);
+        await (store as unknown as {
+          persistenceTails: Map<string, Promise<void>>;
+        }).persistenceTails.get(key);
+      } else {
+        await store.set(key, victimState());
+      }
+      releaseLoad();
+
+      await expect(hydration).resolves.toBe(0);
+      if (mutation === "delete") {
+        expect(durable.state).toBeNull();
+      } else {
+        expect(durable.state?.sessionInfo?.agent_id).toBe(VICTIM.agentId);
+        expect(durable.state?.bypassed).not.toBe(true);
+      }
+    },
+  );
+
   it("keeps delete final when hydrate finishes before deletion", async () => {
     let signalDelete!: () => void;
     const deleteFinished = new Promise<void>((resolve) => { signalDelete = resolve; });
@@ -1578,6 +1648,71 @@ describe("session cache identity isolation", () => {
       agentDetail: { description: "pending-replacement" },
     });
   });
+
+  it.each(["no-repositories", "binding-only-nonterminal"] as const)(
+    "settles an active delete replacement with %s and no replacement write",
+    async (mode) => {
+      const identity = victimIdentity();
+      const key = sessionStoreKey(identity);
+      const deleteBinding = vi.fn(async () => true);
+      const bindingRepo: BindingRepo | undefined = mode === "binding-only-nonterminal"
+        ? {
+            getBinding: vi.fn(async () => null),
+            putBinding: vi.fn(async () => true),
+            deleteBinding,
+            touchLastSeen: vi.fn(async () => undefined),
+          }
+        : undefined;
+      const store = new SessionStore(30 * 60 * 1_000, undefined, bindingRepo);
+      store.bind(key, identity);
+      await store.set(key, victimState());
+
+      store.delete(key);
+      const deleteTail = (store as unknown as {
+        persistenceTails: Map<string, Promise<void>>;
+      }).persistenceTails.get(key);
+      expect(deleteTail).toBeDefined();
+      const deleteToken = (store as unknown as {
+        deleteIntents: Map<string, number>;
+      }).deleteIntents.get(key);
+      expect(deleteToken).toBeDefined();
+
+      const replacement: SessionInitState = mode === "binding-only-nonterminal"
+        ? {
+            status: "pending_form",
+            keyId: identity.sessionId,
+            startedAt: Date.now(),
+            attemptCount: 0,
+            userId: identity.userId,
+          }
+        : {
+            ...victimState(),
+            agentDetail: {
+              id: VICTIM.agentId,
+              name: "Replacement",
+              description: "memory-only-replacement",
+            },
+          };
+      const replacementWrite = store.set(key, replacement);
+      await deleteTail;
+      await replacementWrite;
+
+      expect((store as unknown as {
+        pendingDeleteReplacements: Map<string, number>;
+      }).pendingDeleteReplacements.has(key)).toBe(false);
+      expect((store as unknown as {
+        deleteIntents: Map<string, number>;
+      }).deleteIntents.has(key)).toBe(false);
+      if (mode === "binding-only-nonterminal") {
+        expect(deleteBinding).toHaveBeenCalledTimes(1);
+        expect(store.get(key)).toMatchObject({ status: "pending_form" });
+      } else {
+        await expect(store.getOrRecover(key, identity, {})).resolves.toMatchObject({
+          agentDetail: { description: "memory-only-replacement" },
+        });
+      }
+    },
+  );
 
   it("rejects a recovery whose L2 read is overtaken by a pending delete replacement", async () => {
     let signalReadStarted!: () => void;

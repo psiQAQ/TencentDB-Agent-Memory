@@ -808,7 +808,10 @@ export class SessionStore {
     // promotion fails closed unless each previously durable layer accepts it.
     const initialIdentity = id;
     const writesBinding = normalizedState.status === "initialized" && Boolean(this.bindingRepo);
-    if (!this.repo && !writesBinding) return;
+    // A replacement installed while delete is active must settle behind that
+    // delete even when it has no durable write of its own.  Otherwise the
+    // pending marker survives a vacuously successful delete forever.
+    if (!this.repo && !writesBinding && replacementDeleteIntent === undefined) return;
 
     // Serialize every state-backed durable write for this full identity. L1 is
     // still updated synchronously, while L2 observes the same invocation order.
@@ -1182,7 +1185,11 @@ export class SessionStore {
         // Leave it out of L1 so the first request performs normal L2a/L2b
         // corroboration before any claim or durable rewrite.
         if (hasWeakBypassClaim(normalizedState)) {
-          if (adapterNormalized || normalizedState !== row.state) {
+          if (
+            !this.mutatedKeys.has(keyId)
+            && !this.states.has(keyId)
+            && (adapterNormalized || normalizedState !== row.state)
+          ) {
             try {
               await this.enqueuePersistence(keyId, () => this.repo!.upsert(
                 row.spaceId, row.userId, row.agentSource, row.sessionId, normalizedState,
