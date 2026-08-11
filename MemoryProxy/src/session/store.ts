@@ -168,7 +168,6 @@ export interface RecoveryContext {
 
 interface L2aProbeResult {
   state?: SessionInitState;
-  expired: boolean;
 }
 
 export class SessionStore {
@@ -333,27 +332,14 @@ export class SessionStore {
     // newer state installed by another request while those reads were in flight.
     if (this.states.get(keyId) !== state || !this.isExpired(state)) return;
     this.states.delete(keyId);
-    const id = this.identities.get(keyId);
-    if (id) this.repo?.deleteBySessionId(spaceOf(id), id.userId, id.agentSource, id.sessionId);
   }
 
   private discardExpiredRecovery(
     keyId: string,
     cachedState: SessionInitState | undefined,
-    l2aExpired: boolean,
-    identity: SessionIdentity,
   ): void {
     if (cachedState) {
       this.discardExpiredState(keyId, cachedState);
-      return;
-    }
-    if (l2aExpired) {
-      this.repo?.deleteBySessionId(
-        spaceOf(identity),
-        identity.userId,
-        identity.agentSource,
-        identity.sessionId,
-      );
     }
   }
 
@@ -362,8 +348,6 @@ export class SessionStore {
     for (const [keyId, state] of this.states) {
       if (state.status !== "initialized" && now - state.startedAt > this.ttlMs) {
         this.states.delete(keyId);
-        const id = this.identities.get(keyId);
-        if (id) this.repo?.deleteBySessionId(spaceOf(id), id.userId, id.agentSource, id.sessionId);
       }
     }
   }
@@ -495,10 +479,8 @@ export class SessionStore {
     // `metadataClient.getAgent/getTask` roundtrip, even though the full
     // agentDetail/taskDetail is sitting in the storage layer. Pending 状态也
     // 必须命中就返回 —— 见上面 Step 1 的多节点陈旧 L1 注释。
-    let l2aExpired = false;
     if (this.repo) {
       const l2a = await this.probeL2a(keyId, identity);
-      l2aExpired = l2a.expired;
       if (l2a.state) {
         this.identities.set(keyId, identity);
         console.log(`[cache] session=<redacted> L2a hit → promote L1${l1 ? " (override stale L1)" : ""}`);
@@ -525,7 +507,7 @@ export class SessionStore {
     // Step 3: L2b Binding
     if (!this.bindingRepo) {
       if (rawSessionConflict) throw new SessionIdentityConflictError();
-      this.discardExpiredRecovery(keyId, cachedState, l2aExpired, identity);
+      this.discardExpiredRecovery(keyId, cachedState);
       this.identities.set(keyId, identity);
       console.log("[cache] session=<redacted> miss (no bindingRepo) → history-scan");
       return this.tryHistoryScan(keyId, identity, ctx);
@@ -543,7 +525,7 @@ export class SessionStore {
     }
     if (!binding) {
       if (rawSessionConflict) throw new SessionIdentityConflictError();
-      this.discardExpiredRecovery(keyId, cachedState, l2aExpired, identity);
+      this.discardExpiredRecovery(keyId, cachedState);
       this.identities.set(keyId, identity);
       console.log("[cache] session=<redacted> miss (no binding) → history-scan");
       return this.tryHistoryScan(keyId, identity, ctx);
@@ -551,7 +533,7 @@ export class SessionStore {
     if (!bindingMatchesIdentity(binding, identity)) {
       throw new SessionIdentityConflictError();
     }
-    this.discardExpiredRecovery(keyId, cachedState, l2aExpired, identity);
+    this.discardExpiredRecovery(keyId, cachedState);
     // Bind only after all applicable L1, L2a, raw-session and L2b identity
     // checks pass. A rejected caller must never poison a later recovery.
     this.identities.set(keyId, identity);
@@ -592,7 +574,7 @@ export class SessionStore {
    *   - the stored userId disagrees with the current caller (cached identity
    *     no longer applies — same policy as L2b invalidation; row is dropped),
    *   - the row is a stale pending state past ttl (zombie session from a
-   *     crashed node),
+   *     crashed node; ignored here because passive recovery has no repo CAS),
    *   - the underlying storage errored (degrade silently, same as elsewhere).
    *
    * Non-terminal statuses (`pending_*`) are ALSO returned so a form flow
@@ -611,9 +593,9 @@ export class SessionStore {
         identity.sessionId,
       );
     } catch {
-      return { expired: false };
+      return {};
     }
-    if (!row) return { expired: false };
+    if (!row) return {};
     const persistedRow = row;
     row = withoutPersistedCredential(row);
 
@@ -631,7 +613,7 @@ export class SessionStore {
       console.log(
         `[session-recover] session=<redacted> L2a pending expired (status=${row.status}), deferring invalidation`,
       );
-      return { expired: true };
+      return {};
     }
 
     // Promote back to L1 so subsequent turns don't hit the repo at all.
@@ -655,7 +637,7 @@ export class SessionStore {
     console.log(
       `[session-recover] session=<redacted> L2a hit status=${row.status} agent=${row.sessionInfo?.agent_id ? "present" : "none"} task=${row.sessionInfo?.task_id ? "present" : "none"}`,
     );
-    return { state: normalizedRow, expired: false };
+    return { state: normalizedRow };
   }
 
   /** In-flight promise deduplication: same keyId → same rebuild promise. */

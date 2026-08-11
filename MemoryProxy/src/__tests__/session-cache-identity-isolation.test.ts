@@ -422,7 +422,7 @@ describe("session cache identity isolation", () => {
       status: "initialized",
       bypassed: true,
     });
-    expect(deleteBySessionId).toHaveBeenCalled();
+    expect(deleteBySessionId).not.toHaveBeenCalled();
     expect(getBinding).toHaveBeenCalledTimes(1);
   });
 
@@ -503,7 +503,55 @@ describe("session cache identity isolation", () => {
       status: "initialized",
       bypassed: true,
     });
-    expect(deleteBySessionId).toHaveBeenCalledTimes(1);
+    expect(deleteBySessionId).not.toHaveBeenCalled();
+  });
+
+  it("does not delete a newer L2a row written while binding recovery is in flight", async () => {
+    const identity = victimIdentity();
+    const key = sessionStoreKey(identity);
+    const expired: SessionInitState = {
+      ...victimState(),
+      status: "pending_task_select",
+      startedAt: 0,
+    };
+    const newer = victimState();
+    let persisted: SessionInitState | null = expired;
+    const deleteBySessionId = vi.fn(() => { persisted = null; });
+    const repo: SessionRepo = {
+      upsert: vi.fn(async (_space, _user, _source, _session, state) => {
+        persisted = state;
+      }),
+      getBySessionId: vi.fn(async () => persisted),
+      deleteBySessionId,
+      loadAllInitialized: async () => [],
+    };
+    let releaseBinding!: () => void;
+    const bindingReleased = new Promise<void>((resolve) => { releaseBinding = resolve; });
+    let signalBindingRead!: () => void;
+    const bindingRead = new Promise<void>((resolve) => { signalBindingRead = resolve; });
+    const bindingRepo: BindingRepo = {
+      getBinding: vi.fn(async () => {
+        signalBindingRead();
+        await bindingReleased;
+        return null;
+      }),
+      putBinding: vi.fn(async () => undefined),
+      deleteBinding: vi.fn(async () => undefined),
+      touchLastSeen: vi.fn(async () => undefined),
+    };
+    const store = new SessionStore(1, repo, bindingRepo);
+
+    const recovery = store.getOrRecover(key, identity, {});
+    await bindingRead;
+    persisted = newer;
+    releaseBinding();
+
+    await expect(recovery).resolves.toBeUndefined();
+    expect(deleteBySessionId).not.toHaveBeenCalled();
+    expect(persisted).toEqual(newer);
+
+    const observer = new SessionStore(1, repo, bindingRepo);
+    await expect(observer.getOrRecover(key, identity, {})).resolves.toEqual(newer);
   });
 
   it("does not bind a rejected raw-session collision or disturb the owner", async () => {
