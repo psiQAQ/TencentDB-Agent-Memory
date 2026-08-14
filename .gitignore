@@ -121,3 +121,6 @@ data/tdai-memory.db
 # Test coverage output
 coverage/
 **/coverage/
+
+# 本地源码模式运行时数据（SQLite + wiki 引擎缓存）
+MemoryKnowledge/data/
