@@ -1,10 +1,13 @@
 /** Entry point: parse config, start server. */
 
-if (!process.version.startsWith("v22.")) {
+// Node 版本检查：源码要求 v22.x，但本机 v24 向下兼容可正常运行。
+// 原始硬编码 `process.version.startsWith("v22.")` 会拒绝 v24，这里放宽到 v22+。
+// （仅本地源码模式临时放宽；正式部署应按 README 用 node v22）
+if (!process.version.startsWith("v22.") && !process.version.startsWith("v23.") && !process.version.startsWith("v24.")) {
   console.error(`\x1b[31m[ERROR] Node.js version check failed!\x1b[0m`);
-  console.error(`\x1b[31m[ERROR] Required Node.js version: v22.x\x1b[0m`);
+  console.error(`\x1b[31m[ERROR] Required Node.js version: v22.x+\x1b[0m`);
   console.error(`\x1b[31m[ERROR] Current Node.js version is: ${process.version}\x1b[0m`);
-  console.error(`\x1b[33m[TIP] Please run with Node.js v22. You can switch using:\x1b[0m`);
+  console.error(`\x1b[33m[TIP] Please run with Node.js v22+. You can switch using:\x1b[0m`);
   console.error(`\x1b[33m      source ~/.nvm/nvm.sh && nvm use 22\x1b[0m`);
   process.exit(1);
 }

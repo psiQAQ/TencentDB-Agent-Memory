@@ -346,9 +346,12 @@ function buildUpstreamHeaders(
   //   - non-empty string → inject as server-side key, drop client's own
   //   - empty/undefined  → passthrough: keep whatever the client sent
   // The cost-guard extension can still fully override via target.authHeaders.
+  // 同时设置 x-api-key 与 Authorization: Bearer：标准 Anthropic 上游用 x-api-key，
+  // 但部分 OpenAI-compatible 网关的 /messages 端点只认 Authorization: Bearer。
+  // 两者都设可兼容两类上游（本地适配公司网关）。
   if (effectiveApiKey && !target.authHeaders) {
     headers["x-api-key"] = effectiveApiKey;
-    delete headers["authorization"];
+    headers["authorization"] = `Bearer ${effectiveApiKey}`;
   }
 
   if (target.authHeaders) {
