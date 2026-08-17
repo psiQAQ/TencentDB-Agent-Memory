@@ -114,9 +114,17 @@ MemoryCore/scripts/tests/
 # self-implement-wiki e2e 产物（人工查看用，不入库）
 docs/knowledge/self-implement-wiki/_e2e-output/
 
-# Development databases (empty placeholder)
+# Development databases and runtime data (never commit)
 data/skills.db
 data/tdai-memory.db
+**/data/vectors.db
+**/data/.metadata/
+**/data/scene_blocks/
+**/data/knowledge.db
+**/data/knowledge.db-shm
+**/data/knowledge.db-wal
+**/data/_wiki_engines/
+**/data/mem-*/
 
 # Test coverage output
 coverage/
@@ -124,3 +132,6 @@ coverage/
 
 # 本地源码模式运行时数据（SQLite + wiki 引擎缓存）
 MemoryKnowledge/data/
+
+# Local project docs (generated, not for VCS)
+.local-docs/
