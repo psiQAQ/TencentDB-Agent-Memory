@@ -77,4 +77,23 @@ describe("SerialQueue", () => {
     await Promise.all([first, second]);
     expect(results).toEqual(["first-rejected", "second-ran"]);
   });
+
+  it("resolves existing idle waiters when a paused queue is cleared", async () => {
+    const queue = new SerialQueue("test");
+    queue.pause();
+
+    const task = queue.add(async () => "never runs");
+    const rejection = expect(task).rejects.toThrow("Queue cleared");
+    let idle = false;
+    void queue.onIdle().then(() => {
+      idle = true;
+    });
+
+    queue.clear();
+    await rejection;
+    await Promise.resolve();
+
+    expect(queue.idle).toBe(true);
+    expect(idle).toBe(true);
+  });
 });
