@@ -50,20 +50,26 @@ CONFIG_DIR="${PROXY_CONFIG_DIR:-$SCRIPT_DIR/.proxy-config}"
 mkdir -p "$CONFIG_DIR"
 CONFIG_FILE="$CONFIG_DIR/config.yaml"
 
-# ── 三大能力开关（默认最小可用；打开时自动串联依赖）──
+# ── 四大能力开关（默认最小可用；打开时自动串联依赖）──
 # PROXY_ENABLE_AUTH        : 客户端凭 x-tdai-user-key 走内核 auth/verify → user_id
 # PROXY_ENABLE_SESSION_INIT: 首轮弹表单选 team/agent/task；依赖 auth+tdai
 # PROXY_ENABLE_TDAI        : L2/L3 记忆注入 + L1 召回；依赖 memory-core
+# PROXY_ENABLE_KNOWLEDGE   : <knowledge_tools> 块注入（code-graph / wiki 资源）；依赖 memory-core
+#                            （注意：injection.injectors 恒列 knowledge，但缺 knowledge:
+#                             段时 shouldRegisterKnowledgeInjector 判 false 不注册 ——
+#                             所以必须由这里生成 knowledge: 段，不能只列 injector 名）
 #
-# 便捷开关 PROXY_FULL_STACK=1 一键把三个都开。
+# 便捷开关 PROXY_FULL_STACK=1 一键把四个都开。
 if [[ "${PROXY_FULL_STACK:-0}" == "1" ]]; then
   PROXY_ENABLE_AUTH=1
   PROXY_ENABLE_TDAI=1
   PROXY_ENABLE_SESSION_INIT=1
+  PROXY_ENABLE_KNOWLEDGE=1
 fi
 PROXY_ENABLE_AUTH="${PROXY_ENABLE_AUTH:-0}"
 PROXY_ENABLE_TDAI="${PROXY_ENABLE_TDAI:-0}"
 PROXY_ENABLE_SESSION_INIT="${PROXY_ENABLE_SESSION_INIT:-0}"
+PROXY_ENABLE_KNOWLEDGE="${PROXY_ENABLE_KNOWLEDGE:-0}"
 
 # sessionInit 依赖 auth 拿 user_id；开 sessionInit 时自动补 auth
 if [[ "$PROXY_ENABLE_SESSION_INIT" == "1" && "$PROXY_ENABLE_AUTH" != "1" ]]; then
@@ -71,9 +77,15 @@ if [[ "$PROXY_ENABLE_SESSION_INIT" == "1" && "$PROXY_ENABLE_AUTH" != "1" ]]; the
   PROXY_ENABLE_AUTH=1
 fi
 
+# knowledge 依赖 tdai 内核（endpoint 同 memory-core）；开 knowledge 时自动补 tdai
+if [[ "$PROXY_ENABLE_KNOWLEDGE" == "1" && "$PROXY_ENABLE_TDAI" != "1" ]]; then
+  warn "PROXY_ENABLE_KNOWLEDGE=1 需要 tdai 内核；自动打开 PROXY_ENABLE_TDAI"
+  PROXY_ENABLE_TDAI=1
+fi
+
 bool() { [[ "$1" == "1" ]] && echo "true" || echo "false"; }
 
-info "生成 proxy config → $CONFIG_FILE  (auth=$(bool $PROXY_ENABLE_AUTH) session-init=$(bool $PROXY_ENABLE_SESSION_INIT) tdai=$(bool $PROXY_ENABLE_TDAI))"
+info "生成 proxy config → $CONFIG_FILE  (auth=$(bool $PROXY_ENABLE_AUTH) session-init=$(bool $PROXY_ENABLE_SESSION_INIT) tdai=$(bool $PROXY_ENABLE_TDAI) knowledge=$(bool $PROXY_ENABLE_KNOWLEDGE))"
 cat > "$CONFIG_FILE" <<YAML
 # 由 start-proxy.sh 自动生成 —— 每次启动覆盖，请不要手动改。
 server:
@@ -107,6 +119,16 @@ skill:
   endpoint: "http://memory-core:8420"
   serviceToken: "${MEMORY_CORE_GATEWAY_API_KEY}"
 
+# knowledge 注入（<knowledge_tools> 块）：从内核拉取 team 的
+# code-graph / wiki 资源列表。与 skill 段独立（endpoint 可不同）。
+# 缺此段时 injector 不注册（injectors 列了 knowledge 也没用）。
+knowledge:
+  enabled: $(bool $PROXY_ENABLE_KNOWLEDGE)
+  endpoint: "http://memory-core:8420"
+  serviceToken: "${MEMORY_CORE_GATEWAY_API_KEY}"
+  serviceId: default
+  timeoutMs: 1500
+
 auth:
   enabled: $(bool $PROXY_ENABLE_AUTH)
   url: "http://memory-core:8420"
@@ -127,8 +149,9 @@ sessionInit:
 costGuard:
   enabled: false
 
-# 打开 skill + knowledge + tdai-memory 三个注入器；
-# knowledge 依赖 memory-hub 起来，否则 hook 内部会降级为空块。
+# 打开 skill + knowledge + tdai-memory 三个注入器。
+# 注意：injectors 列表只是第一道开关；knowledge 实际注册还需要
+# 上方的 knowledge: 段（enabled + serviceToken），否则恒不注册。
 injection:
   enabled: true
   injectors:
