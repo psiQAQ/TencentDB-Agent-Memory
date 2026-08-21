@@ -11,6 +11,7 @@
  */
 
 import simpleGit, { CleanOptions, ResetMode } from "simple-git";
+import { BlockList, isIP } from "node:net";
 import type { ISourceFetcher, FetchResult, SourceType } from "./types.js";
 
 /**
@@ -18,12 +19,30 @@ import type { ISourceFetcher, FetchResult, SourceType } from "./types.js";
  *   - 10. / 172.16-31. / 192.168.  → RFC1918 私有网段
  *   - 169.254.                     → link-local（含云元数据 169.254.169.254）
  *   - 127. / 0. / localhost / ::1  → 环回
- *   - fe80:                        → IPv6 link-local
+ *   - fe80::/10                    → IPv6 link-local
+ *   - fc00::/7                     → IPv6 unique-local
  *
  * 该黑名单可通过环境变量 KNOWLEDGE_SSRF_CHECK=off 关闭（见 GitSourceFetcher 构造）。
  */
-const PRIVATE_ADDR_RE =
-  /^(10\.|172\.(1[6-9]|2[0-9]|3[01])\.|192\.168\.|169\.254\.|127\.|0\.|localhost$|::1$|fe80:)/i;
+const PRIVATE_ADDRESSES = new BlockList();
+
+for (const [network, prefix] of [
+  ["10.0.0.0", 8],
+  ["172.16.0.0", 12],
+  ["192.168.0.0", 16],
+  ["169.254.0.0", 16],
+  ["127.0.0.0", 8],
+  ["0.0.0.0", 8],
+] as const) {
+  PRIVATE_ADDRESSES.addSubnet(network, prefix, "ipv4");
+  // URL canonicalization represents IPv4-mapped literals as hexadecimal IPv6.
+  PRIVATE_ADDRESSES.addSubnet(`::ffff:${network}`, 96 + prefix, "ipv6");
+}
+
+PRIVATE_ADDRESSES.addAddress("::", "ipv6");
+PRIVATE_ADDRESSES.addAddress("::1", "ipv6");
+PRIVATE_ADDRESSES.addSubnet("fe80::", 10, "ipv6");
+PRIVATE_ADDRESSES.addSubnet("fc00::", 7, "ipv6");
 
 /**
  * 读取 SSRF 私网黑名单开关。默认开启；
@@ -115,6 +134,13 @@ export class GitSourceFetcher implements ISourceFetcher {
   }
 
   private isPrivateAddress(host: string): boolean {
-    return PRIVATE_ADDR_RE.test(host);
+    let h = host.toLowerCase().trim();
+    if (h.startsWith("[") && h.endsWith("]")) {
+      h = h.slice(1, -1);
+    }
+    if (h === "localhost") return true;
+
+    const family = isIP(h);
+    return family !== 0 && PRIVATE_ADDRESSES.check(h, family === 4 ? "ipv4" : "ipv6");
   }
 }
