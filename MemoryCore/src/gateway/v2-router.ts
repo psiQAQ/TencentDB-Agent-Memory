@@ -741,7 +741,11 @@ async function handleConversationAdd(body: unknown, auth: V2AuthContext, request
       try { emb = await embedding.embed(msg.content); } catch (e) { console.warn(`[v2-router] L0 embedding failed:`, e); }
     }
 
-    await store.upsertL0(record, emb);
+    const persisted = await store.upsertL0(record, emb);
+    if (!persisted) {
+      deps.logger.error(`${TAG} L0 persistence failed for ${id}`);
+      return errorEnvelope(503, "Failed to persist conversation message", requestId);
+    }
     acceptedIds.push(id);
     acceptedRecords.push(record);
   }
