@@ -140,8 +140,15 @@ redis:
   enabled: false
 YAML
 
+# 镜像以 uid 10001 非 root 运行。bind mount 保留宿主文件权限，因此只给
+# 当前宿主 primary group 读取权，并把该 group 映射进容器；避免改成 0644
+# 让同机其他用户读到 upstream API key。
+chmod 640 "$CONFIG_FILE"
+CONFIG_GID="$(id -g)"
+
 info "启动 proxy (image=$PROXY_IMAGE, port=$PROXY_PORT)"
 $DOCKER run -d --name "$CONTAINER" \
+  --group-add "$CONFIG_GID" \
   --network "$NETWORK" \
   --network-alias proxy \
   --add-host=host.docker.internal:host-gateway \
