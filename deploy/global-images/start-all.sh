@@ -43,12 +43,11 @@ print_endpoints
 # 打印 Claude Code / proxy 使用命令
 ADMIN_KEY_FILE="${MEMORY_CORE_ADMIN_KEY_FILE:-$SCRIPT_DIR/.admin-key}"
 if [[ -s "$ADMIN_KEY_FILE" ]]; then
-  ADMIN_KEY=$(cat "$ADMIN_KEY_FILE")
   UPSTREAM_MODEL="${PROXY_UPSTREAM_MODEL:-<your-model>}"
   echo ""
   echo "  ┌─ 通过 proxy 用 Claude Code ─────────────────────────────────────┐"
   echo "  │  export ANTHROPIC_BASE_URL=http://127.0.0.1:${PROXY_PORT}/claude-code/default"
-  echo "  │  export ANTHROPIC_AUTH_TOKEN='${ADMIN_KEY}'"
+  echo "  │  export ANTHROPIC_AUTH_TOKEN=\"\$(cat '$ADMIN_KEY_FILE')\""
   echo "  │  claude --model ${UPSTREAM_MODEL}"
   echo "  │"
   echo "  │  admin user_key 保存在: $ADMIN_KEY_FILE"
