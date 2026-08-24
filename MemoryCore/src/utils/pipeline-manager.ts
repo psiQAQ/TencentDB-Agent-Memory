@@ -253,6 +253,8 @@ export class MemoryPipelineManager {
   private destroyed = false;
   /** True while destroy() is draining work that it has already accepted. */
   private flushing = false;
+  /** Shared shutdown operation so concurrent callers cannot observe an early return. */
+  private destroyPromise: Promise<void> | null = null;
 
   /** Plugin instance ID for metric reporting (set externally after async init). */
   instanceId?: string;
@@ -530,8 +532,14 @@ export class MemoryPipelineManager {
    * 3. If flush times out or fails, persist current state for recovery on next startup
    * 4. Pending work is never lost — it will be recovered via checkpoint on next start()
    */
-  async destroy(): Promise<void> {
-    if (this.destroyed) return;
+  destroy(): Promise<void> {
+    if (!this.destroyPromise) {
+      this.destroyPromise = this.performDestroy();
+    }
+    return this.destroyPromise;
+  }
+
+  private async performDestroy(): Promise<void> {
     this.destroyed = true;
     this.flushing = true;
 
@@ -595,9 +603,16 @@ export class MemoryPipelineManager {
     this.logger?.debug?.(`${TAG} Waiting for L1 queue to drain (size=${this.l1Queue.size})`);
     await this.l1Queue.onIdle();
 
-    // Step 3: Flush all L2 schedule timers
-    for (const [sessionKey, timers] of this.sessionTimers) {
-      if (timers.l2Schedule.pending) {
+    // Step 3: Flush L2 work. L1 completed after destroyed=true cannot arm a
+    // schedule timer (advanceL2Timer deliberately rejects new lifecycle work),
+    // so pending state is the source of truth during shutdown.
+    for (const [sessionKey, state] of this.sessionStates) {
+      const timers = this.getOrCreateTimers(sessionKey);
+      if (state.l2_pending_l1_count > 0) {
+        timers.l2Schedule.cancel();
+        this.logger?.debug?.(`${TAG} [${sessionKey}] Flush: enqueuing pending L2 work`);
+        this.enqueueL2(sessionKey, "flush:pending-l1");
+      } else if (timers.l2Schedule.pending) {
         this.logger?.debug?.(`${TAG} [${sessionKey}] Flush: triggering L2 schedule timer`);
         timers.l2Schedule.flush();
       }
