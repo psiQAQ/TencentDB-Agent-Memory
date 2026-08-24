@@ -15,6 +15,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # node:22-slim 自带 npm@10.9.8 有 arborist "edgesOut" crash（干净 `npm
 # install` 稳定报 `Cannot read properties of null (reading 'edgesOut')`）。
 # base 里升到 11，三个 builder stage 全部继承。
+ARG NPM_REGISTRY=https://registry.npmjs.org
+RUN npm config set registry "$NPM_REGISTRY" --global
 RUN npm install -g npm@11 --no-audit --no-fund
 
 WORKDIR /app

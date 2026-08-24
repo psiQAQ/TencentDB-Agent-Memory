@@ -21,6 +21,7 @@
 #   PLATFORMS=linux/amd64,linux/arm64
 #   ALSO_LATEST=1                  同时推 :latest
 #   APT_MIRROR=mirrors.tencent.com 构建期 apt 加速（默认走 Debian 官方源）
+#   NPM_REGISTRY=https://registry.npmmirror.com 构建期 npm 加速（默认官方源）
 
 set -euo pipefail
 
@@ -37,6 +38,7 @@ ALSO_LATEST="${ALSO_LATEST:-0}"
 DRY_RUN="${DRY_RUN:-0}"
 KEEP_CTX="${KEEP_CTX:-0}"
 APT_MIRROR="${APT_MIRROR:-deb.debian.org}"
+NPM_REGISTRY="${NPM_REGISTRY:-https://registry.npmjs.org}"
 LOAD_PLATFORM="${LOAD_PLATFORM:-linux/amd64}"
 SECRET_SCAN="${SECRET_SCAN:-$REPO_ROOT/MemoryPanel/scripts/secret-scan.sh}"
 
@@ -93,6 +95,7 @@ build_image() {
       --builder "$BUILDER" \
       --platform "$LOAD_PLATFORM" \
       --build-arg "APT_MIRROR=$APT_MIRROR" \
+      --build-arg "NPM_REGISTRY=$NPM_REGISTRY" \
       -t "${image}:${VERSION}" \
       --load \
       "$ctx"
@@ -109,6 +112,7 @@ build_image() {
     --builder "$BUILDER" \
     --platform "$PLATFORMS" \
     --build-arg "APT_MIRROR=$APT_MIRROR" \
+    --build-arg "NPM_REGISTRY=$NPM_REGISTRY" \
     "${tags[@]}" \
     --push \
     "$ctx"

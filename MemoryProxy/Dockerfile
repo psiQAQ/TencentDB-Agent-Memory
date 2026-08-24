@@ -42,6 +42,8 @@ WORKDIR /app
 # node:22-slim 自带 npm@10.9.8 有 arborist "edgesOut" crash（干净
 # `npm install` 稳定报 `Cannot read properties of null (reading
 # 'edgesOut')`）。升到 11 规避，不影响其它构建行为。
+ARG NPM_REGISTRY=https://registry.npmjs.org
+RUN npm config set registry "$NPM_REGISTRY" --global
 RUN npm install -g npm@11 --no-audit --no-fund
 
 # 先复制包元数据以最大化 Docker layer cache。
