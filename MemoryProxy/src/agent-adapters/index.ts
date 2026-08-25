@@ -17,6 +17,7 @@ import { codebuddyAdapter } from "./codebuddy.js";
 import { codexAdapter } from "./codex.js";
 import { workbuddyAdapter } from "./workbuddy.js";
 import { dshAdapter } from "./dsh.js";
+import { opencodeAdapter } from "./opencode.js";
 import { defaultAdapter } from "./default.js";
 
 export type { AgentAdapter, AgentKind, RequestKind } from "./types.js";
@@ -33,6 +34,8 @@ export function resolveAgentAdapter(agentSource: string): AgentAdapter {
       return workbuddyAdapter;
     case "dsh":
       return dshAdapter;
+    case "opencode":
+      return opencodeAdapter;
     default:
       return defaultAdapter;
   }

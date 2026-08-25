@@ -70,6 +70,8 @@ export interface SessionInitResult {
   agentDetail?: AgentDetail | null;
   taskDetail?: TaskDetail | null;
   bypassed?: boolean;
+  /** 本次注册是 session-reset 触发的（pre-hook 设 resetFlow=true → 保留到 completeRegistration）。 */
+  resetFlow?: boolean;
   /**
    * Anthropic-only: the pre-built `<session_context>` string that MUST be
    * appended to `body.system` by the caller (see {@link SessionRequestContext.protocol}).
@@ -229,7 +231,7 @@ async function advanceFromTeamPicked(
       cachedTeams,
       bypassed: true,
     } as SessionInitState);
-    return { intercepted: false, bypassed: true };
+    return { intercepted: false, bypassed: true, resetFlow: state?.resetFlow ?? false };
   }
 
   // Only 1 agent — pick it, then decide task step.
@@ -308,7 +310,7 @@ async function advanceFromAgentPicked(
       taskDetail: null,
       bypassed: true,
     } as SessionInitState);
-    return { intercepted: false, bypassed: true };
+    return { intercepted: false, bypassed: true, resetFlow: state?.resetFlow ?? false };
   }
   if (team.tasks.length === 1) {
     const taskId = team.tasks[0].task_id;
@@ -439,7 +441,7 @@ async function completeRegistration(
       `[session-init:cc] session=${compositeKey} no user_id available → bypass`,
     );
     await store.set(compositeKey, { status: "initialized", bypassed: true } as SessionInitState);
-    return { intercepted: false, bypassed: true };
+    return { intercepted: false, bypassed: true, resetFlow: state?.resetFlow ?? false };
   }
   // 新增契约：只有 team + agent + task 三者齐全才注入。task_id 缺失一律 bypass —
   // 覆盖 0-task team、header 只带 team+agent、debugForceIdentity 不带 task 等场景。
@@ -462,8 +464,10 @@ async function completeRegistration(
       agentDetail: null,
       taskDetail: null,
       bypassed: true,
+      resetFlow: state.resetFlow,
+      resetEpoch: state.resetEpoch,
     } as SessionInitState);
-    return { intercepted: false, bypassed: true };
+    return { intercepted: false, bypassed: true, resetFlow: state?.resetFlow ?? false };
   }
   const regData = buildRegistrationData(resolved, cachedTeams, sessionKey, regUserId);
   if (!regData) {
@@ -471,7 +475,7 @@ async function completeRegistration(
       `[session-init:cc] session=${compositeKey} agent=${resolved.agent_id} not bound to any team → bypass`,
     );
     await store.set(compositeKey, { status: "initialized", bypassed: true } as SessionInitState);
-    return { intercepted: false, bypassed: true };
+    return { intercepted: false, bypassed: true, resetFlow: state?.resetFlow ?? false };
   }
 
   let agentDetail: AgentDetail | null = null;
@@ -542,6 +546,9 @@ async function completeRegistration(
     selectedTeamId: state.selectedTeamId,
     agentDetail,
     taskDetail,
+    // 保留 resetFlow/resetEpoch 以供 handler 侧 prewarm 判断是否 clearBefore
+    resetFlow: state.resetFlow,
+    resetEpoch: state.resetEpoch,
   };
   await store.set(compositeKey, nextState);
 
@@ -554,6 +561,7 @@ async function completeRegistration(
     justRegistered: true,
     agentDetail,
     taskDetail,
+    resetFlow: state.resetFlow ?? false,
   };
 }
 
@@ -674,12 +682,7 @@ async function handleSessionInitInner(
     );
   }
 
-  if ((!state || state.status === "uninitialized") && !isFreshCCConversation(messages)) {
-    console.warn(
-      `[session-init:cc] session=${compositeKey} state lost but conversation has history, skipping init`,
-    );
-    return { intercepted: false };
-  }
+  // [session-reset] gate removed: always init on missing state
 
   // ── Case 1: Uninitialized → 先弹 asset_confirm 对话框 ───────────────────
   if (!state || state.status === "uninitialized") {
@@ -698,7 +701,7 @@ async function handleSessionInitInner(
         taskDetail: null,
         bypassed: true,
       } as SessionInitState);
-      return { intercepted: false, bypassed: true };
+      return { intercepted: false, bypassed: true, resetFlow: state?.resetFlow ?? false };
     }
     if (!metadataClient) {
       console.warn(
@@ -714,7 +717,7 @@ async function handleSessionInitInner(
         taskDetail: null,
         bypassed: true,
       } as SessionInitState);
-      return { intercepted: false, bypassed: true };
+      return { intercepted: false, bypassed: true, resetFlow: state?.resetFlow ?? false };
     }
 
     let teams: TeamOption[];
@@ -736,7 +739,7 @@ async function handleSessionInitInner(
         taskDetail: null,
         bypassed: true,
       } as SessionInitState);
-      return { intercepted: false, bypassed: true };
+      return { intercepted: false, bypassed: true, resetFlow: state?.resetFlow ?? false };
     }
 
     const totalAgents = teams.reduce((acc, t) => acc + t.agents.length, 0);
@@ -756,7 +759,7 @@ async function handleSessionInitInner(
         taskDetail: null,
         bypassed: true,
       } as SessionInitState);
-      return { intercepted: false, bypassed: true };
+      return { intercepted: false, bypassed: true, resetFlow: state?.resetFlow ?? false };
     }
 
     // ── Header-driven pre-selection: skip forms when identity is provided ──
@@ -778,7 +781,7 @@ async function handleSessionInitInner(
             taskDetail: null,
             bypassed: true,
           } as SessionInitState);
-          return { intercepted: false, bypassed: true };
+          return { intercepted: false, bypassed: true, resetFlow: state?.resetFlow ?? false };
         }
         console.warn(`[session-init:cc] session=${compositeKey} preset mismatch → fallback to form`);
         // fall through to the normal asset_confirm flow below
@@ -836,6 +839,10 @@ async function handleSessionInitInner(
       attemptCount: 0,
       userId,
       cachedTeams: teams,
+      // 保留 resetFlow/resetEpoch: pre-hook 写入的标记必须贯穿整个 form 流程,
+      // 让 completeRegistration 最终返回 resetFlow=true → handler 触发确认响应。
+      resetFlow: state?.resetFlow,
+      resetEpoch: state?.resetEpoch,
     });
     console.log(
       `[session-init:cc] session=${compositeKey} user=${userId} → pending_asset_confirm (teams=${teams.length})`,
@@ -869,9 +876,11 @@ async function handleSessionInitInner(
         taskDetail: null,
         sessionInfo: null,
         bypassed: true,
+        resetFlow: state.resetFlow,
+        resetEpoch: state.resetEpoch,
       } as SessionInitState);
       console.log(`[session-init:cc] session=${compositeKey} user chose no-asset → bypass`);
-      return { intercepted: false, messages: messages as Record<string, unknown>[], bypassed: true };
+      return { intercepted: false, messages: messages as Record<string, unknown>[], bypassed: true, resetFlow: state?.resetFlow ?? false };
     }
 
     if (choice === true) {
@@ -899,6 +908,8 @@ async function handleSessionInitInner(
         attemptCount: 0,
         userId: state.userId,
         cachedTeams: teams,
+        resetFlow: state.resetFlow,
+        resetEpoch: state.resetEpoch,
       });
       console.log(
         `[session-init:cc] session=${compositeKey} → pending_team_select (teams=${teams.length})`,
@@ -915,7 +926,7 @@ async function handleSessionInitInner(
     // 未识别 → bypass (保留 form 对话原样)
     console.warn(`[session-init:cc] session=${compositeKey} asset-confirm unrecognized, bypassing`);
     await store.set(compositeKey, { status: "initialized", bypassed: true } as SessionInitState);
-    return { intercepted: false, messages: messages as Record<string, unknown>[], bypassed: true };
+    return { intercepted: false, messages: messages as Record<string, unknown>[], bypassed: true, resetFlow: state?.resetFlow ?? false };
   }
 
   // ── Case 1.5: Awaiting team selection ─────────────────────────────────────
@@ -941,7 +952,7 @@ async function handleSessionInitInner(
     console.warn(`[session-init:cc] session=${compositeKey} team-select unrecognized, bypassing`);
     // bypass: 保留 form 对话原样, 不删。
     await store.set(compositeKey, { status: "initialized", bypassed: true } as SessionInitState);
-    return { intercepted: false, messages: messages as Record<string, unknown>[], bypassed: true };
+    return { intercepted: false, messages: messages as Record<string, unknown>[], bypassed: true, resetFlow: state?.resetFlow ?? false };
   }
 
   // ── Case 2: Awaiting agent selection ─────────────────────────────────────
@@ -1006,7 +1017,7 @@ async function handleSessionInitInner(
       } as SessionInitState;
       await store.set(compositeKey, bypassState);
       console.log(`[session-init:cc] session=${compositeKey} user chose skip-agent → bypass`);
-      return { intercepted: false, messages: stripped as Record<string, unknown>[], bypassed: true };
+      return { intercepted: false, messages: stripped as Record<string, unknown>[], bypassed: true, resetFlow: state?.resetFlow ?? false };
     }
 
     if (extracted && extracted.agent_id) {
@@ -1017,7 +1028,7 @@ async function handleSessionInitInner(
           `[session-init:cc] session=${compositeKey} team ${selectedTeamId} not in cache → bypass`,
         );
         await store.set(compositeKey, { status: "initialized", bypassed: true } as SessionInitState);
-        return { intercepted: false, bypassed: true };
+        return { intercepted: false, bypassed: true, resetFlow: state?.resetFlow ?? false };
       }
       // Delegate to shared cascade — auto-selects the sole task when tasks.length === 1.
       return advanceFromAgentPicked(
@@ -1029,7 +1040,7 @@ async function handleSessionInitInner(
     console.warn(`[session-init:cc] session=${compositeKey} agent-select unrecognized, bypassing`);
     // bypass: 保留 form 对话原样, 不删。
     await store.set(compositeKey, { status: "initialized", bypassed: true } as SessionInitState);
-    return { intercepted: false, messages: messages as Record<string, unknown>[], bypassed: true };
+    return { intercepted: false, messages: messages as Record<string, unknown>[], bypassed: true, resetFlow: state?.resetFlow ?? false };
   }
 
   // ── Case 2.5: Awaiting task selection ─────────────────────────────────────
