@@ -21,6 +21,7 @@
  */
 
 import type { Context } from "hono";
+import { buildBridgeSessionKeyCandidates } from "../session/bridge-key-candidates.js";
 import { getSessionStore } from "../session/store.js";
 import type { BindingRepo } from "../db/binding-repo.js";
 import type { ProxyConfig } from "../types.js";
@@ -29,6 +30,7 @@ import type { AgentContext } from "../injection/types.js";
 import { resolveFixedAssetCtxs, type FixedAssetCtx } from "../injection/injectors/tdai-fixed-asset.js";
 import type { TdaiIdentity } from "../tdai/types.js";
 import { emitBridgeToolCallTelemetry, emitBridgeRejectTelemetry, agentSourceFromSessionKey } from "./bridge-telemetry.js";
+import { taskIdForSearchTarget } from "./search-scope.js";
 
 const TAG = "[memory-bridge]";
 
@@ -138,9 +140,7 @@ function bindingToIdFields(
 function loadSessionIdsL1(sessionId: string): SessionIdFields | null {
   // handler 层存的 L1 key 形如 `${agentSource}:${sessionId}`; curl 拿到的
   // 通常是 bare sessionId。按候选前缀顺序探,命中即返回。
-  const candidates = sessionId.includes(":")
-    ? [sessionId]
-    : [sessionId, `codebuddy:${sessionId}`, `claude-code:${sessionId}`];
+  const candidates = buildBridgeSessionKeyCandidates(sessionId);
   for (const k of candidates) {
     const state = getSessionStore().get(k);
     if (state) {
@@ -375,17 +375,20 @@ export function createMemoryBridgeHandler(
     };
 
     const ctxs = await resolveMemoryCtxs(config, ids, sessionKey);
-    // task_id 优先级：caller 显式传 > session 注入。session_id 保持"仅 caller 显式传"，
-    // 因为 search 类希望默认跨 session（agent 维度）；task_id 属于身份维度，仍应强制。
-    const effectiveTaskId = modelTaskId ?? ids.task_id;
-    const makeOutbound = (target: FixedAssetCtx): Record<string, unknown> => ({
-      ...inboundBody,
-      user_id: target.userId,
-      team_id: target.teamId,
-      agent_id: target.agentId,
-      ...(modelSessionId ? { session_id: modelSessionId } : {}),
-      ...(effectiveTaskId ? { task_id: effectiveTaskId } : {}),
-    });
+    // session_id 保持"仅 caller 显式传"，使 search 默认跨 session。
+    // task_id 只默认约束 self；借入记忆属于另一个 Agent，沿用 reader task 会把
+    // writer 在其它 task 下写入的 L0/L1 全部过滤掉。显式 task_id 仍对所有 target 生效。
+    const makeOutbound = (target: FixedAssetCtx): Record<string, unknown> => {
+      const targetTaskId = taskIdForSearchTarget(target.isSelf, modelTaskId, ids.task_id);
+      return {
+        ...inboundBody,
+        user_id: target.userId,
+        team_id: target.teamId,
+        agent_id: target.agentId,
+        session_id: modelSessionId,
+        task_id: targetTaskId,
+      };
+    };
 
     const callUpstream = async (target: FixedAssetCtx): Promise<{ status: number; text: string; contentType: string }> => {
       const outboundBody = JSON.stringify(makeOutbound(target));

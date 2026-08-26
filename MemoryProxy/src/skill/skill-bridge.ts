@@ -18,6 +18,7 @@
  */
 
 import type { Context } from "hono";
+import { buildBridgeSessionKeyCandidates } from "../session/bridge-key-candidates.js";
 import type { Redis } from "ioredis";
 import { getSessionStore } from "../session/store.js";
 import type { BindingRepo } from "../db/binding-repo.js";
@@ -292,9 +293,7 @@ function bindingToIdFields(
  * 恢复而不 401。
  */
 function loadSessionIdsL1(sessionId: string): SessionIdFields | null {
-  const candidates = sessionId.includes(":")
-    ? [sessionId]
-    : [sessionId, `codebuddy:${sessionId}`, `claude-code:${sessionId}`];
+  const candidates = buildBridgeSessionKeyCandidates(sessionId);
   for (const k of candidates) {
     const s = getSessionStore().get(k);
     if (s) {

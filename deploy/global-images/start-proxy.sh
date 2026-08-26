@@ -70,6 +70,8 @@ PROXY_ENABLE_AUTH="${PROXY_ENABLE_AUTH:-0}"
 PROXY_ENABLE_TDAI="${PROXY_ENABLE_TDAI:-0}"
 PROXY_ENABLE_SESSION_INIT="${PROXY_ENABLE_SESSION_INIT:-0}"
 PROXY_ENABLE_KNOWLEDGE="${PROXY_ENABLE_KNOWLEDGE:-0}"
+PROXY_OPENAI_UPSTREAM_URL="${PROXY_OPENAI_UPSTREAM_URL:-$PROXY_UPSTREAM_URL}"
+PROXY_ANTHROPIC_UPSTREAM_URL="${PROXY_ANTHROPIC_UPSTREAM_URL:-$PROXY_UPSTREAM_URL}"
 
 # sessionInit 依赖 auth 拿 user_id；开 sessionInit 时自动补 auth
 if [[ "$PROXY_ENABLE_SESSION_INIT" == "1" && "$PROXY_ENABLE_AUTH" != "1" ]]; then
@@ -96,6 +98,16 @@ server:
 upstream:
   url: "${PROXY_UPSTREAM_URL}"
   apiKey: "${PROXY_UPSTREAM_API_KEY}"
+  agents:
+    codebuddy:
+      url: "${PROXY_OPENAI_UPSTREAM_URL}"
+      apiKey: "${PROXY_UPSTREAM_API_KEY}"
+    dsh:
+      url: "${PROXY_OPENAI_UPSTREAM_URL}"
+      apiKey: "${PROXY_UPSTREAM_API_KEY}"
+    claude-code:
+      url: "${PROXY_ANTHROPIC_UPSTREAM_URL}"
+      apiKey: "${PROXY_UPSTREAM_API_KEY}"
 
 log:
   file: ""
@@ -154,6 +166,7 @@ costGuard:
 # 上方的 knowledge: 段（enabled + serviceToken），否则恒不注册。
 injection:
   enabled: true
+  externalGatewayUrl: "${PROXY_EXTERNAL_GATEWAY_URL:-}"
   injectors:
     - skill
     - knowledge

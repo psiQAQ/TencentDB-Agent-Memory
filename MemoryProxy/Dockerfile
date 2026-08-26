@@ -24,8 +24,12 @@
 # ──────────────────────────────────────────────────────────────────────
 FROM node:22-slim AS deps-builder
 
-# 使用 Debian 官方 apt 源（deb.debian.org）。如构建缓慢，可在本地构建时替换为镜像源，例如：
-#   sed -i 's|deb.debian.org|mirrors.tencent.com|g' /etc/apt/sources.list.d/debian.sources
+# apt 源默认走 Debian 官方；国内构建可传 APT_MIRROR=mirrors.aliyun.com。
+ARG APT_MIRROR=deb.debian.org
+RUN if [ "$APT_MIRROR" != "deb.debian.org" ]; then \
+      sed -i "s|deb.debian.org|${APT_MIRROR}|g" /etc/apt/sources.list.d/debian.sources 2>/dev/null || \
+      sed -i "s|deb.debian.org|${APT_MIRROR}|g" /etc/apt/sources.list 2>/dev/null || true; \
+    fi
 
 # Native build toolchain（better-sqlite3 / node-pty 需要编译）
 # 使用 BuildKit cache mount 缓存 apt 包，避免重复下载
@@ -64,7 +68,12 @@ COPY . .
 # ──────────────────────────────────────────────────────────────────────
 FROM node:22-slim AS runtime
 
-# 使用 Debian 官方 apt 源（deb.debian.org）。如构建缓慢，可自行替换为镜像源。
+# runtime stage 独立声明同一构建参数，确保两个 stage 使用一致 apt 源。
+ARG APT_MIRROR=deb.debian.org
+RUN if [ "$APT_MIRROR" != "deb.debian.org" ]; then \
+      sed -i "s|deb.debian.org|${APT_MIRROR}|g" /etc/apt/sources.list.d/debian.sources 2>/dev/null || \
+      sed -i "s|deb.debian.org|${APT_MIRROR}|g" /etc/apt/sources.list 2>/dev/null || true; \
+    fi
 
 # Runtime essentials only（curl 供 HEALTHCHECK；tini 负责信号处理）
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \

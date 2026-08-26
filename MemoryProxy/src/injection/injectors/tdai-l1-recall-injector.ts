@@ -7,6 +7,7 @@ import { extractUserQueryText } from "../../tdai/recorder.js";
 import type { CoreSkillConfig } from "../../types.js";
 import { getMetadataClient } from "../../meta/client.js";
 import { resolveFixedAssetCtxs } from "./tdai-fixed-asset.js";
+import { taskIdForSearchTarget } from "../../memory/search-scope.js";
 
 /**
  * L1 召回（"自有 + 借入"跨 agent 合并 top-K）：
@@ -68,11 +69,12 @@ export class TdaiL1RecallInjector implements InjectionHook {
     // 并发对每个 ctx search L1
     const groups = await Promise.all(
       ctxs.map(async (c) => {
+        const targetTaskId = taskIdForSearchTarget(c.isSelf, undefined, identity.taskId);
         const items = await this.client.searchL1ForCtx(
           { teamId: c.teamId, userId: c.userId, agentId: c.agentId, agentName: c.agentName },
           query,
           identity.sessionId,
-          identity.taskId,
+          targetTaskId,
           this.perAgentLimit,
         );
         return items.map((m) => ({

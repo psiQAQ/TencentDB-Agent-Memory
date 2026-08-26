@@ -38,7 +38,9 @@ export interface TdaiIdentity {
 /**
  * Per-agent context used when reading other agents' memories
  * (e.g. via the "imported" relation). team/user/agent identify the data
- * owner; sessionId/taskId stay on the *caller* (current request).
+ * owner; sessionId stays on the *caller* (current request). The caller task is
+ * only valid for self-memory searches; imported Agent searches omit it unless
+ * an explicit source task is requested.
  *
  * Why the split: borrowing memories from agent B doesn't change which
  * conversation we're in — L0 captures into the caller's sessionId,
