@@ -47,6 +47,10 @@ import { trackWrite, withL0Retry } from "./tdai/pending-writes.js";
 import type { TdaiIdentity, TdaiMessage } from "./tdai/types.js";
 import { triggerSkillExtractIfReady } from "./skill/handler-glue.js";
 import { emitModelIntentTelemetry } from "./session/model-intent-telemetry.js";
+import {
+  resolveDshHeadlessPolicy,
+  sessionInitConfigForDshHeadless,
+} from "./session/dsh/headless-policy.js";
 import { isExtractionAllowed, logExtractionSkipped } from "./extraction-gate.js";
 import {
   enforceRateLimit,
@@ -707,8 +711,8 @@ export async function handleChatCompletions(
   // ── dsh (deepseek-harness) CLI headless / no-preset bypass ──────────────
   // dsh 客户端在 headless bundle 或未挂 ask-user preset 时,body.tools 里
   // 不含 `ask_user_question` 工具。proxy 塞 fake `ask_user_question` tool_call
-  // 会被 dsh agent-loop 校验为 unknown tool 直接抛错。此时直接 bypass
-  // session-init 而非弹 form —— 没 UI 场景强弹表单没意义。
+  // 会被 dsh agent-loop 校验为 unknown tool 直接抛错。因此不能弹 form；但若
+  // 请求携带完整 header identity，仍可走权限校验后的 header 直选与记忆注入。
   //
   // 判定:agentSource=dsh 且 body.tools 非空且不含 ask_user_question。
   // (tools 空数组表示纯对话/aux,不用兜底;tools 里就有 ask_user_question 说明
@@ -718,17 +722,21 @@ export async function handleChatCompletions(
   // 但走独立的 header-driven session-init 分支(见下方 opencode 特化块),
   // 因此不需要走这里的 headless bypass —— opencode 能吃 mem 命令纯文本响应,
   // 也需要 injection / L0 / skill 提取,只是不能弹 form。
-  const _dshHeadless = agentSource === "dsh" && (() => {
-    const tools = (body as { tools?: unknown }).tools;
-    if (!Array.isArray(tools) || tools.length === 0) return false;
-    return !tools.some((t) => {
-      const fn = (t as { function?: { name?: string }; name?: string })?.function;
-      const n = fn?.name ?? (t as { name?: string })?.name;
-      return n === "ask_user_question";
-    });
-  })();
+  const _dshPolicy = resolveDshHeadlessPolicy(
+    agentSource,
+    body as { tools?: unknown },
+    config.sessionInit,
+    lcHeaders,
+  );
+  const _dshHeadless = _dshPolicy.noInteractiveForm;
+  const _dshMemoryBypass = _dshPolicy.bypassMemory;
+  const _sessionInitConfig = sessionInitConfigForDshHeadless(config.sessionInit, _dshPolicy);
   if (_dshHeadless) {
-    console.log(`[request-classify] session=${sessionKey} agent=dsh headless/no-preset (no ask_user_question tool) → bypass session-init, direct passthrough`);
+    console.log(
+      `[request-classify] session=${sessionKey} agent=dsh headless/no-preset `
+      + `(no ask_user_question tool) headerIdentity=${_dshPolicy.hasCompleteHeaderIdentity} `
+      + `memoryBypass=${_dshMemoryBypass}`,
+    );
   }
 
   // ── mem:session-reset pre-hook ──
@@ -807,11 +815,11 @@ export async function handleChatCompletions(
   // ── Session Init (before injection pipeline) ─────────────────────────────
   let sessionInfo: Record<string, unknown> | null | undefined;
   let assetCapabilities: import("./injection/types.js").AssetCapabilityFlags | undefined;
-  let injectedSkipped = !conversationId || isAuxiliary || _dshHeadless;
+  let injectedSkipped = !conversationId || isAuxiliary || _dshMemoryBypass;
   let sessionJustRegistered = false;
   let _resetFlowResult: { agentName: string; agentIdShort: string; teamId: string; taskName?: string | null; bypassed?: boolean } | null = null;
-  console.log(`[injection-debug] conversationId=${conversationId} sessionKey=${sessionKey} userId=${userId} agentSource=${agentSource} kind=${_requestKind} dshHeadless=${_dshHeadless} sessionInitEnabled=${config.sessionInit?.enabled} injectionEnabled=${config.injection?.enabled} injectors=${JSON.stringify(config.injection?.injectors)} injectedSkipped=${injectedSkipped} spaceId=${spaceId}`);
-  if (config.sessionInit?.enabled && conversationId && !isAuxiliary && !_dshHeadless) {
+  console.log(`[injection-debug] conversationId=${conversationId} sessionKey=${sessionKey} userId=${userId} agentSource=${agentSource} kind=${_requestKind} dshHeadless=${_dshHeadless} dshMemoryBypass=${_dshMemoryBypass} sessionInitEnabled=${_sessionInitConfig.enabled} injectionEnabled=${config.injection?.enabled} injectors=${JSON.stringify(config.injection?.injectors)} injectedSkipped=${injectedSkipped} spaceId=${spaceId}`);
+  if (_sessionInitConfig.enabled && conversationId && !isAuxiliary && !_dshMemoryBypass) {
     try {
       const { getSessionStore, handleSessionInit, parsePresetIdentity } = await import("./session/index.js");
       const { getMetadataClient } = await import("./meta/client.js");
@@ -828,7 +836,7 @@ export async function handleChatCompletions(
       // 与 workbuddyHandler.ts 里的 kernelUserKey 逻辑对齐（那里也是客户端优先）。
       const kernelUserKey = apiKey || config.tdai?.apiKey || "";
       const metadataClient = getMetadataClient(config.coreSkill, spaceId, kernelUserKey);
-      const presetIdentity = parsePresetIdentity(config.sessionInit, lcHeaders);
+      const presetIdentity = parsePresetIdentity(_sessionInitConfig, lcHeaders);
 
       // ── Session Recovery: try L2b binding before falling into session-init form ──
       const compositeKey = `${agentSource}:${sessionKey}`;
@@ -881,7 +889,7 @@ export async function handleChatCompletions(
               inMsgs,
               recovered.agentDetail ?? null,
               recovered.taskDetail ?? null,
-              config.sessionInit,
+              _sessionInitConfig,
               sessionKey,
             );
         initResult = {
@@ -916,7 +924,7 @@ export async function handleChatCompletions(
           sessionKey,
           userId || null,
           body.messages as Array<Record<string, unknown>> ?? [],
-          config.sessionInit,
+          _sessionInitConfig,
           store,
           { stream: isStream, modelId: modelId as string, protocol: "openai", questionsAsArray },
           agentSource,
@@ -1221,8 +1229,8 @@ export async function handleChatCompletions(
     }
   }
 
-  // aux 请求(compaction/title)/ dsh headless(无 UI 无 preset)不写 L0 —— 直接透传
-  const tdaiClient = isAuxiliary || _dshHeadless || assetCapabilities?.chat_memory === false ? null : createTdaiClient(config, spaceId);
+  // aux 请求 / 没有完整 header identity 的 dsh headless 不写 L0 —— 直接透传。
+  const tdaiClient = isAuxiliary || _dshMemoryBypass || assetCapabilities?.chat_memory === false ? null : createTdaiClient(config, spaceId);
   const tdaiIdentity = injectedSkipped
     ? null
     : deriveTdaiIdentity({
@@ -1578,7 +1586,7 @@ export async function handleChatCompletions(
       sessionKeyForSkill: sessionKey,
       agentSource,
       isAuxiliary,
-      isDshHeadless: _dshHeadless,
+      isDshHeadless: _dshMemoryBypass,
       sessionInfo,
       lf,
       spaceId,
@@ -1787,8 +1795,8 @@ export async function handleChatCompletions(
 
   // Skill extract trigger — count tool calls + buffer conversation.
   // 同步 await：直到 store 落盘再继续，保证下一轮跨节点读到最新数据。
-  // aux 请求(compaction/title)/dsh headless 不触发 skill 提取 —— 保持归档 buffer 语义纯净
-  if (!isAuxiliary && !_dshHeadless && isExtractionAllowed(config, "skill")) {
+  // aux 请求 / memory-bypass 的 dsh headless 不触发 skill 提取，保持 buffer 语义纯净。
+  if (!isAuxiliary && !_dshMemoryBypass && isExtractionAllowed(config, "skill")) {
     await triggerSkillExtractIfReady({
       config,
       sessionKey,
@@ -1799,7 +1807,7 @@ export async function handleChatCompletions(
       protocol: "openai",
       assetCapabilities,
     });
-  } else if (!isAuxiliary && !_dshHeadless) {
+  } else if (!isAuxiliary && !_dshMemoryBypass) {
     logExtractionSkipped(config, "skill", sessionKey);
   }
 
@@ -1891,8 +1899,8 @@ interface TapContext {
   /** True when this request was classified as auxiliary (compaction/title-gen) —
    * downstream L0/skill extract paths must skip to keep buffer semantics clean. */
   isAuxiliary: boolean;
-  /** True when this dsh request came from CLI headless / no-preset (no ask_user_question
-   * in tools) — behaves like aux for downstream side-effects. */
+  /** True only when DSH headless must bypass memory (no complete header identity).
+   * Header-selected DSH headless requests keep downstream side-effects enabled. */
   isDshHeadless: boolean;
   sessionInfo: Record<string, unknown> | null | undefined;
   /** Langfuse turn-trace context (trace = one turn). */
@@ -2208,7 +2216,7 @@ function createUsageTapTransform(ctx: TapContext): TransformStream<Uint8Array, U
 
     // Skill extract trigger — after stream finalization.
     // 同步 await：直到 store 落盘再继续，保证下一轮跨节点读到最新数据。
-    // aux 请求(compaction/title)/dsh headless 跳过 skill 触发,保持归档 buffer 语义纯净。
+    // aux 请求 / memory-bypass 的 dsh headless 跳过 skill 触发，保持 buffer 语义纯净。
     if (!ctx.isAuxiliary && !ctx.isDshHeadless && isExtractionAllowed(ctx.config, "skill")) {
       await triggerSkillExtractIfReady({
         config: ctx.config,
