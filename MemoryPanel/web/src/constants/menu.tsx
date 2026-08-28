@@ -59,15 +59,9 @@ export function usePageMeta(): Record<PageId, PageMeta> {
 /** 分组排序顺序 */
 export const GROUP_ORDER_KEYS = ['workbench', 'organization', 'assets'] as const;
 
-/** 每个页面在侧边栏菜单中的图标（Tea 官方图标，size 16） */
-export const ITEM_ICON: Record<PageId, JSX.Element> = {
+/** 侧边栏菜单图标；未配置的页面只显示文字。 */
+export const ITEM_ICON: Partial<Record<PageId, JSX.Element>> = {
   workbench_board: <DashboardIcon size={16} />,
-  team_atlas: (
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-      <circle cx="5" cy="12" r="2.5" /><circle cx="12" cy="5" r="2.5" /><circle cx="19" cy="12" r="2.5" /><circle cx="12" cy="19" r="2.5" />
-      <path d="M7 10l3-3M14 7l3 3M17 14l-3 3M10 17l-3-3" />
-    </svg>
-  ),
   team_members: <UserIcon size={16} />,
   team_agents: <UsergroupIcon size={16} />,
   api_keys: <LockOnIcon size={16} />,
