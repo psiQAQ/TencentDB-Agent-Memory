@@ -4,14 +4,18 @@ import type { TeamAtlasEdge } from '../web/src/lib/api/team-atlas.js';
 import type { TeamAtlasIR, TeamAtlasNode } from '../web/src/lib/api/team-atlas.js';
 
 function irWithNodes(nodes: TeamAtlasNode[]): TeamAtlasIR {
-  const edges = nodes.filter((node) => node.type === 'team').map((node) => ({ id: `member:${node.id}`, type: 'member_of' as const, source: 'identity:user-1', target: node.id, team_id: node.team_id }));
+  const teamIds = [...new Set(nodes.map((node) => node.team_id).filter((teamId): teamId is string => Boolean(teamId)))];
+  const explicitTeamIds = new Set(nodes.filter((node) => node.type === 'team').map((node) => node.entity_id));
+  const teams: TeamAtlasNode[] = teamIds.filter((teamId) => !explicitTeamIds.has(teamId)).map((teamId) => ({ id: `team:${teamId}`, entity_id: teamId, type: 'team', label: teamId, team_id: teamId }));
+  const identities: TeamAtlasNode[] = teamIds.map((teamId) => ({ id: `identity:${teamId}:user-1`, entity_id: 'user-1', type: 'identity', label: 'User', team_id: teamId, metadata: { is_current: true } }));
+  const edges = teamIds.map((teamId) => ({ id: `member:${teamId}`, type: 'member_of' as const, source: `team:${teamId}`, target: `identity:${teamId}:user-1`, team_id: teamId }));
   return {
     schema_version: 1,
     generated_at: '2026-08-28T00:00:00.000Z',
-    scope: { user_id: 'user-1', team_ids: nodes.filter((node) => node.type === 'team').map((node) => node.entity_id) },
+    scope: { user_id: 'user-1', team_ids: teamIds },
     completeness: 'complete',
     summary: { teams: 0, tasks: 0, agents: 0, assets: 0, edges: edges.length, warnings: 0 },
-    nodes: [{ id: 'identity:user-1', entity_id: 'user-1', type: 'identity', label: 'User' }, ...nodes],
+    nodes: [...identities, ...teams, ...nodes],
     edges,
     warnings: [],
   };
@@ -52,10 +56,39 @@ describe('Team Atlas projection and layout', () => {
     expect(assets.every((node, index) => index === 0 || node.y - assets[index - 1]!.y >= node.height)).toBe(true);
   });
 
+  it('stacks multiple team hierarchies without vertical overlap', () => {
+    const input = irWithNodes([
+      { id: 'team:a', entity_id: 'a', type: 'team', label: 'A', team_id: 'a' },
+      { id: 'team:b', entity_id: 'b', type: 'team', label: 'B', team_id: 'b' },
+      { id: 'agent:a', entity_id: 'agent-a', type: 'agent', label: 'Agent A', team_id: 'a', metadata: { owner_user_id: 'user-1' } },
+      { id: 'agent:b', entity_id: 'agent-b', type: 'agent', label: 'Agent B', team_id: 'b', metadata: { owner_user_id: 'user-1' } },
+    ]);
+    const layout = layoutAtlas(projectAtlas(input));
+    const first = layout.nodes.filter((node) => node.team_id === 'a');
+    const second = layout.nodes.filter((node) => node.team_id === 'b');
+    expect(Math.max(...first.map((node) => node.y + node.height))).toBeLessThan(Math.min(...second.map((node) => node.y)));
+  });
+
+  it('can hide assets that are not bound to an Agent owned by the current user', () => {
+    const input = irWithNodes([
+      { id: 'agent:mine', entity_id: 'mine', type: 'agent', label: 'Mine', team_id: 'team-a', metadata: { owner_user_id: 'user-1' } },
+      { id: 'agent:other', entity_id: 'other', type: 'agent', label: 'Other', team_id: 'team-a', metadata: { owner_user_id: 'user-2' } },
+      { id: 'skill:mine', entity_id: 'mine', type: 'skill', label: 'Mine', team_id: 'team-a' },
+      { id: 'skill:other', entity_id: 'other', type: 'skill', label: 'Other', team_id: 'team-a' },
+    ]);
+    input.edges.push(
+      { id: 'bind:mine', type: 'fixed_binding', source: 'agent:mine', target: 'skill:mine', team_id: 'team-a' },
+      { id: 'bind:other', type: 'fixed_binding', source: 'agent:other', target: 'skill:other', team_id: 'team-a' },
+    );
+    const projection = projectAtlas(input, { showUnboundAssets: false });
+    expect(projection.nodes.some((node) => node.id === 'skill:mine')).toBe(true);
+    expect(projection.nodes.some((node) => node.id === 'skill:other')).toBe(false);
+  });
+
   it('places assigned Tasks below the Agent cards in the shared work lane', () => {
     const input = irWithNodes([
-      { id: 'agent:a', entity_id: 'a', type: 'agent', label: 'Agent A', team_id: 'team-a' },
-      { id: 'agent:b', entity_id: 'b', type: 'agent', label: 'Agent B', team_id: 'team-a' },
+      { id: 'agent:a', entity_id: 'a', type: 'agent', label: 'Agent A', team_id: 'team-a', metadata: { owner_user_id: 'user-1' } },
+      { id: 'agent:b', entity_id: 'b', type: 'agent', label: 'Agent B', team_id: 'team-a', metadata: { owner_user_id: 'user-1' } },
       { id: 'task:t', entity_id: 't', type: 'task', label: 'Task', team_id: 'team-a' },
     ]);
     input.edges.push(
@@ -63,11 +96,15 @@ describe('Team Atlas projection and layout', () => {
       { id: 'assigned:b', type: 'assigned_to', source: 'task:t', target: 'agent:b' },
     );
     const layout = layoutAtlas(projectAtlas(input));
-    const task = layout.nodes.find((node) => node.type === 'task')!;
+    const tasks = layout.nodes.filter((node) => node.type === 'task');
     const agents = layout.nodes.filter((node) => node.type === 'agent');
-    expect(task.x).toBe(agents[0]!.x);
-    expect(task.y).toBeGreaterThan(Math.max(...agents.map((node) => node.y)));
-    expect(edgeGeometry(layout.edges.find((edge) => edge.id === 'assigned:a')!, layout.nodes, layout.edges).path).toMatch(/^M .* V .* H .* V /);
+    expect(tasks).toHaveLength(2);
+    for (const task of tasks) {
+      const parent = agents.find((agent) => agent.id === task.parent_agent_id)!;
+      expect(task.x).toBeGreaterThan(parent.x);
+      expect(task.y).toBeGreaterThan(parent.y);
+    }
+    expect(edgeGeometry(layout.edges.find((edge) => edge.id === 'assigned:a')!, layout.nodes, layout.edges).path).toBe('');
   });
 
   it('summarizes mine versus visible entities for all seven card types', () => {
@@ -118,5 +155,15 @@ describe('Team Atlas projection and layout', () => {
       { id: 'binding', type: 'fixed_binding', source: 'agent:a', target: 'skill:s' },
     ];
     expect(edgeGeometry(edges[0]!, nodes, edges).path).not.toBe(edgeGeometry(edges[1]!, nodes, edges).path);
+  });
+
+  it('uses an evenly offset vertical trunk for every edge between the same columns', () => {
+    const nodes: PositionedAtlasNode[] = [
+      { id: 'team:t', entity_id: 't', type: 'team', label: 'Team', x: 0, y: 100, width: 220, height: 72 },
+      ...Array.from({ length: 5 }, (_, index) => ({ id: `identity:t:u${index}`, entity_id: `u${index}`, type: 'identity' as const, label: `U${index}`, x: 310, y: index * 90, width: 220, height: 72 })),
+    ];
+    const edges: TeamAtlasEdge[] = nodes.slice(1).map((node) => ({ id: `member:${node.id}`, type: 'member_of', source: 'team:t', target: node.id }));
+    const trunks = edges.map((edge) => edgeGeometry(edge, nodes, edges).path.match(/H ([\d.]+) V/)?.[1]);
+    expect(new Set(trunks).size).toBe(edges.length);
   });
 });

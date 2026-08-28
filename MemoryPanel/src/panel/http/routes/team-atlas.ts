@@ -70,7 +70,10 @@ interface TeamRaw {
 }
 
 interface TeamMemberRaw {
+  user_id: string;
+  username?: string;
   role?: string;
+  status?: string;
 }
 
 interface TaskRaw {
@@ -120,6 +123,7 @@ interface SkillRaw {
 export interface TeamAtlasSnapshot {
   team: TeamRaw;
   role?: string;
+  members: TeamMemberRaw[];
   tasks: TaskRaw[];
   agents: AgentRaw[];
   assets: AssetRaw[];
@@ -127,6 +131,7 @@ export interface TeamAtlasSnapshot {
   fixedAssets: Array<FixedAssetRaw & { agent_id: string }>;
   skills: SkillRaw[];
   complete: {
+    members: boolean;
     tasks: boolean;
     agents: boolean;
     assets: boolean;
@@ -198,9 +203,7 @@ export function buildTeamAtlasIR(
   snapshots: TeamAtlasSnapshot[],
   generatedAt = new Date().toISOString(),
 ): TeamAtlasIR {
-  const nodes: TeamAtlasNode[] = [
-    { id: nodeId('identity', userId), entity_id: userId, type: 'identity', label: userId },
-  ];
+  const nodes: TeamAtlasNode[] = [];
   const edges: TeamAtlasEdge[] = [];
   const warnings: TeamAtlasWarning[] = [];
 
@@ -227,13 +230,29 @@ export function buildTeamAtlasIR(
         assets: assets.length,
       },
     });
-    edges.push({
-      id: edgeId('member_of', nodeId('identity', userId), teamNode),
-      type: 'member_of',
-      source: nodeId('identity', userId),
-      target: teamNode,
-      team_id: team.team_id,
-    });
+    const members = snapshot.members.filter((item) => active(item.status));
+    const memberNodeId = (memberUserId: string) => nodeId('identity', `${team.team_id}:${memberUserId}`);
+    for (const member of members) {
+      const id = memberNodeId(member.user_id);
+      nodes.push({
+        id,
+        entity_id: member.user_id,
+        type: 'identity',
+        label: member.username || member.user_id,
+        team_id: team.team_id,
+        metadata: {
+          role: member.role ?? null,
+          is_current: member.user_id === userId,
+        },
+      });
+      edges.push({
+        id: edgeId('member_of', teamNode, id),
+        type: 'member_of',
+        source: teamNode,
+        target: id,
+        team_id: team.team_id,
+      });
+    }
 
     for (const task of tasks) {
       const id = nodeId('task', task.task_id);
@@ -249,7 +268,11 @@ export function buildTeamAtlasIR(
           source_type: task.source_type ?? null,
         },
       });
-      edges.push({ id: edgeId('contains', teamNode, id), type: 'contains', source: teamNode, target: id, team_id: team.team_id });
+      const creatorNode = task.creator_user_id ? memberNodeId(task.creator_user_id) : '';
+      const assigned = snapshot.taskAgents.some((link) => active(link.status) && link.task_id === task.task_id);
+      if (!assigned && nodes.some((node) => node.id === creatorNode)) {
+        edges.push({ id: edgeId('contains', creatorNode, id), type: 'contains', source: creatorNode, target: id, team_id: team.team_id });
+      }
     }
     for (const agent of agents) {
       const id = nodeId('agent', agent.agent_id);
@@ -262,7 +285,10 @@ export function buildTeamAtlasIR(
         status: agent.status,
         metadata: { owner_user_id: agent.owner_user_id },
       });
-      edges.push({ id: edgeId('contains', teamNode, id), type: 'contains', source: teamNode, target: id, team_id: team.team_id });
+      const ownerNode = memberNodeId(agent.owner_user_id);
+      if (nodes.some((node) => node.id === ownerNode)) {
+        edges.push({ id: edgeId('contains', ownerNode, id), type: 'contains', source: ownerNode, target: id, team_id: team.team_id });
+      }
     }
     for (const asset of assets) {
       nodes.push({
@@ -400,11 +426,7 @@ async function loadTeamSnapshot(
 ): Promise<TeamAtlasSnapshot> {
   const assetTypes: AssetRaw['asset_type'][] = ['skill', 'llm_wiki', 'code_graph', 'chat_memory'];
   const [memberRes, tasksRes, agentsRes, assetsRes, skillsRes] = await Promise.all([
-    settledSource('team-member/get', async () => {
-      const env = await deps.metaKernel.invoke('team-member/get', { team_id: team.team_id, user_id: userId }, ctx);
-      if (env.code !== 0) throw env;
-      return env.data as TeamMemberRaw;
-    }),
+    settledSource('team-member/list', () => fetchAllStrict<TeamMemberRaw>(deps, ctx, 'team-member/list', { team_id: team.team_id })),
     settledSource('task/list', () => fetchAllStrict<TaskRaw>(deps, ctx, 'task/list', { team_id: team.team_id })),
     settledSource('agent/list', () => fetchAllStrict<AgentRaw>(deps, ctx, 'agent/list', { team_id: team.team_id })),
     settledSource('asset/list-accessible', async () => (await Promise.all(assetTypes.map((assetType) => fetchAllStrict<AssetRaw>(deps, ctx, 'asset/list-accessible', { user_id: userId, team_id: team.team_id, asset_type: assetType, action: 'read' })))).flat()),
@@ -417,7 +439,8 @@ async function loadTeamSnapshot(
   const sources = [memberRes, tasksRes, agentsRes, assetsRes, skillsRes, taskAgentsRes, fixedAssetsRes];
   return {
     team,
-    role: memberRes.ok ? memberRes.value.role : undefined,
+    role: memberRes.ok ? memberRes.value.find((member) => member.user_id === userId)?.role : undefined,
+    members: memberRes.ok ? memberRes.value : [],
     tasks,
     agents,
     assets: assetsRes.ok ? assetsRes.value : [],
@@ -425,6 +448,7 @@ async function loadTeamSnapshot(
     fixedAssets: fixedAssetsRes.ok ? fixedAssetsRes.value : [],
     skills: skillsRes.ok ? skillsRes.value : [],
     complete: {
+      members: memberRes.ok,
       tasks: tasksRes.ok,
       agents: agentsRes.ok,
       assets: assetsRes.ok,

@@ -9,13 +9,14 @@ function snapshot(overrides: Partial<TeamAtlasSnapshot> = {}): TeamAtlasSnapshot
   return {
     team: { team_id: 'team-1', name: 'Atlas', owner_user_id: 'user-1' },
     role: 'admin',
+    members: [{ user_id: 'user-1', username: 'alice', role: 'admin', status: 'active' }],
     tasks: [{ task_id: 'task-1', team_id: 'team-1', title: 'Ship Atlas', status: 'active', creator_user_id: 'user-1', source_type: 'manual' }],
     agents: [{ agent_id: 'agt-1', team_id: 'team-1', owner_user_id: 'user-1', name: 'Codex', status: 'active' }],
     assets: [{ asset_id: 'skill-1', team_id: 'team-1', asset_type: 'skill', name: 'Planner', owner_user_id: 'user-1', status: 'active' }],
     taskAgents: [{ task_id: 'task-1', agent_id: 'agt-1', status: 'active' }],
     fixedAssets: [],
     skills: [{ skill_id: 'skill-1', owner_agent_id: 'agt-1', status: 'active' }],
-    complete: { tasks: true, agents: true, assets: true, taskAgents: true, fixedAssets: true, skills: true },
+    complete: { members: true, tasks: true, agents: true, assets: true, taskAgents: true, fixedAssets: true, skills: true },
     failedSources: [],
     ...overrides,
   };
@@ -28,7 +29,7 @@ describe('buildTeamAtlasIR', () => {
     expect(ir.completeness).toBe('complete');
     expect(ir.nodes.map((node) => node.id)).toEqual([
       'agent:agt-1',
-      'identity:user-1',
+      'identity:team-1:user-1',
       'skill:skill-1',
       'task:task-1',
       'team:team-1',
@@ -40,6 +41,9 @@ describe('buildTeamAtlasIR', () => {
     expect(ir.nodes.find((node) => node.id === 'team:team-1')?.metadata?.owner_user_id).toBe('user-1');
     expect(ir.nodes.find((node) => node.id === 'task:task-1')?.metadata).toMatchObject({ creator_user_id: 'user-1', source_type: 'manual' });
     expect(ir.nodes.find((node) => node.id === 'agent:agt-1')?.metadata?.owner_user_id).toBe('user-1');
+    expect(ir.nodes.find((node) => node.id === 'identity:team-1:user-1')?.metadata).toMatchObject({ role: 'admin', is_current: true });
+    expect(ir.edges).toContainEqual(expect.objectContaining({ type: 'member_of', source: 'team:team-1', target: 'identity:team-1:user-1' }));
+    expect(ir.edges).toContainEqual(expect.objectContaining({ type: 'contains', source: 'identity:team-1:user-1', target: 'agent:agt-1' }));
     expect(ir.warnings).toEqual([]);
   });
 
@@ -47,12 +51,24 @@ describe('buildTeamAtlasIR', () => {
     const ir = buildTeamAtlasIR('user-1', [snapshot({
       tasks: [],
       taskAgents: [],
-      complete: { tasks: false, agents: true, assets: true, taskAgents: false, fixedAssets: true, skills: true },
+      complete: { members: true, tasks: false, agents: true, assets: true, taskAgents: false, fixedAssets: true, skills: true },
       failedSources: ['task/list'],
     })]);
     expect(ir.completeness).toBe('partial');
     expect(ir.warnings.some((warning) => warning.code === 'SOURCE_PARTIAL')).toBe(true);
     expect(ir.warnings.some((warning) => warning.code === 'TEAM_WITHOUT_TASKS')).toBe(false);
+  });
+
+  it('creates a separate member node for the same user in each team', () => {
+    const second = snapshot({
+      team: { team_id: 'team-2', name: 'Beta', owner_user_id: 'user-1' },
+      tasks: [], agents: [], assets: [], taskAgents: [], skills: [],
+    });
+    const ir = buildTeamAtlasIR('user-1', [snapshot(), second]);
+    expect(ir.nodes.filter((node) => node.type === 'identity').map((node) => node.id)).toEqual([
+      'identity:team-1:user-1',
+      'identity:team-2:user-1',
+    ]);
   });
 
   it('filters links that point to invisible assets', () => {

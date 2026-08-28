@@ -17,8 +17,8 @@ const RELATION_LABEL_WIDTH: Record<TeamAtlasRelation, number> = {
 };
 const STATUS_CACHE_MS = 30_000;
 
-function nodeClass(type: TeamAtlasNodeType): string {
-  return `team-atlas-node team-atlas-node--${type}`;
+function nodeClass(node: TeamAtlasNode): string {
+  return `team-atlas-node team-atlas-node--${node.type}${node.metadata?.is_current ? ' team-atlas-node--current-user' : ''}`;
 }
 
 function statusText(status: ChatMemoryStatus | undefined): string {
@@ -37,20 +37,20 @@ export function TeamAtlasPage() {
   const { t } = useTranslation();
   const navigate = useNavigate();
   const setActiveTeamId = useBackendStore((state) => state.setActiveTeamId);
+  const activeTeamId = useBackendStore((state) => state.activeTeamId);
   const [ir, setIr] = useState<TeamAtlasIR | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [query, setQuery] = useState('');
   const [assetType, setAssetType] = useState<TeamAtlasNodeType | 'all'>('all');
-  const [focusTeamId, setFocusTeamId] = useState<string | null>(null);
-  const [focusAgentId, setFocusAgentId] = useState<string | null>(null);
+  const [selectedTeamIds, setSelectedTeamIds] = useState<string[]>([]);
+  const [showUnboundAssets, setShowUnboundAssets] = useState(true);
   const [selectedId, setSelectedId] = useState<string | null>(null);
-  const [hoveredId, setHoveredId] = useState<string | null>(null);
-  const [zoom, setZoom] = useState(0.96);
+  const [zoom, setZoom] = useState(1);
   const [pan, setPan] = useState({ x: 10, y: 10 });
   const dragRef = useRef<{ x: number; y: number; panX: number; panY: number } | null>(null);
   const canvasRef = useRef<HTMLDivElement | null>(null);
-  const hoverTimer = useRef<number | null>(null);
+  const svgRef = useRef<SVGSVGElement | null>(null);
   const statusCache = useRef(new Map<string, { expires: number; value?: ChatMemoryStatus; error?: string }>());
   const [memoryVersion, setMemoryVersion] = useState(0);
 
@@ -58,20 +58,50 @@ export function TeamAtlasPage() {
     setLoading(true);
     setError('');
     try {
-      setIr(await teamAtlasApi.bootstrap());
+      const nextIr = await teamAtlasApi.bootstrap();
+      setIr(nextIr);
+      setSelectedTeamIds((current) => {
+        const visible = new Set(nextIr.scope.team_ids);
+        const retained = current.filter((teamId) => visible.has(teamId));
+        if (retained.length > 0) return retained;
+        const initial = activeTeamId && visible.has(activeTeamId) ? activeTeamId : nextIr.scope.team_ids[0];
+        return initial ? [initial] : [];
+      });
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [activeTeamId]);
 
   useEffect(() => { void load(); }, [load]);
-  useEffect(() => () => { if (hoverTimer.current !== null) window.clearTimeout(hoverTimer.current); }, []);
 
-  const projection = useMemo(() => ir ? projectAtlas(ir, { focusTeamId, focusAgentId, query, assetType }) : null, [ir, focusTeamId, focusAgentId, query, assetType]);
+  const projection = useMemo(() => ir ? projectAtlas(ir, { teamIds: selectedTeamIds, query, assetType, showUnboundAssets }) : null, [ir, selectedTeamIds, query, assetType, showUnboundAssets]);
   const layout = useMemo(() => projection ? layoutAtlas(projection) : null, [projection]);
-  const summaryCards = useMemo(() => ir ? summarizeAtlas(ir) : [], [ir]);
+  const summaryCards = useMemo(() => ir ? summarizeAtlas(ir, selectedTeamIds) : [], [ir, selectedTeamIds]);
+
+  const fitCanvas = useCallback(() => {
+    const canvas = canvasRef.current;
+    const svg = svgRef.current;
+    if (!canvas || !svg || !layout) return;
+    const canvasRect = canvas.getBoundingClientRect();
+    const svgRect = svg.getBoundingClientRect();
+    const availableHeight = Math.max(260, window.innerHeight - canvasRect.top - 20);
+    const widthRatio = (canvas.clientWidth - 28) / Math.max(1, svgRect.width);
+    const heightRatio = (availableHeight - 28) / Math.max(1, svgRect.height);
+    const nextZoom = Math.min(1, Math.max(0.2, Math.min(widthRatio, heightRatio)));
+    setZoom(nextZoom);
+    setPan({ x: 10, y: 10 });
+    canvas.scrollTo({ left: 0, top: 0 });
+  }, [layout]);
+
+  useEffect(() => {
+    if (!layout) return;
+    const frame = window.requestAnimationFrame(fitCanvas);
+    const observer = new ResizeObserver(fitCanvas);
+    if (canvasRef.current) observer.observe(canvasRef.current);
+    return () => { window.cancelAnimationFrame(frame); observer.disconnect(); };
+  }, [fitCanvas, layout]);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -79,19 +109,20 @@ export function TeamAtlasPage() {
     const handleWheel = (event: WheelEvent) => {
       event.preventDefault();
       event.stopPropagation();
-      setZoom((value) => Math.min(1.6, Math.max(0.45, value + (event.deltaY < 0 ? 0.08 : -0.08))));
+      setZoom((value) => Math.min(1.6, Math.max(0.2, value + (event.deltaY < 0 ? 0.08 : -0.08))));
     };
     canvas.addEventListener('wheel', handleWheel, { passive: false });
     return () => canvas.removeEventListener('wheel', handleWheel);
   }, [layout]);
-  const activeId = selectedId ?? hoveredId;
+  const activeId = selectedId;
   const activeNode = layout?.nodes.find((node) => node.id === activeId) ?? null;
+  const logicalActiveId = activeNode?.logical_id ?? activeNode?.id;
   const activeRelations = activeNode && layout ? layout.edges
-    .filter((edge) => edge.source === activeNode.id || edge.target === activeNode.id)
+    .filter((edge) => edge.source === logicalActiveId || edge.target === logicalActiveId)
     .map((edge) => ({
       edge,
-      outgoing: edge.source === activeNode.id,
-      peer: layout.nodes.find((node) => node.id === (edge.source === activeNode.id ? edge.target : edge.source)),
+      outgoing: edge.source === logicalActiveId,
+      peer: layout.nodes.find((node) => (node.logical_id ?? node.id) === (edge.source === logicalActiveId ? edge.target : edge.source)),
     })) : [];
   const memoryEntry = activeNode?.type === 'chat_memory' ? statusCache.current.get(activeNode.entity_id) : undefined;
   void memoryVersion;
@@ -110,24 +141,10 @@ export function TeamAtlasPage() {
     });
   }, []);
 
-  const onNodeEnter = useCallback((node: TeamAtlasNode) => {
-    setHoveredId(node.id);
-    if (hoverTimer.current !== null) window.clearTimeout(hoverTimer.current);
-    hoverTimer.current = window.setTimeout(() => fetchMemoryStatus(node), 250);
-  }, [fetchMemoryStatus]);
-
   const onNodeClick = useCallback((node: TeamAtlasNode) => {
     setSelectedId(node.id);
     fetchMemoryStatus(node);
-    if (node.type === 'team' && projection?.mode === 'team_summary') {
-      setFocusTeamId(node.entity_id);
-      setFocusAgentId(null);
-      setSelectedId(null);
-    } else if (node.type === 'agent' && projection?.truncated) {
-      setFocusAgentId(node.entity_id);
-      setSelectedId(null);
-    }
-  }, [fetchMemoryStatus, projection?.mode, projection?.truncated]);
+  }, [fetchMemoryStatus]);
 
   const openManagement = useCallback((node: TeamAtlasNode) => {
     if (node.team_id) setActiveTeamId(node.team_id);
@@ -145,7 +162,7 @@ export function TeamAtlasPage() {
     if (!layout) return '';
     const outgoing = layout.edges.filter((edge) => edge.source === node.id);
     const owner = node.metadata?.owner_user_id;
-    if (node.type === 'identity') return t('atlas.currentIdentity');
+    if (node.type === 'identity') return node.metadata?.is_current ? t('atlas.currentIdentity') : `${t('atlas.role')} ${String(node.metadata?.role ?? '—')}`;
     if (node.type === 'team') return `${t('atlas.owner')} ${shortId(owner)}`;
     if (node.type === 'task') return `Agent ${outgoing.filter((edge) => edge.type === 'assigned_to').length} · ${t('atlas.creator')} ${shortId(node.metadata?.creator_user_id)}`;
     if (node.type === 'agent') return `${t('atlas.owner')} ${shortId(owner)}`;
@@ -158,53 +175,71 @@ export function TeamAtlasPage() {
 
   const warningByNode = new Map(ir.warnings.filter((warning) => warning.node_id).map((warning) => [warning.node_id!, warning]));
   const partialSources = ir.warnings.filter((warning) => warning.code === 'SOURCE_PARTIAL').length;
+  const teamOptions = ir.nodes.filter((node) => node.type === 'team').sort((a, b) => a.label.localeCompare(b.label));
+  const selectedTeamLabel = selectedTeamIds.length === 1
+    ? teamOptions.find((team) => team.entity_id === selectedTeamIds[0])?.label ?? t('atlas.selectTeams')
+    : t('atlas.selectedTeams', { count: selectedTeamIds.length });
+  const toggleTeam = (teamId: string) => {
+    setSelectedId(null);
+    setSelectedTeamIds((current) => {
+      if (current.includes(teamId)) return current.length === 1 ? current : current.filter((id) => id !== teamId);
+      return [...current, teamId].sort();
+    });
+  };
 
   return (
     <section className="team-atlas-page" aria-label={t('atlas.title')}>
       <header className="team-atlas-header">
         <div className="team-atlas-summary" aria-label={t('atlas.summary')}>
-          {summaryCards.map((card) => <span key={card.type} title={`${t(`atlas.type.${card.type}`)} · ${t('atlas.mineVisible')}`}>
-            <strong><b>{card.mine}</b><em>/</em>{card.visible}</strong>
-            <small>{t(`atlas.type.${card.type}`)}</small>
-          </span>)}
+          {[summaryCards.slice(0, 3), summaryCards.slice(3)].map((row, index) => <div key={index} className={`team-atlas-summary-row team-atlas-summary-row--${index + 1}`}>
+            {row.map((card) => <span key={card.type} title={`${t(`atlas.type.${card.type}`)} · ${t('atlas.mineVisible')}`}>
+              <strong><b>{card.mine}</b><em>/</em>{card.visible}</strong>
+              <small>{t(`atlas.type.${card.type}`)}</small>
+            </span>)}
+          </div>)}
         </div>
       </header>
 
       <div className="team-atlas-toolbar">
         <label><span className="sr-only">{t('atlas.search')}</span><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder={t('atlas.search')} /></label>
         <label><span className="sr-only">{t('atlas.assetType')}</span><select value={assetType} onChange={(event) => setAssetType(event.target.value as TeamAtlasNodeType | 'all')}>{ASSET_OPTIONS.map((type) => <option key={type} value={type}>{t(`atlas.type.${type}`)}</option>)}</select></label>
-        <div className="team-atlas-breadcrumb">
-          <button type="button" onClick={() => { setFocusTeamId(null); setFocusAgentId(null); setSelectedId(null); }}>{t('atlas.allTeams')}</button>
-          {focusTeamId && <><span>/</span><button type="button" onClick={() => { setFocusAgentId(null); setSelectedId(null); }}>{ir.nodes.find((node) => node.id === `team:${focusTeamId}`)?.label ?? focusTeamId}</button></>}
-          {focusAgentId && <><span>/</span><span>{ir.nodes.find((node) => node.id === `agent:${focusAgentId}`)?.label ?? focusAgentId}</span></>}
-        </div>
-        <div className="team-atlas-zoom"><button type="button" aria-label={t('atlas.zoomOut')} onClick={() => setZoom((value) => Math.max(0.45, value - 0.1))}>−</button><span>{Math.round(zoom * 100)}%</span><button type="button" aria-label={t('atlas.zoomIn')} onClick={() => setZoom((value) => Math.min(1.6, value + 0.1))}>+</button><button type="button" onClick={() => { setZoom(0.96); setPan({ x: 10, y: 10 }); }}>{t('atlas.fit')}</button></div>
+        <details className="team-atlas-team-picker">
+          <summary>{selectedTeamLabel}</summary>
+          <div className="team-atlas-team-options" role="group" aria-label={t('atlas.selectTeams')}>
+            {teamOptions.map((team) => <label key={team.id}><input type="checkbox" checked={selectedTeamIds.includes(team.entity_id)} onChange={() => toggleTeam(team.entity_id)} />{team.label}</label>)}
+          </div>
+        </details>
+        <label className="team-atlas-switch"><input type="checkbox" checked={showUnboundAssets} onChange={(event) => setShowUnboundAssets(event.target.checked)} /><span>{t('atlas.showUnboundAssets')}</span></label>
+        <div className="team-atlas-zoom"><button type="button" aria-label={t('atlas.zoomOut')} onClick={() => setZoom((value) => Math.max(0.2, value - 0.1))}>−</button><span>{Math.round(zoom * 100)}%</span><button type="button" aria-label={t('atlas.zoomIn')} onClick={() => setZoom((value) => Math.min(1.6, value + 0.1))}>+</button><button type="button" onClick={fitCanvas}>{t('atlas.fit')}</button></div>
       </div>
 
       {ir.completeness === 'partial' && <div className="team-atlas-notice" role="status">{t('atlas.partial', { count: partialSources })}</div>}
       {projection.truncated && <div className="team-atlas-notice" role="status">{t('atlas.aggregated')}</div>}
 
       <div className="team-atlas-relation-guide" aria-label={t('atlas.relationGuide')}>
-        <div className="team-atlas-relation-explanation"><strong>{t('atlas.relationGuide')}</strong><span>{t('atlas.relationExplanation')}</span></div>
+        <div className="team-atlas-relation-explanation"><strong>{t('atlas.relationGuide')}：</strong><span>{t('atlas.relationExplanation')}</span></div>
         <div className="team-atlas-relation-legend">{RELATIONS.map((relation) => <span key={relation}><i className={`team-atlas-relation-swatch team-atlas-relation-swatch--${relation}`} />{t(`atlas.relation.${relation}`)}</span>)}</div>
       </div>
 
       <div className="team-atlas-workspace">
         <div ref={canvasRef} className="team-atlas-canvas">
           <svg
+            ref={svgRef}
             role="img"
             aria-label={t('atlas.graphLabel')}
             viewBox={`0 0 ${layout.width} ${Math.max(620, layout.height)}`}
             style={{ height: Math.max(620, layout.height) }}
-            onPointerDown={(event) => { if (event.target === event.currentTarget) { event.currentTarget.setPointerCapture(event.pointerId); dragRef.current = { x: event.clientX, y: event.clientY, panX: pan.x, panY: pan.y }; } }}
+            onPointerDown={(event) => { if (!(event.target as Element).closest('.team-atlas-node')) { event.currentTarget.setPointerCapture(event.pointerId); dragRef.current = { x: event.clientX, y: event.clientY, panX: pan.x, panY: pan.y }; } }}
             onPointerMove={(event) => { const drag = dragRef.current; if (drag) setPan({ x: drag.panX + (event.clientX - drag.x) / zoom, y: drag.panY + (event.clientY - drag.y) / zoom }); }}
             onPointerUp={() => { dragRef.current = null; }}
+            onClick={(event) => { if (!(event.target as Element).closest('.team-atlas-node')) setSelectedId(null); }}
           >
             <defs>{RELATIONS.map((relation) => <marker key={relation} id={`atlas-arrow-${relation}`} viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path className={`team-atlas-arrow team-atlas-arrow--${relation}`} d="M 0 0 L 10 5 L 0 10 z" /></marker>)}</defs>
             <g transform={`translate(${pan.x} ${pan.y}) scale(${zoom})`}>
               <g className="team-atlas-edges">{layout.edges.map((edge) => {
                 const geometry = edgeGeometry(edge, layout.nodes, layout.edges);
-                const active = Boolean(activeId && (edge.source === activeId || edge.target === activeId));
+                if (!geometry.path) return null;
+                const active = Boolean(logicalActiveId && (edge.source === logicalActiveId || edge.target === logicalActiveId));
                 const labelWidth = RELATION_LABEL_WIDTH[edge.type];
                 return <g key={edge.id} className={`team-atlas-edge team-atlas-edge--${edge.type}${active ? ' is-active' : ''}`}>
                   <path d={geometry.path} markerEnd={`url(#atlas-arrow-${edge.type})`}><title>{t(`atlas.relation.${edge.type}`)}</title></path>
@@ -215,15 +250,22 @@ export function TeamAtlasPage() {
                 </g>;
               })}</g>
               <g>{layout.nodes.map((node) => {
+                const logicalNodeId = node.logical_id ?? node.id;
                 const active = activeId === node.id;
-                const adjacent = activeId ? layout.edges.some((edge) => (edge.source === activeId && edge.target === node.id) || (edge.target === activeId && edge.source === node.id)) : false;
-                const warning = warningByNode.get(node.id);
+                const adjacent = logicalActiveId ? layout.edges.some((edge) => (edge.source === logicalActiveId && edge.target === logicalNodeId) || (edge.target === logicalActiveId && edge.source === logicalNodeId)) : false;
+                const warning = warningByNode.get(logicalNodeId);
                 const caption = nodeCaption(node);
-                return <g key={node.id} role="button" tabIndex={0} aria-label={`${node.type}: ${node.label}`} className={`${nodeClass(node.type)}${active ? ' is-active' : ''}${adjacent ? ' is-adjacent' : ''}`} transform={`translate(${node.x} ${node.y})`} onMouseEnter={() => onNodeEnter(node)} onMouseLeave={() => setHoveredId(null)} onClick={() => onNodeClick(node)} onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') onNodeClick(node); }}>
-                  <rect width={node.width} height={node.height} rx="12" />
-                  <text className="team-atlas-node-type" x="14" y="18">{t(`atlas.type.${node.type}`)}{node.status ? ` · ${node.status}` : ''}</text>
-                  <text className="team-atlas-node-label" x="14" y="41">{node.label.length > 27 ? `${node.label.slice(0, 26)}…` : node.label}</text>
-                  <text className="team-atlas-node-caption" x="14" y="62">{caption.length > 40 ? `${caption.slice(0, 39)}…` : caption}</text>
+                return <g key={node.id} role="button" tabIndex={0} aria-label={`${node.type}: ${node.label}`} className={`${nodeClass(node)}${active ? ' is-active' : ''}${adjacent ? ' is-adjacent' : ''}`} transform={`translate(${node.x} ${node.y})`} onMouseDown={(event) => event.preventDefault()} onClick={(event) => { event.stopPropagation(); onNodeClick(node); }} onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') onNodeClick(node); }}>
+                  <rect width={node.width} height={node.height} rx={node.type === 'task' ? 8 : 12} />
+                  {node.type === 'task' ? <>
+                    <text className="team-atlas-node-type" x="12" y="14">{t('atlas.type.task')}{node.status ? ` · ${node.status}` : ''}</text>
+                    <text className="team-atlas-node-label team-atlas-node-label--task" x="12" y="31">{node.label.length > 27 ? `${node.label.slice(0, 26)}…` : node.label}</text>
+                  </> : <>
+                    <text className="team-atlas-node-type" x="14" y="18">{t(`atlas.type.${node.type}`)}{node.status ? ` · ${node.status}` : ''}</text>
+                    <text className="team-atlas-node-label" x="14" y="41">{node.label.length > 27 ? `${node.label.slice(0, 26)}…` : node.label}</text>
+                    <text className="team-atlas-node-caption" x="14" y="60">{caption.length > 40 ? `${caption.slice(0, 39)}…` : caption}</text>
+                  </>}
+                  {node.metadata?.is_current && <g className="team-atlas-current-badge" transform={`translate(${node.width - 17} 14)`}><circle r="11" /><path d="M-4 0 0-4 4 0 0 4Z" /><text y="3">ME</text></g>}
                   {warning && <g className="team-atlas-warning" transform={`translate(${node.width - 18} 14)`}><circle r="8" /><text y="4">!</text><title>{warning.message}</title></g>}
                   <title>{`${node.label} · ${node.entity_id}`}</title>
                 </g>;
@@ -240,7 +282,7 @@ export function TeamAtlasPage() {
             {activeNode.type === 'team' && <div className="team-atlas-passport-counts"><span>Task {String(activeNode.metadata?.tasks ?? 0)}</span><span>Agent {String(activeNode.metadata?.agents ?? 0)}</span><span>Asset {String(activeNode.metadata?.assets ?? 0)}</span></div>}
             {activeNode.type === 'chat_memory' && <div className="team-atlas-memory-status"><strong>{t('atlas.memoryLayers')}</strong><span>{memoryEntry?.error ? t('atlas.statusUnavailable') : statusText(memoryEntry?.value)}</span></div>}
             {activeRelations.length > 0 && <div className="team-atlas-passport-relations"><strong>{t('atlas.connections')}</strong>{activeRelations.map(({ edge, outgoing, peer }) => <span key={edge.id}><i className={`team-atlas-relation-swatch team-atlas-relation-swatch--${edge.type}`} />{outgoing ? '→' : '←'} {t(`atlas.relation.${edge.type}`)} · {peer?.label ?? (outgoing ? edge.target : edge.source)}</span>)}</div>}
-            {warningByNode.get(activeNode.id) && <p className="team-atlas-passport-warning">{warningByNode.get(activeNode.id)?.message}</p>}
+            {logicalActiveId && warningByNode.get(logicalActiveId) && <p className="team-atlas-passport-warning">{warningByNode.get(logicalActiveId)?.message}</p>}
             <button type="button" className="team-atlas-primary" onClick={() => openManagement(activeNode)}>{t('atlas.openManagement')}</button>
           </> : <p className="team-atlas-empty">{t('atlas.selectHint')}</p>}
         </aside>
