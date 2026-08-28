@@ -28,6 +28,14 @@ export interface AtlasEdgeGeometry {
   labelY: number;
 }
 
+export type AtlasSummaryNodeType = 'team' | 'task' | 'agent' | 'skill' | 'llm_wiki' | 'code_graph' | 'chat_memory';
+
+export interface AtlasSummaryCard {
+  type: AtlasSummaryNodeType;
+  mine: number;
+  visible: number;
+}
+
 const ASSET_TYPES = new Set<TeamAtlasNodeType>(['skill', 'llm_wiki', 'code_graph', 'chat_memory']);
 const TYPE_ORDER: Record<TeamAtlasNodeType, number> = {
   identity: 0,
@@ -42,13 +50,15 @@ const TYPE_ORDER: Record<TeamAtlasNodeType, number> = {
 const TYPE_X: Record<TeamAtlasNodeType, number> = {
   identity: 30,
   team: 350,
-  task: 680,
-  agent: 1010,
-  skill: 1340,
-  llm_wiki: 1340,
-  code_graph: 1340,
-  chat_memory: 1340,
+  task: 700,
+  agent: 700,
+  skill: 1040,
+  llm_wiki: 1040,
+  code_graph: 1040,
+  chat_memory: 1040,
 };
+
+const SUMMARY_TYPES: AtlasSummaryNodeType[] = ['team', 'task', 'agent', 'skill', 'llm_wiki', 'code_graph', 'chat_memory'];
 
 function stableNodes(nodes: TeamAtlasNode[]): TeamAtlasNode[] {
   return [...nodes].sort((a, b) => TYPE_ORDER[a.type] - TYPE_ORDER[b.type] || (a.team_id ?? '').localeCompare(b.team_id ?? '') || a.label.localeCompare(b.label) || a.id.localeCompare(b.id));
@@ -134,20 +144,47 @@ export function projectAtlas(
   return { nodes, edges: filterEdges(ir.edges, nodes), mode, truncated };
 }
 
+export function summarizeAtlas(ir: TeamAtlasIR): AtlasSummaryCard[] {
+  const userId = ir.scope.user_id;
+  const ownAgentIds = new Set(ir.nodes
+    .filter((node) => node.type === 'agent' && node.metadata?.owner_user_id === userId)
+    .map((node) => node.id));
+  const mine = new Set<string>();
+
+  for (const node of ir.nodes) {
+    if (node.type === 'team' && ir.scope.team_ids.includes(node.entity_id)) mine.add(node.id);
+    if (node.type === 'task' && node.metadata?.creator_user_id === userId) mine.add(node.id);
+    if (node.type === 'agent' && ownAgentIds.has(node.id)) mine.add(node.id);
+    if (ASSET_TYPES.has(node.type) && node.metadata?.owner_user_id === userId) mine.add(node.id);
+  }
+
+  for (const edge of ir.edges) {
+    if (edge.type === 'assigned_to' && ownAgentIds.has(edge.target)) mine.add(edge.source);
+    if ((edge.type === 'owns' || edge.type === 'fixed_binding') && ownAgentIds.has(edge.source)) mine.add(edge.target);
+  }
+
+  return SUMMARY_TYPES.map((type) => {
+    const nodes = ir.nodes.filter((node) => node.type === type);
+    return { type, mine: nodes.filter((node) => mine.has(node.id)).length, visible: nodes.length };
+  });
+}
+
 export function layoutAtlas(projection: AtlasProjection): AtlasLayout {
-  const width = 1610;
+  const width = 1310;
   const nodeWidth = 230;
   const nodeHeight = 76;
   const gap = 24;
   const positioned: PositionedAtlasNode[] = [];
-  const byLane = new Map<TeamAtlasNodeType | 'asset', TeamAtlasNode[]>();
+  const byLane = new Map<TeamAtlasNodeType | 'asset' | 'work', TeamAtlasNode[]>();
   for (const node of stableNodes(projection.nodes)) {
-    const lane = ASSET_TYPES.has(node.type) ? 'asset' : node.type;
+    const lane = ASSET_TYPES.has(node.type) ? 'asset' : node.type === 'task' || node.type === 'agent' ? 'work' : node.type;
     const list = byLane.get(lane) ?? [];
     list.push(node);
     byLane.set(lane, list);
   }
   for (const nodes of byLane.values()) {
+    nodes.sort((a, b) => (a.type === 'agent' ? 0 : a.type === 'task' ? 1 : 2) - (b.type === 'agent' ? 0 : b.type === 'task' ? 1 : 2)
+      || (a.team_id ?? '').localeCompare(b.team_id ?? '') || a.label.localeCompare(b.label) || a.id.localeCompare(b.id));
     nodes.forEach((node, index) => {
       const aggregateCount = typeof node.metadata?.count === 'number' ? node.metadata.count : undefined;
       positioned.push({ ...node, x: TYPE_X[node.type], y: 40 + index * (nodeHeight + gap), width: nodeWidth, height: nodeHeight, ...(aggregateCount === undefined ? {} : { aggregate_count: aggregateCount }) });
@@ -155,6 +192,21 @@ export function layoutAtlas(projection: AtlasProjection): AtlasLayout {
   }
   const maxY = positioned.reduce((max, node) => Math.max(max, node.y + node.height), 220);
   return { nodes: positioned.sort((a, b) => a.id.localeCompare(b.id)), edges: projection.edges, width, height: maxY + 60 };
+}
+
+function edgePortX(
+  node: PositionedAtlasNode,
+  edge: TeamAtlasEdge,
+  edges: TeamAtlasEdge[],
+  side: 'source' | 'target',
+): number {
+  const incident = edges
+    .filter((item) => item.type === 'assigned_to' && item[side] === node.id)
+    .sort((a, b) => a.id.localeCompare(b.id));
+  if (incident.length <= 1) return node.x + node.width / 2;
+  const index = incident.findIndex((item) => item.id === edge.id);
+  const span = Math.min(150, node.width - 40);
+  return node.x + node.width / 2 + ((index / (incident.length - 1)) - 0.5) * span;
 }
 
 function edgePortY(
@@ -180,6 +232,18 @@ export function edgeGeometry(
   const source = nodes.find((node) => node.id === edge.source);
   const target = nodes.find((node) => node.id === edge.target);
   if (!source || !target) return { path: '', labelX: 0, labelY: 0 };
+  if (edge.type === 'assigned_to' && source.x === target.x && source.y > target.y) {
+    const sx = edgePortX(source, edge, edges, 'source');
+    const sy = source.y;
+    const tx = edgePortX(target, edge, edges, 'target');
+    const ty = target.y + target.height;
+    const mid = sy - Math.max(24, (sy - ty) / 2);
+    return {
+      path: `M ${sx} ${sy} V ${mid} H ${tx} V ${ty}`,
+      labelX: sx + (tx - sx) / 2,
+      labelY: mid - 7,
+    };
+  }
   const sx = source.x + source.width;
   const sy = edgePortY(source, edge, edges, 'source');
   const tx = target.x;

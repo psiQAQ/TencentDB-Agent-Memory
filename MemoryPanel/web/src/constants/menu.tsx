@@ -62,6 +62,15 @@ export const GROUP_ORDER_KEYS = ['workbench', 'organization', 'assets'] as const
 /** 侧边栏菜单图标；未配置的页面只显示文字。 */
 export const ITEM_ICON: Partial<Record<PageId, JSX.Element>> = {
   workbench_board: <DashboardIcon size={16} />,
+  team_atlas: (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" focusable="false">
+      <circle cx="5" cy="12" r="2.5" />
+      <circle cx="12" cy="5" r="2.5" />
+      <circle cx="19" cy="12" r="2.5" />
+      <circle cx="12" cy="19" r="2.5" />
+      <path d="M6.8 10.2 10.2 6.8M13.8 6.8l3.4 3.4M17.2 13.8l-3.4 3.4M10.2 17.2l-3.4-3.4" />
+    </svg>
+  ),
   team_members: <UserIcon size={16} />,
   team_agents: <UsergroupIcon size={16} />,
   api_keys: <LockOnIcon size={16} />,

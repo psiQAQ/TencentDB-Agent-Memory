@@ -26,6 +26,7 @@ export const enUS = {
   'atlas.tasks': 'Tasks',
   'atlas.agents': 'Agents',
   'atlas.assets': 'Assets',
+  'atlas.mineVisible': 'Mine / visible',
   'atlas.search': 'Search name or ID',
   'atlas.assetType': 'Asset type',
   'atlas.allTeams': 'All teams',

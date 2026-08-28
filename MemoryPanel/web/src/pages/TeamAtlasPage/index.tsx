@@ -3,7 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { teamAtlasApi, type ChatMemoryStatus, type TeamAtlasIR, type TeamAtlasNode, type TeamAtlasNodeType, type TeamAtlasRelation } from '../../lib/api/team-atlas';
 import { useBackendStore } from '../../stores/backend';
-import { edgeGeometry, layoutAtlas, projectAtlas } from './atlas-graph';
+import { edgeGeometry, layoutAtlas, projectAtlas, summarizeAtlas } from './atlas-graph';
 import './team-atlas.css';
 
 const ASSET_OPTIONS: Array<TeamAtlasNodeType | 'all'> = ['all', 'skill', 'llm_wiki', 'code_graph', 'chat_memory'];
@@ -49,6 +49,7 @@ export function TeamAtlasPage() {
   const [zoom, setZoom] = useState(0.96);
   const [pan, setPan] = useState({ x: 10, y: 10 });
   const dragRef = useRef<{ x: number; y: number; panX: number; panY: number } | null>(null);
+  const canvasRef = useRef<HTMLDivElement | null>(null);
   const hoverTimer = useRef<number | null>(null);
   const statusCache = useRef(new Map<string, { expires: number; value?: ChatMemoryStatus; error?: string }>());
   const [memoryVersion, setMemoryVersion] = useState(0);
@@ -70,6 +71,19 @@ export function TeamAtlasPage() {
 
   const projection = useMemo(() => ir ? projectAtlas(ir, { focusTeamId, focusAgentId, query, assetType }) : null, [ir, focusTeamId, focusAgentId, query, assetType]);
   const layout = useMemo(() => projection ? layoutAtlas(projection) : null, [projection]);
+  const summaryCards = useMemo(() => ir ? summarizeAtlas(ir) : [], [ir]);
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas || !layout) return;
+    const handleWheel = (event: WheelEvent) => {
+      event.preventDefault();
+      event.stopPropagation();
+      setZoom((value) => Math.min(1.6, Math.max(0.45, value + (event.deltaY < 0 ? 0.08 : -0.08))));
+    };
+    canvas.addEventListener('wheel', handleWheel, { passive: false });
+    return () => canvas.removeEventListener('wheel', handleWheel);
+  }, [layout]);
   const activeId = selectedId ?? hoveredId;
   const activeNode = layout?.nodes.find((node) => node.id === activeId) ?? null;
   const activeRelations = activeNode && layout ? layout.edges
@@ -148,12 +162,11 @@ export function TeamAtlasPage() {
   return (
     <section className="team-atlas-page" aria-label={t('atlas.title')}>
       <header className="team-atlas-header">
-        <div><span className="team-atlas-eyebrow">TEAM INTELLIGENCE</span><h1>{t('atlas.title')}</h1><p>{t('atlas.subtitle')}</p></div>
         <div className="team-atlas-summary" aria-label={t('atlas.summary')}>
-          <span><strong>{ir.summary.teams}</strong>{t('atlas.teams')}</span>
-          <span><strong>{ir.summary.tasks}</strong>{t('atlas.tasks')}</span>
-          <span><strong>{ir.summary.agents}</strong>{t('atlas.agents')}</span>
-          <span><strong>{ir.summary.assets}</strong>{t('atlas.assets')}</span>
+          {summaryCards.map((card) => <span key={card.type} title={`${t(`atlas.type.${card.type}`)} · ${t('atlas.mineVisible')}`}>
+            <strong><b>{card.mine}</b><em>/</em>{card.visible}</strong>
+            <small>{t(`atlas.type.${card.type}`)}</small>
+          </span>)}
         </div>
       </header>
 
@@ -177,7 +190,7 @@ export function TeamAtlasPage() {
       </div>
 
       <div className="team-atlas-workspace">
-        <div className="team-atlas-canvas" onWheel={(event) => { event.preventDefault(); setZoom((value) => Math.min(1.6, Math.max(0.45, value + (event.deltaY < 0 ? 0.08 : -0.08)))); }}>
+        <div ref={canvasRef} className="team-atlas-canvas">
           <svg
             role="img"
             aria-label={t('atlas.graphLabel')}

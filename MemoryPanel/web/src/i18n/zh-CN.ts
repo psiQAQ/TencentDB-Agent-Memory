@@ -26,6 +26,7 @@ export const zhCN = {
   'atlas.tasks': 'Tasks',
   'atlas.agents': 'Agents',
   'atlas.assets': 'Assets',
+  'atlas.mineVisible': '我的 / 可见',
   'atlas.search': '搜索名称或 ID',
   'atlas.assetType': '资产类型',
   'atlas.allTeams': '全部团队',

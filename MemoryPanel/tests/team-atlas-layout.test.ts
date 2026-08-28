@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { edgeGeometry, edgePath, layoutAtlas, projectAtlas, type PositionedAtlasNode } from '../web/src/pages/TeamAtlasPage/atlas-graph.js';
+import { edgeGeometry, edgePath, layoutAtlas, projectAtlas, summarizeAtlas, type PositionedAtlasNode } from '../web/src/pages/TeamAtlasPage/atlas-graph.js';
 import type { TeamAtlasEdge } from '../web/src/lib/api/team-atlas.js';
 import type { TeamAtlasIR, TeamAtlasNode } from '../web/src/lib/api/team-atlas.js';
 
@@ -50,6 +50,53 @@ describe('Team Atlas projection and layout', () => {
       .sort((a, b) => a.y - b.y);
     expect(new Set(assets.map((node) => node.y)).size).toBe(4);
     expect(assets.every((node, index) => index === 0 || node.y - assets[index - 1]!.y >= node.height)).toBe(true);
+  });
+
+  it('places assigned Tasks below the Agent cards in the shared work lane', () => {
+    const input = irWithNodes([
+      { id: 'agent:a', entity_id: 'a', type: 'agent', label: 'Agent A', team_id: 'team-a' },
+      { id: 'agent:b', entity_id: 'b', type: 'agent', label: 'Agent B', team_id: 'team-a' },
+      { id: 'task:t', entity_id: 't', type: 'task', label: 'Task', team_id: 'team-a' },
+    ]);
+    input.edges.push(
+      { id: 'assigned:a', type: 'assigned_to', source: 'task:t', target: 'agent:a' },
+      { id: 'assigned:b', type: 'assigned_to', source: 'task:t', target: 'agent:b' },
+    );
+    const layout = layoutAtlas(projectAtlas(input));
+    const task = layout.nodes.find((node) => node.type === 'task')!;
+    const agents = layout.nodes.filter((node) => node.type === 'agent');
+    expect(task.x).toBe(agents[0]!.x);
+    expect(task.y).toBeGreaterThan(Math.max(...agents.map((node) => node.y)));
+    expect(edgeGeometry(layout.edges.find((edge) => edge.id === 'assigned:a')!, layout.nodes, layout.edges).path).toMatch(/^M .* V .* H .* V /);
+  });
+
+  it('summarizes mine versus visible entities for all seven card types', () => {
+    const input = irWithNodes([
+      { id: 'team:a', entity_id: 'a', type: 'team', label: 'Team A', team_id: 'a' },
+      { id: 'agent:mine', entity_id: 'mine', type: 'agent', label: 'Mine', team_id: 'a', metadata: { owner_user_id: 'user-1' } },
+      { id: 'agent:other', entity_id: 'other', type: 'agent', label: 'Other', team_id: 'a', metadata: { owner_user_id: 'user-2' } },
+      { id: 'task:mine', entity_id: 'mine', type: 'task', label: 'Mine', team_id: 'a', metadata: { creator_user_id: 'user-2' } },
+      { id: 'task:other', entity_id: 'other', type: 'task', label: 'Other', team_id: 'a', metadata: { creator_user_id: 'user-2' } },
+      { id: 'skill:mine', entity_id: 'mine', type: 'skill', label: 'Mine', team_id: 'a', metadata: { owner_user_id: 'user-2' } },
+      { id: 'skill:other', entity_id: 'other', type: 'skill', label: 'Other', team_id: 'a', metadata: { owner_user_id: 'user-2' } },
+      { id: 'llm_wiki:mine', entity_id: 'mine', type: 'llm_wiki', label: 'Wiki', team_id: 'a', metadata: { owner_user_id: 'user-1' } },
+      { id: 'code_graph:other', entity_id: 'other', type: 'code_graph', label: 'Code', team_id: 'a', metadata: { owner_user_id: 'user-2' } },
+      { id: 'chat_memory:mine', entity_id: 'mine', type: 'chat_memory', label: 'Memory', team_id: 'a', metadata: { owner_user_id: 'user-1' } },
+    ]);
+    input.edges.push(
+      { id: 'assigned:mine', type: 'assigned_to', source: 'task:mine', target: 'agent:mine' },
+      { id: 'assigned:other', type: 'assigned_to', source: 'task:other', target: 'agent:other' },
+      { id: 'binding:mine', type: 'fixed_binding', source: 'agent:mine', target: 'skill:mine' },
+    );
+    expect(summarizeAtlas(input)).toEqual([
+      { type: 'team', mine: 1, visible: 1 },
+      { type: 'task', mine: 1, visible: 2 },
+      { type: 'agent', mine: 1, visible: 2 },
+      { type: 'skill', mine: 1, visible: 2 },
+      { type: 'llm_wiki', mine: 1, visible: 1 },
+      { type: 'code_graph', mine: 0, visible: 1 },
+      { type: 'chat_memory', mine: 1, visible: 1 },
+    ]);
   });
 
   it('builds orthogonal edge paths and omits dangling edges', () => {
