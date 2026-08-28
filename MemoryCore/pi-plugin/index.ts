@@ -68,6 +68,12 @@ export default function (pi: ExtensionAPI) {
         cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
         contextWindow: 524288,
         maxTokens: 16384,
+        compat: {
+          // DeepSeek's OpenAI-compatible endpoint rejects the `developer`
+          // role. Keep Pi's injected system prompt as a `system` message.
+          supportsDeveloperRole: false,
+          supportsReasoningEffort: true,
+        },
         thinkingLevelMap: {
           off: "none",
           minimal: "minimal",
