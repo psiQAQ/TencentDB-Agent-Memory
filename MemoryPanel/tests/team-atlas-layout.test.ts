@@ -38,6 +38,20 @@ describe('Team Atlas projection and layout', () => {
     expect(teamNodes[1]!.y - teamNodes[0]!.y).toBeGreaterThanOrEqual(teamNodes[0]!.height);
   });
 
+  it('lays out all four asset types in one shared lane without overlap', () => {
+    const input = irWithNodes([
+      { id: 'skill:s', entity_id: 's', type: 'skill', label: 'Skill', team_id: 'team-a' },
+      { id: 'llm_wiki:w', entity_id: 'w', type: 'llm_wiki', label: 'Wiki', team_id: 'team-a' },
+      { id: 'code_graph:c', entity_id: 'c', type: 'code_graph', label: 'Code', team_id: 'team-a' },
+      { id: 'chat_memory:m', entity_id: 'm', type: 'chat_memory', label: 'Memory', team_id: 'team-a' },
+    ]);
+    const assets = layoutAtlas(projectAtlas(input)).nodes
+      .filter((node) => ['skill', 'llm_wiki', 'code_graph', 'chat_memory'].includes(node.type))
+      .sort((a, b) => a.y - b.y);
+    expect(new Set(assets.map((node) => node.y)).size).toBe(4);
+    expect(assets.every((node, index) => index === 0 || node.y - assets[index - 1]!.y >= node.height)).toBe(true);
+  });
+
   it('builds orthogonal edge paths and omits dangling edges', () => {
     const input = irWithNodes([{ id: 'team:a', entity_id: 'a', type: 'team', label: 'A', team_id: 'a' }]);
     input.edges.push({ id: 'dangling', type: 'contains', source: 'team:a', target: 'task:missing' });

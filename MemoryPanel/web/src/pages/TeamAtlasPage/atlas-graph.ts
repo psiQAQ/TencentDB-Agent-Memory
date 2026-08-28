@@ -140,16 +140,17 @@ export function layoutAtlas(projection: AtlasProjection): AtlasLayout {
   const nodeHeight = 76;
   const gap = 24;
   const positioned: PositionedAtlasNode[] = [];
-  const byType = new Map<TeamAtlasNodeType, TeamAtlasNode[]>();
+  const byLane = new Map<TeamAtlasNodeType | 'asset', TeamAtlasNode[]>();
   for (const node of stableNodes(projection.nodes)) {
-    const list = byType.get(node.type) ?? [];
+    const lane = ASSET_TYPES.has(node.type) ? 'asset' : node.type;
+    const list = byLane.get(lane) ?? [];
     list.push(node);
-    byType.set(node.type, list);
+    byLane.set(lane, list);
   }
-  for (const [type, nodes] of byType) {
+  for (const nodes of byLane.values()) {
     nodes.forEach((node, index) => {
       const aggregateCount = typeof node.metadata?.count === 'number' ? node.metadata.count : undefined;
-      positioned.push({ ...node, x: TYPE_X[type], y: 40 + index * (nodeHeight + gap), width: nodeWidth, height: nodeHeight, ...(aggregateCount === undefined ? {} : { aggregate_count: aggregateCount }) });
+      positioned.push({ ...node, x: TYPE_X[node.type], y: 40 + index * (nodeHeight + gap), width: nodeWidth, height: nodeHeight, ...(aggregateCount === undefined ? {} : { aggregate_count: aggregateCount }) });
     });
   }
   const maxY = positioned.reduce((max, node) => Math.max(max, node.y + node.height), 220);
