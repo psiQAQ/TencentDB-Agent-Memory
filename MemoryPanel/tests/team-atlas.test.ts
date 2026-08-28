@@ -9,7 +9,7 @@ function snapshot(overrides: Partial<TeamAtlasSnapshot> = {}): TeamAtlasSnapshot
   return {
     team: { team_id: 'team-1', name: 'Atlas', owner_user_id: 'user-1' },
     role: 'admin',
-    tasks: [{ task_id: 'task-1', team_id: 'team-1', title: 'Ship Atlas', status: 'active' }],
+    tasks: [{ task_id: 'task-1', team_id: 'team-1', title: 'Ship Atlas', status: 'active', creator_user_id: 'user-1', source_type: 'manual' }],
     agents: [{ agent_id: 'agt-1', team_id: 'team-1', owner_user_id: 'user-1', name: 'Codex', status: 'active' }],
     assets: [{ asset_id: 'skill-1', team_id: 'team-1', asset_type: 'skill', name: 'Planner', owner_user_id: 'user-1', status: 'active' }],
     taskAgents: [{ task_id: 'task-1', agent_id: 'agt-1', status: 'active' }],
@@ -36,6 +36,10 @@ describe('buildTeamAtlasIR', () => {
     expect(ir.edges.every((edge) => ids.has(edge.source) && ids.has(edge.target))).toBe(true);
     expect(ir.edges.some((edge) => edge.type === 'assigned_to')).toBe(true);
     expect(ir.edges.some((edge) => edge.type === 'owns')).toBe(true);
+    expect(ir.edges.some((edge) => edge.source.startsWith('task:') && edge.target.startsWith('skill:'))).toBe(false);
+    expect(ir.nodes.find((node) => node.id === 'team:team-1')?.metadata?.owner_user_id).toBe('user-1');
+    expect(ir.nodes.find((node) => node.id === 'task:task-1')?.metadata).toMatchObject({ creator_user_id: 'user-1', source_type: 'manual' });
+    expect(ir.nodes.find((node) => node.id === 'agent:agt-1')?.metadata?.owner_user_id).toBe('user-1');
     expect(ir.warnings).toEqual([]);
   });
 

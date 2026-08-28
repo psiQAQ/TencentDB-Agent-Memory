@@ -78,6 +78,8 @@ interface TaskRaw {
   team_id: string;
   title: string;
   status?: string;
+  creator_user_id?: string;
+  source_type?: string;
 }
 
 interface AgentRaw {
@@ -218,6 +220,7 @@ export function buildTeamAtlasIR(
       team_id: team.team_id,
       status: team.status,
       metadata: {
+        owner_user_id: team.owner_user_id,
         role: snapshot.role ?? null,
         tasks: tasks.length,
         agents: agents.length,
@@ -234,12 +237,31 @@ export function buildTeamAtlasIR(
 
     for (const task of tasks) {
       const id = nodeId('task', task.task_id);
-      nodes.push({ id, entity_id: task.task_id, type: 'task', label: task.title || task.task_id, team_id: team.team_id, status: task.status });
+      nodes.push({
+        id,
+        entity_id: task.task_id,
+        type: 'task',
+        label: task.title || task.task_id,
+        team_id: team.team_id,
+        status: task.status,
+        metadata: {
+          creator_user_id: task.creator_user_id ?? null,
+          source_type: task.source_type ?? null,
+        },
+      });
       edges.push({ id: edgeId('contains', teamNode, id), type: 'contains', source: teamNode, target: id, team_id: team.team_id });
     }
     for (const agent of agents) {
       const id = nodeId('agent', agent.agent_id);
-      nodes.push({ id, entity_id: agent.agent_id, type: 'agent', label: agent.name || agent.agent_id, team_id: team.team_id, status: agent.status });
+      nodes.push({
+        id,
+        entity_id: agent.agent_id,
+        type: 'agent',
+        label: agent.name || agent.agent_id,
+        team_id: team.team_id,
+        status: agent.status,
+        metadata: { owner_user_id: agent.owner_user_id },
+      });
       edges.push({ id: edgeId('contains', teamNode, id), type: 'contains', source: teamNode, target: id, team_id: team.team_id });
     }
     for (const asset of assets) {

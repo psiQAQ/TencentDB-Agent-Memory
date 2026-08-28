@@ -22,6 +22,12 @@ export interface AtlasLayout {
   height: number;
 }
 
+export interface AtlasEdgeGeometry {
+  path: string;
+  labelX: number;
+  labelY: number;
+}
+
 const ASSET_TYPES = new Set<TeamAtlasNodeType>(['skill', 'llm_wiki', 'code_graph', 'chat_memory']);
 const TYPE_ORDER: Record<TeamAtlasNodeType, number> = {
   identity: 0,
@@ -34,14 +40,14 @@ const TYPE_ORDER: Record<TeamAtlasNodeType, number> = {
   chat_memory: 7,
 };
 const TYPE_X: Record<TeamAtlasNodeType, number> = {
-  identity: 40,
-  team: 300,
-  task: 560,
-  agent: 820,
-  skill: 1080,
-  llm_wiki: 1080,
-  code_graph: 1080,
-  chat_memory: 1080,
+  identity: 30,
+  team: 350,
+  task: 680,
+  agent: 1010,
+  skill: 1340,
+  llm_wiki: 1340,
+  code_graph: 1340,
+  chat_memory: 1340,
 };
 
 function stableNodes(nodes: TeamAtlasNode[]): TeamAtlasNode[] {
@@ -129,9 +135,9 @@ export function projectAtlas(
 }
 
 export function layoutAtlas(projection: AtlasProjection): AtlasLayout {
-  const width = 1320;
-  const nodeWidth = 190;
-  const nodeHeight = 58;
+  const width = 1610;
+  const nodeWidth = 230;
+  const nodeHeight = 76;
   const gap = 24;
   const positioned: PositionedAtlasNode[] = [];
   const byType = new Map<TeamAtlasNodeType, TeamAtlasNode[]>();
@@ -150,14 +156,41 @@ export function layoutAtlas(projection: AtlasProjection): AtlasLayout {
   return { nodes: positioned.sort((a, b) => a.id.localeCompare(b.id)), edges: projection.edges, width, height: maxY + 60 };
 }
 
-export function edgePath(edge: TeamAtlasEdge, nodes: PositionedAtlasNode[]): string {
+function edgePortY(
+  node: PositionedAtlasNode,
+  edge: TeamAtlasEdge,
+  edges: TeamAtlasEdge[],
+  side: 'source' | 'target',
+): number {
+  const incident = edges
+    .filter((item) => item[side] === node.id)
+    .sort((a, b) => a.id.localeCompare(b.id));
+  if (incident.length <= 1) return node.y + node.height / 2;
+  const index = incident.findIndex((item) => item.id === edge.id);
+  const span = Math.min(34, node.height - 34);
+  return node.y + node.height / 2 + ((index / (incident.length - 1)) - 0.5) * span;
+}
+
+export function edgeGeometry(
+  edge: TeamAtlasEdge,
+  nodes: PositionedAtlasNode[],
+  edges: TeamAtlasEdge[],
+): AtlasEdgeGeometry {
   const source = nodes.find((node) => node.id === edge.source);
   const target = nodes.find((node) => node.id === edge.target);
-  if (!source || !target) return '';
+  if (!source || !target) return { path: '', labelX: 0, labelY: 0 };
   const sx = source.x + source.width;
-  const sy = source.y + source.height / 2;
+  const sy = edgePortY(source, edge, edges, 'source');
   const tx = target.x;
-  const ty = target.y + target.height / 2;
+  const ty = edgePortY(target, edge, edges, 'target');
   const mid = sx + Math.max(24, (tx - sx) / 2);
-  return `M ${sx} ${sy} H ${mid} V ${ty} H ${tx}`;
+  return {
+    path: `M ${sx} ${sy} H ${mid} V ${ty} H ${tx}`,
+    labelX: mid + (tx - mid) / 2,
+    labelY: ty - 7,
+  };
+}
+
+export function edgePath(edge: TeamAtlasEdge, nodes: PositionedAtlasNode[], edges: TeamAtlasEdge[] = [edge]): string {
+  return edgeGeometry(edge, nodes, edges).path;
 }

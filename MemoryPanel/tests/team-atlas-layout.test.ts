@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { edgePath, layoutAtlas, projectAtlas } from '../web/src/pages/TeamAtlasPage/atlas-graph.js';
+import { edgeGeometry, edgePath, layoutAtlas, projectAtlas, type PositionedAtlasNode } from '../web/src/pages/TeamAtlasPage/atlas-graph.js';
+import type { TeamAtlasEdge } from '../web/src/lib/api/team-atlas.js';
 import type { TeamAtlasIR, TeamAtlasNode } from '../web/src/lib/api/team-atlas.js';
 
 function irWithNodes(nodes: TeamAtlasNode[]): TeamAtlasIR {
@@ -44,5 +45,17 @@ describe('Team Atlas projection and layout', () => {
     const layout = layoutAtlas(projection);
     expect(projection.edges.some((edge) => edge.id === 'dangling')).toBe(false);
     expect(edgePath(layout.edges[0]!, layout.nodes)).toMatch(/^M .* H .* V .* H /);
+  });
+
+  it('uses distinct ports for multiple relationships on the same pair of cards', () => {
+    const nodes: PositionedAtlasNode[] = [
+      { id: 'agent:a', entity_id: 'a', type: 'agent', label: 'Agent', x: 0, y: 0, width: 230, height: 76 },
+      { id: 'skill:s', entity_id: 's', type: 'skill', label: 'Skill', x: 330, y: 0, width: 230, height: 76 },
+    ];
+    const edges: TeamAtlasEdge[] = [
+      { id: 'owns', type: 'owns', source: 'agent:a', target: 'skill:s' },
+      { id: 'binding', type: 'fixed_binding', source: 'agent:a', target: 'skill:s' },
+    ];
+    expect(edgeGeometry(edges[0]!, nodes, edges).path).not.toBe(edgeGeometry(edges[1]!, nodes, edges).path);
   });
 });

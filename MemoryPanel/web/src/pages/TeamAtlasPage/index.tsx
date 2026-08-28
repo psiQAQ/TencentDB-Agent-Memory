@@ -1,12 +1,20 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
-import { teamAtlasApi, type ChatMemoryStatus, type TeamAtlasIR, type TeamAtlasNode, type TeamAtlasNodeType } from '../../lib/api/team-atlas';
+import { teamAtlasApi, type ChatMemoryStatus, type TeamAtlasIR, type TeamAtlasNode, type TeamAtlasNodeType, type TeamAtlasRelation } from '../../lib/api/team-atlas';
 import { useBackendStore } from '../../stores/backend';
-import { edgePath, layoutAtlas, projectAtlas } from './atlas-graph';
+import { edgeGeometry, layoutAtlas, projectAtlas } from './atlas-graph';
 import './team-atlas.css';
 
 const ASSET_OPTIONS: Array<TeamAtlasNodeType | 'all'> = ['all', 'skill', 'llm_wiki', 'code_graph', 'chat_memory'];
+const RELATIONS: TeamAtlasRelation[] = ['member_of', 'contains', 'assigned_to', 'owns', 'fixed_binding'];
+const RELATION_LABEL_WIDTH: Record<TeamAtlasRelation, number> = {
+  member_of: 68,
+  contains: 58,
+  assigned_to: 74,
+  owns: 46,
+  fixed_binding: 86,
+};
 const STATUS_CACHE_MS = 30_000;
 
 function nodeClass(type: TeamAtlasNodeType): string {
@@ -18,6 +26,11 @@ function statusText(status: ChatMemoryStatus | undefined): string {
   if (status.availability === 'not_applicable') return 'N/A';
   const counts = status.layer_counts;
   return `L0 ${counts.L0_messages ?? '?'} · L1 ${counts.L1 ?? '?'} · L2 ${counts.L2 ?? '?'} · L3 ${counts.L3 ?? '?'}`;
+}
+
+function shortId(value: unknown): string {
+  if (typeof value !== 'string' || !value) return '—';
+  return value.length > 18 ? `${value.slice(0, 8)}…${value.slice(-6)}` : value;
 }
 
 export function TeamAtlasPage() {
@@ -33,8 +46,8 @@ export function TeamAtlasPage() {
   const [focusAgentId, setFocusAgentId] = useState<string | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [hoveredId, setHoveredId] = useState<string | null>(null);
-  const [zoom, setZoom] = useState(0.86);
-  const [pan, setPan] = useState({ x: 20, y: 10 });
+  const [zoom, setZoom] = useState(0.78);
+  const [pan, setPan] = useState({ x: 10, y: 10 });
   const dragRef = useRef<{ x: number; y: number; panX: number; panY: number } | null>(null);
   const hoverTimer = useRef<number | null>(null);
   const statusCache = useRef(new Map<string, { expires: number; value?: ChatMemoryStatus; error?: string }>());
@@ -59,6 +72,13 @@ export function TeamAtlasPage() {
   const layout = useMemo(() => projection ? layoutAtlas(projection) : null, [projection]);
   const activeId = selectedId ?? hoveredId;
   const activeNode = layout?.nodes.find((node) => node.id === activeId) ?? null;
+  const activeRelations = activeNode && layout ? layout.edges
+    .filter((edge) => edge.source === activeNode.id || edge.target === activeNode.id)
+    .map((edge) => ({
+      edge,
+      outgoing: edge.source === activeNode.id,
+      peer: layout.nodes.find((node) => node.id === (edge.source === activeNode.id ? edge.target : edge.source)),
+    })) : [];
   const memoryEntry = activeNode?.type === 'chat_memory' ? statusCache.current.get(activeNode.entity_id) : undefined;
   void memoryVersion;
 
@@ -107,6 +127,18 @@ export function TeamAtlasPage() {
     navigate(path);
   }, [navigate, setActiveTeamId]);
 
+  const nodeCaption = useCallback((node: TeamAtlasNode) => {
+    if (!layout) return '';
+    const incoming = layout.edges.filter((edge) => edge.target === node.id);
+    const outgoing = layout.edges.filter((edge) => edge.source === node.id);
+    const owner = node.metadata?.owner_user_id;
+    if (node.type === 'identity') return t('atlas.currentIdentity');
+    if (node.type === 'team') return `${t('atlas.owner')} ${shortId(owner)} · ${t('atlas.role')} ${String(node.metadata?.role ?? '—')}`;
+    if (node.type === 'task') return `${t('atlas.creator')} ${shortId(node.metadata?.creator_user_id)} · Agent ${outgoing.filter((edge) => edge.type === 'assigned_to').length}`;
+    if (node.type === 'agent') return `${t('atlas.owner')} ${shortId(owner)} · Task ${incoming.filter((edge) => edge.type === 'assigned_to').length} · Asset ${outgoing.filter((edge) => edge.type === 'owns' || edge.type === 'fixed_binding').length}`;
+    return `${t('atlas.owner')} ${shortId(owner)} · ${t('atlas.visibility')} ${String(node.metadata?.visibility ?? '—')}`;
+  }, [layout, t]);
+
   if (loading) return <section className="team-atlas-state"><span className="team-atlas-spinner" />{t('atlas.loading')}</section>;
   if (error) return <section className="team-atlas-state team-atlas-state--error"><p>{t('atlas.loadFailed')}</p><code>{error}</code><button type="button" onClick={() => void load()}>{t('atlas.retry')}</button></section>;
   if (!ir || !layout || !projection) return null;
@@ -134,11 +166,16 @@ export function TeamAtlasPage() {
           {focusTeamId && <><span>/</span><button type="button" onClick={() => { setFocusAgentId(null); setSelectedId(null); }}>{ir.nodes.find((node) => node.id === `team:${focusTeamId}`)?.label ?? focusTeamId}</button></>}
           {focusAgentId && <><span>/</span><span>{ir.nodes.find((node) => node.id === `agent:${focusAgentId}`)?.label ?? focusAgentId}</span></>}
         </div>
-        <div className="team-atlas-zoom"><button type="button" aria-label={t('atlas.zoomOut')} onClick={() => setZoom((value) => Math.max(0.45, value - 0.1))}>−</button><span>{Math.round(zoom * 100)}%</span><button type="button" aria-label={t('atlas.zoomIn')} onClick={() => setZoom((value) => Math.min(1.6, value + 0.1))}>+</button><button type="button" onClick={() => { setZoom(0.86); setPan({ x: 20, y: 10 }); }}>{t('atlas.fit')}</button></div>
+        <div className="team-atlas-zoom"><button type="button" aria-label={t('atlas.zoomOut')} onClick={() => setZoom((value) => Math.max(0.45, value - 0.1))}>−</button><span>{Math.round(zoom * 100)}%</span><button type="button" aria-label={t('atlas.zoomIn')} onClick={() => setZoom((value) => Math.min(1.6, value + 0.1))}>+</button><button type="button" onClick={() => { setZoom(0.78); setPan({ x: 10, y: 10 }); }}>{t('atlas.fit')}</button></div>
       </div>
 
       {ir.completeness === 'partial' && <div className="team-atlas-notice" role="status">{t('atlas.partial', { count: partialSources })}</div>}
       {projection.truncated && <div className="team-atlas-notice" role="status">{t('atlas.aggregated')}</div>}
+
+      <div className="team-atlas-relation-guide" aria-label={t('atlas.relationGuide')}>
+        <div className="team-atlas-relation-explanation"><strong>{t('atlas.relationGuide')}</strong><span>{t('atlas.relationExplanation')}</span></div>
+        <div className="team-atlas-relation-legend">{RELATIONS.map((relation) => <span key={relation}><i className={`team-atlas-relation-swatch team-atlas-relation-swatch--${relation}`} />{t(`atlas.relation.${relation}`)}</span>)}</div>
+      </div>
 
       <div className="team-atlas-workspace">
         <div className="team-atlas-canvas" onWheel={(event) => { event.preventDefault(); setZoom((value) => Math.min(1.6, Math.max(0.45, value + (event.deltaY < 0 ? 0.08 : -0.08)))); }}>
@@ -150,16 +187,29 @@ export function TeamAtlasPage() {
             onPointerMove={(event) => { const drag = dragRef.current; if (drag) setPan({ x: drag.panX + (event.clientX - drag.x) / zoom, y: drag.panY + (event.clientY - drag.y) / zoom }); }}
             onPointerUp={() => { dragRef.current = null; }}
           >
+            <defs>{RELATIONS.map((relation) => <marker key={relation} id={`atlas-arrow-${relation}`} viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path className={`team-atlas-arrow team-atlas-arrow--${relation}`} d="M 0 0 L 10 5 L 0 10 z" /></marker>)}</defs>
             <g transform={`translate(${pan.x} ${pan.y}) scale(${zoom})`}>
-              <g className="team-atlas-edges">{layout.edges.map((edge) => <path key={edge.id} d={edgePath(edge, layout.nodes)} className={activeId && (edge.source === activeId || edge.target === activeId) ? 'is-active' : ''}><title>{edge.type}</title></path>)}</g>
+              <g className="team-atlas-edges">{layout.edges.map((edge) => {
+                const geometry = edgeGeometry(edge, layout.nodes, layout.edges);
+                const active = Boolean(activeId && (edge.source === activeId || edge.target === activeId));
+                const labelWidth = RELATION_LABEL_WIDTH[edge.type];
+                return <g key={edge.id} className={`team-atlas-edge team-atlas-edge--${edge.type}${active ? ' is-active' : ''}`}>
+                  <path d={geometry.path} markerEnd={`url(#atlas-arrow-${edge.type})`}><title>{t(`atlas.relation.${edge.type}`)}</title></path>
+                  <g className="team-atlas-edge-label" transform={`translate(${geometry.labelX} ${geometry.labelY})`}>
+                    <rect x={-labelWidth / 2} y="-10" width={labelWidth} height="16" rx="5" />
+                    <text y="2">{t(`atlas.relation.${edge.type}`)}</text>
+                  </g>
+                </g>;
+              })}</g>
               <g>{layout.nodes.map((node) => {
                 const active = activeId === node.id;
                 const adjacent = activeId ? layout.edges.some((edge) => (edge.source === activeId && edge.target === node.id) || (edge.target === activeId && edge.source === node.id)) : false;
                 const warning = warningByNode.get(node.id);
                 return <g key={node.id} role="button" tabIndex={0} aria-label={`${node.type}: ${node.label}`} className={`${nodeClass(node.type)}${active ? ' is-active' : ''}${adjacent ? ' is-adjacent' : ''}`} transform={`translate(${node.x} ${node.y})`} onMouseEnter={() => onNodeEnter(node)} onMouseLeave={() => setHoveredId(null)} onClick={() => onNodeClick(node)} onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') onNodeClick(node); }}>
                   <rect width={node.width} height={node.height} rx="12" />
-                  <text className="team-atlas-node-type" x="14" y="19">{t(`atlas.type.${node.type}`)}</text>
-                  <text className="team-atlas-node-label" x="14" y="41">{node.label.length > 23 ? `${node.label.slice(0, 22)}…` : node.label}</text>
+                  <text className="team-atlas-node-type" x="14" y="18">{t(`atlas.type.${node.type}`)}{node.status ? ` · ${node.status}` : ''}</text>
+                  <text className="team-atlas-node-label" x="14" y="41">{node.label.length > 27 ? `${node.label.slice(0, 26)}…` : node.label}</text>
+                  <text className="team-atlas-node-caption" x="14" y="62">{nodeCaption(node).length > 40 ? `${nodeCaption(node).slice(0, 39)}…` : nodeCaption(node)}</text>
                   {warning && <g className="team-atlas-warning" transform={`translate(${node.width - 18} 14)`}><circle r="8" /><text y="4">!</text><title>{warning.message}</title></g>}
                   <title>{`${node.label} · ${node.entity_id}`}</title>
                 </g>;
@@ -172,9 +222,10 @@ export function TeamAtlasPage() {
           <span className="team-atlas-eyebrow">PASSPORT</span>
           {activeNode ? <>
             <h2>{activeNode.label}</h2><span className="team-atlas-pill">{t(`atlas.type.${activeNode.type}`)}</span>
-            <dl><dt>ID</dt><dd>{activeNode.entity_id}</dd>{activeNode.team_id && <><dt>Team</dt><dd>{activeNode.team_id}</dd></>}{activeNode.status && <><dt>{t('atlas.status')}</dt><dd>{activeNode.status}</dd></>}</dl>
+            <dl><dt>ID</dt><dd>{activeNode.entity_id}</dd>{activeNode.team_id && <><dt>Team</dt><dd>{activeNode.team_id}</dd></>}{activeNode.status && <><dt>{t('atlas.status')}</dt><dd>{activeNode.status}</dd></>}{activeNode.metadata?.owner_user_id && <><dt>{t('atlas.owner')}</dt><dd>{String(activeNode.metadata.owner_user_id)}</dd></>}{activeNode.metadata?.creator_user_id && <><dt>{t('atlas.creator')}</dt><dd>{String(activeNode.metadata.creator_user_id)}</dd></>}{activeNode.metadata?.visibility && <><dt>{t('atlas.visibility')}</dt><dd>{String(activeNode.metadata.visibility)}</dd></>}</dl>
             {activeNode.type === 'team' && <div className="team-atlas-passport-counts"><span>Task {String(activeNode.metadata?.tasks ?? 0)}</span><span>Agent {String(activeNode.metadata?.agents ?? 0)}</span><span>Asset {String(activeNode.metadata?.assets ?? 0)}</span></div>}
             {activeNode.type === 'chat_memory' && <div className="team-atlas-memory-status"><strong>{t('atlas.memoryLayers')}</strong><span>{memoryEntry?.error ? t('atlas.statusUnavailable') : statusText(memoryEntry?.value)}</span></div>}
+            {activeRelations.length > 0 && <div className="team-atlas-passport-relations"><strong>{t('atlas.connections')}</strong>{activeRelations.map(({ edge, outgoing, peer }) => <span key={edge.id}><i className={`team-atlas-relation-swatch team-atlas-relation-swatch--${edge.type}`} />{outgoing ? '→' : '←'} {t(`atlas.relation.${edge.type}`)} · {peer?.label ?? (outgoing ? edge.target : edge.source)}</span>)}</div>}
             {warningByNode.get(activeNode.id) && <p className="team-atlas-passport-warning">{warningByNode.get(activeNode.id)?.message}</p>}
             <button type="button" className="team-atlas-primary" onClick={() => openManagement(activeNode)}>{t('atlas.openManagement')}</button>
           </> : <p className="team-atlas-empty">{t('atlas.selectHint')}</p>}
