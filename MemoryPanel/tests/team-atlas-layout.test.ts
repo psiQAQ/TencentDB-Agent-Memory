@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { atlasInteractionEdges, directRelationIds, directVisualNodeIds, edgeGeometry, edgePath, layoutAtlas, projectAtlas, summarizeAtlas, type PositionedAtlasNode } from '../web/src/pages/TeamAtlasPage/atlas-graph.js';
+import { atlasCanvasSize, atlasInteractionEdges, directRelationIds, directVisualNodeIds, edgeGeometry, edgePath, layoutAtlas, projectAtlas, summarizeAtlas, type PositionedAtlasNode } from '../web/src/pages/TeamAtlasPage/atlas-graph.js';
 import type { TeamAtlasEdge } from '../web/src/lib/api/team-atlas.js';
 import type { TeamAtlasIR, TeamAtlasNode } from '../web/src/lib/api/team-atlas.js';
 
@@ -232,6 +232,14 @@ describe('Team Atlas projection and layout', () => {
     ];
     expect([...directVisualNodeIds(nodes, edges, nodes[0]!)].sort()).toEqual(['agent:a', 'task:t@agent:a']);
     expect([...directVisualNodeIds(nodes, edges, nodes[3]!)].sort()).toEqual(['agent:b', 'task:t@agent:b']);
+  });
+
+  it('expands the SVG canvas when a dragged Team moves nodes below the initial layout', () => {
+    const nodes: PositionedAtlasNode[] = [
+      { id: 'team:a', entity_id: 'a', type: 'team', label: 'A', x: 30, y: 900, width: 220, height: 72 },
+      { id: 'identity:u', entity_id: 'u', type: 'identity', label: 'U', x: 310, y: 960, width: 220, height: 72 },
+    ];
+    expect(atlasCanvasSize({ width: 1210, height: 774 }, nodes)).toEqual({ width: 1210, height: 1062 });
   });
 
   it('uses an evenly offset vertical trunk for every edge between the same columns', () => {

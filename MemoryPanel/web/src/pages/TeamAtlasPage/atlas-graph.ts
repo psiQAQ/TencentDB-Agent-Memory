@@ -30,6 +30,15 @@ export interface AtlasEdgeGeometry {
   labelY: number;
 }
 
+export interface AtlasContentBounds {
+  minX: number;
+  minY: number;
+  maxX: number;
+  maxY: number;
+  width: number;
+  height: number;
+}
+
 export type AtlasSummaryNodeType = 'team' | 'task' | 'agent' | 'skill' | 'llm_wiki' | 'code_graph' | 'chat_memory';
 
 export interface AtlasSummaryCard {
@@ -84,6 +93,23 @@ function filterEdges(edges: TeamAtlasEdge[], nodes: TeamAtlasNode[]): TeamAtlasE
 
 export function atlasInteractionEdges(edges: TeamAtlasEdge[]): TeamAtlasEdge[] {
   return edges.filter((edge) => edge.type !== 'owns');
+}
+
+export function atlasContentBounds(nodes: PositionedAtlasNode[]): AtlasContentBounds {
+  if (nodes.length === 0) return { minX: 0, minY: 0, maxX: 0, maxY: 0, width: 0, height: 0 };
+  const minX = Math.min(...nodes.map((node) => node.x));
+  const minY = Math.min(...nodes.map((node) => node.y));
+  const maxX = Math.max(...nodes.map((node) => node.x + node.width));
+  const maxY = Math.max(...nodes.map((node) => node.y + node.height));
+  return { minX, minY, maxX, maxY, width: maxX - minX, height: maxY - minY };
+}
+
+export function atlasCanvasSize(layout: Pick<AtlasLayout, 'width' | 'height'>, nodes: PositionedAtlasNode[], padding = 30): { width: number; height: number } {
+  const bounds = atlasContentBounds(nodes);
+  return {
+    width: Math.max(1160, layout.width, Math.ceil(bounds.maxX + padding)),
+    height: Math.max(620, layout.height, Math.ceil(bounds.maxY + padding)),
+  };
 }
 
 export function directRelationIds(edges: TeamAtlasEdge[], nodeId: string | undefined): Set<string> {

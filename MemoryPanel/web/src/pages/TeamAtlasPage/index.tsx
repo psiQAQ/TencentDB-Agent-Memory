@@ -3,7 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { teamAtlasApi, type ChatMemoryStatus, type TeamAtlasIR, type TeamAtlasNode, type TeamAtlasNodeType, type TeamAtlasRelation } from '../../lib/api/team-atlas';
 import { useBackendStore } from '../../stores/backend';
-import { atlasInteractionEdges, directVisualNodeIds, edgeGeometry, layoutAtlas, projectAtlas, summarizeAtlas } from './atlas-graph';
+import { atlasCanvasSize, atlasContentBounds, atlasInteractionEdges, directVisualNodeIds, edgeGeometry, layoutAtlas, projectAtlas, summarizeAtlas } from './atlas-graph';
 import './team-atlas.css';
 
 const ASSET_OPTIONS: Array<TeamAtlasNodeType | 'all'> = ['all', 'skill', 'llm_wiki', 'code_graph', 'chat_memory'];
@@ -88,6 +88,9 @@ export function TeamAtlasPage() {
     const offset = node.team_id ? teamOffsets[node.team_id] : undefined;
     return offset ? { ...node, x: node.x + offset.x, y: node.y + offset.y } : node;
   }) : [], [layout, teamOffsets]);
+  const displayedNodesRef = useRef(displayedNodes);
+  displayedNodesRef.current = displayedNodes;
+  const canvasSize = useMemo(() => layout ? atlasCanvasSize(layout, displayedNodes) : { width: 1160, height: 620 }, [displayedNodes, layout]);
   const summaryCards = useMemo(() => ir ? summarizeAtlas(ir, selectedTeamIds) : [], [ir, selectedTeamIds]);
 
   const fitCanvas = useCallback(() => {
@@ -96,12 +99,21 @@ export function TeamAtlasPage() {
     if (!canvas || !svg || !layout) return;
     const canvasRect = canvas.getBoundingClientRect();
     const svgRect = svg.getBoundingClientRect();
+    const viewBox = svg.viewBox.baseVal;
+    const contentBounds = atlasContentBounds(displayedNodesRef.current);
+    if (contentBounds.width === 0 || contentBounds.height === 0) return;
+    const viewScale = Math.max(0.001, Math.min(svgRect.width / Math.max(1, viewBox.width), svgRect.height / Math.max(1, viewBox.height)));
+    const viewOffsetX = (svgRect.width - viewBox.width * viewScale) / 2;
+    const viewOffsetY = (svgRect.height - viewBox.height * viewScale) / 2;
     const availableHeight = Math.max(260, window.innerHeight - canvasRect.top - 20);
-    const widthRatio = (canvas.clientWidth - 28) / Math.max(1, svgRect.width);
-    const heightRatio = (availableHeight - 28) / Math.max(1, svgRect.height);
+    const widthRatio = (canvas.clientWidth - 28) / Math.max(1, contentBounds.width * viewScale);
+    const heightRatio = (availableHeight - 28) / Math.max(1, contentBounds.height * viewScale);
     const nextZoom = Math.min(1, Math.max(0.2, Math.min(widthRatio, heightRatio)));
     setZoom(nextZoom);
-    setPan({ x: 10, y: 10 });
+    setPan({
+      x: (14 - viewOffsetX) / viewScale - contentBounds.minX * nextZoom,
+      y: (14 - viewOffsetY) / viewScale - contentBounds.minY * nextZoom,
+    });
     canvas.scrollTo({ left: 0, top: 0 });
   }, [layout]);
 
@@ -246,8 +258,8 @@ export function TeamAtlasPage() {
             ref={svgRef}
             role="img"
             aria-label={t('atlas.graphLabel')}
-            viewBox={`0 0 ${layout.width} ${Math.max(620, layout.height)}`}
-            style={{ height: Math.max(620, layout.height) }}
+            viewBox={`0 0 ${canvasSize.width} ${canvasSize.height}`}
+            style={{ width: canvasSize.width, height: canvasSize.height }}
             onPointerDown={(event) => { if (!(event.target as Element).closest('.team-atlas-node')) { event.currentTarget.setPointerCapture(event.pointerId); dragRef.current = { x: event.clientX, y: event.clientY, panX: pan.x, panY: pan.y }; } }}
             onPointerMove={(event) => {
               const teamDrag = teamDragRef.current;
