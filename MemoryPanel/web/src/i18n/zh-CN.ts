@@ -51,7 +51,8 @@ export const zhCN = {
   'atlas.currentIdentity': '当前登录身份',
   'atlas.connections': '直接关系',
   'atlas.relationGuide': '关系语义',
-  'atlas.relationExplanation': 'Team 下展示成员，Agent 归属成员；Task 紧贴堆叠在被分配 Agent 下方；资产由 Agent 拥有或固定绑定。',
+  'atlas.relationExplanation':
+    'Team 下展示成员，Agent 归属成员；Task 紧贴堆叠在被分配 Agent 下方；资产由 Agent 拥有或固定绑定。',
   'atlas.relation.member_of': '成员属于',
   'atlas.relation.contains': '包含',
   'atlas.relation.assigned_to': '分配给',
@@ -709,7 +710,8 @@ export const zhCN = {
   'memory.detail.updated': '更新：{{time}}',
   'memory.detail.noL0': '该记忆块未保留 L0 对话原文。',
   'memory.detail.noL0InRange': '当前时间范围内没有 L0 对话原文，可调整右上角的时间筛选范围试试。',
-  'memory.detail.emptyLayerInRange': '当前时间范围内在 {{layer}} 层暂无条目，可调整右上角的时间筛选范围试试。',
+  'memory.detail.emptyLayerInRange':
+    '当前时间范围内在 {{layer}} 层暂无条目，可调整右上角的时间筛选范围试试。',
   'memory.detail.rangeTooLarge': '记忆条数过多，建议缩短筛选的时间范围',
   'memory.detail.loadMore': '加载更早的对话',
   'memory.detail.allLoaded': '已加载全部对话',
@@ -732,7 +734,8 @@ export const zhCN = {
   'memory.detail.clickToLoad': '点击加载该层内容',
   'memory.detail.modeBrowse': '浏览',
   'memory.detail.modeSearch': '搜索',
-  'memory.detail.searchPrompt': '输入关键词按语义搜索本记忆，搜索结果按相关度排序（不受时间范围限制）。',
+  'memory.detail.searchPrompt':
+    '输入关键词按语义搜索本记忆，搜索结果按相关度排序（不受时间范围限制）。',
   'memory.detail.emptyLayer': '该记忆块在 {{layer}} 层暂无条目。可由 curator / 高层提炼后写入。',
   'memory.detail.loading': '加载中…',
   'memory.detail.collapseBody': '收起原文',
@@ -844,7 +847,8 @@ export const zhCN = {
   'team.editTeam': '编辑 Team',
   'team.editTeam.tooltip': '修改当前 team 的名称 / 描述（仅 owner / 管理员）',
   'team.deleteTeam': '删除当前 Team',
-  'team.deleteTeam.tooltip': '删除当前 team 及其全部成员 / Agent / 任务 / 资产（仅 owner / 管理员）',
+  'team.deleteTeam.tooltip':
+    '删除当前 team 及其全部成员 / Agent / 任务 / 资产（仅 owner / 管理员）',
   'team.deleteTeam.confirm': '确认删除 team「{{name}}」？',
   'team.deleteTeam.desc':
     '删除后将级联移除 {{members}} 名成员、{{agents}} 个 Agent，以及该 team 下的全部任务与资产，且不可恢复。',
@@ -1040,10 +1044,12 @@ export const zhCN = {
   'addMember.error.invalidName': '用户名仅支持英文字母、数字、下划线，不能包含其他符号或空格。',
   'addMember.error.emptyKey': '已开启自定义 User_Key，请填写要下发给用户的 key。',
   'addMember.customKey.label': '自定义 User_Key',
-  'addMember.customKey.hint': '默认关闭时由后端自动生成一次性 key；开启后由你手动指定用户初始 key。',
+  'addMember.customKey.hint':
+    '默认关闭时由后端自动生成一次性 key；开启后由你手动指定用户初始 key。',
   'addMember.customKey.value': 'User_Key',
   'addMember.customKey.placeholder': '例如 sk-mem-xxxxxxxxxxxxxxxx',
-  'addMember.customKey.valueHint': '将作为该用户的默认 User_Key；不可与已有用户的 key 重复，否则创建会被拒绝。',
+  'addMember.customKey.valueHint':
+    '将作为该用户的默认 User_Key；不可与已有用户的 key 重复，否则创建会被拒绝。',
 
   // ===== CreatedUserKeyModal =====
   'createdUserKey.caption': '用户创建成功',
@@ -1268,7 +1274,8 @@ export const zhCN = {
   'error.ALREADY_ALLOCATED': '这条资产已经分配给该 Agent，无需重复分配。',
   'error.IMPORT_LIMIT_EXCEEDED': '该 Agent 最多只能借入 2 条其它 Agent 的记忆。',
   'error.ASSET_PRIVATE_INACCESSIBLE': '该资产已被 owner 设为私密，你无权访问。',
-  'error.ASSET_NOT_BINDABLE': '该资产的可见范围不允许绑定到此 Agent。请让 owner 将它设为团队可见后重试。',
+  'error.ASSET_NOT_BINDABLE':
+    '该资产的可见范围不允许绑定到此 Agent。请让 owner 将它设为团队可见后重试。',
   'error.INVALID_TITLE': '标题不能为空且不能超过长度限制。',
   'error.MISSING_MESSAGES': '缺少对话消息。',
   'error.TOO_MANY_MESSAGES': '一次最多导入 100 条消息。',
@@ -1394,8 +1401,10 @@ export const zhCN = {
   'guide.quick.ide.sub': '配置 Proxy 与模型',
   'guide.quick.history.title': '获取历史数据',
   'guide.quick.history.sub': '让多 Agent 共享记忆和 Skill',
-  'guide.quick.history.desc': '在仓库根目录运行脚本，从本机 IDE 导入历史 Session 和 Skill，让多个 Agent 共享已有记忆与能力。',
-  'guide.quick.history.sources': '{{sources}} 等 source 均可导入；将目标 Team 和 Agent ID 替换后运行。',
+  'guide.quick.history.desc':
+    '在仓库根目录运行脚本，从本机 IDE 导入历史 Session 和 Skill，让多个 Agent 共享已有记忆与能力。',
+  'guide.quick.history.sources':
+    '{{sources}} 等 source 均可导入；将目标 Team 和 Agent ID 替换后运行。',
   'guide.quick.history.dupHint': ' 若已在脚本配置最后选择导入，则无需重复执行。',
 
   // 准备信息
@@ -1423,11 +1432,13 @@ export const zhCN = {
   'guide.method.skill.sub': '推荐 · 由 Agent 引导配置',
   'guide.method.skill.step1': '在仓库根目录准备 Skill',
   'guide.method.skill.step2': '将下面的提示词发送给 Agent',
-  'guide.method.skill.hint': 'Agent 会探测环境和 Proxy，再调用配套脚本写入配置，并询问是否导入本地 Skill 与历史对话。',
+  'guide.method.skill.hint':
+    'Agent 会探测环境和 Proxy，再调用配套脚本写入配置，并询问是否导入本地 Skill 与历史对话。',
   'guide.method.script.title': '方式二：脚本配置',
   'guide.method.script.sub': '在终端运行交互向导',
   'guide.method.script.step1': '在仓库根目录运行',
-  'guide.method.script.hint': '脚本会扫描现有配置、检查 Proxy 并写入所选 IDE；最后可选择导入本地 Skill 与历史对话。',
+  'guide.method.script.hint':
+    '脚本会扫描现有配置、检查 Proxy 并写入所选 IDE；最后可选择导入本地 Skill 与历史对话。',
 
   // 手动配置
   'guide.manual.expand': '无法启动命令？手动配置',
@@ -1523,7 +1534,8 @@ export const zhCN = {
   // 手动配置注意事项
   'guide.manual.note.claude': '直接启动 claude 即可从 settings.json 读取环境变量',
   'guide.manual.note.codebuddy': '在 CodeBuddy 对话框中选择模型 proxy-memory-agent',
-  'guide.manual.note.codex': '首次对话前先切到 Plan 模式（Shift+Tab）选 Team→Agent→Task，再切回 Agent 模式',
+  'guide.manual.note.codex':
+    '首次对话前先切到 Plan 模式（Shift+Tab）选 Team→Agent→Task，再切回 Agent 模式',
   'guide.manual.note.workbuddy': '在 WorkBuddy 自定义模型列表中选择该模型',
   'guide.manual.note.dsh.0': '需同时配置两个文件',
   'guide.manual.note.dsh.1': '权限要求：chmod 700 ~/.dsh，chmod 600 ~/.dsh/.credentials.yaml',

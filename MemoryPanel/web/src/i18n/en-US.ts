@@ -20,7 +20,8 @@ export const enUS = {
   'menu.desc.workbench_board': 'Task list / create / detail',
   'menu.desc.team_atlas': 'Team / Task / Agent / Asset topology',
   'atlas.title': 'Team Atlas',
-  'atlas.subtitle': 'A read-only control-plane map from identity to teams, tasks, agents, and reusable assets.',
+  'atlas.subtitle':
+    'A read-only control-plane map from identity to teams, tasks, agents, and reusable assets.',
   'atlas.summary': 'Topology summary',
   'atlas.teams': 'Teams',
   'atlas.tasks': 'Tasks',
@@ -51,7 +52,8 @@ export const enUS = {
   'atlas.currentIdentity': 'Current signed-in identity',
   'atlas.connections': 'Direct relationships',
   'atlas.relationGuide': 'Relationship semantics',
-  'atlas.relationExplanation': 'Teams contain members and Agents belong to members. Tasks stack beneath their assigned Agents; Assets are owned or fixed-bound by Agents.',
+  'atlas.relationExplanation':
+    'Teams contain members and Agents belong to members. Tasks stack beneath their assigned Agents; Assets are owned or fixed-bound by Agents.',
   'atlas.relation.member_of': 'member of',
   'atlas.relation.contains': 'contains',
   'atlas.relation.assigned_to': 'assigned to',
@@ -562,7 +564,8 @@ export const enUS = {
   'skills.detail.save': 'Save',
   'skills.detail.cancel': 'Cancel',
   'skills.detail.saving': 'Saving…',
-  'skills.detail.editBodyHint': 'Edit the full SKILL.md (including frontmatter). Saving bumps the version by 1.',
+  'skills.detail.editBodyHint':
+    'Edit the full SKILL.md (including frontmatter). Saving bumps the version by 1.',
   'skills.detail.saveSuccess': 'Skill updated',
   'skills.detail.emptyContent': 'Content cannot be empty',
   // —— File management (writeSkillFiles / removeSkillFiles) ——
@@ -963,7 +966,7 @@ export const enUS = {
   'agentEdit.assets.editHint':
     'Check or uncheck to bind/unbind assets directly, then click "Save" to apply',
   'agentEdit.assets.skillReadonly':
-  'Skill bindings are independent copies. Adjust them when creating an Agent or on the Skill management page',
+    'Skill bindings are independent copies. Adjust them when creating an Agent or on the Skill management page',
   'agentEdit.cancel': 'Cancel',
   'agentEdit.save': 'Save Changes',
   'agentEdit.notify.nameRequired': 'Agent name cannot be empty.',
@@ -1006,7 +1009,8 @@ export const enUS = {
   'defaultAgent.title': 'Default Agent Template',
   'defaultAgent.desc':
     'When a new member joins the team, their dedicated default Agent is auto-created from this template. Only team-public assets (visibility=team) can be selected; changes apply to members joining later.',
-  'defaultAgent.empty': 'Not configured yet · Configure to auto-create a default Agent for new members',
+  'defaultAgent.empty':
+    'Not configured yet · Configure to auto-create a default Agent for new members',
   'defaultAgent.create': 'New Default Agent',
   'defaultAgent.create.tooltip': 'Configure the default Agent template for the current team',
   'defaultAgent.create.caption': 'New Default Agent Template',
@@ -1273,8 +1277,10 @@ export const enUS = {
   'error.UNAUTHORIZED': 'Your session has expired. Please log in again.',
   'error.INVALID_USER_KEY': 'Your API key is invalid or expired. Please log in again.',
   'error.MISSING_USER_KEY': 'Missing API key. Please log in again.',
-  'error.MISSING_INSTANCE_ID': 'Missing instance information. Please reselect an instance and try again.',
-  'error.INVALID_INSTANCE': 'Invalid instance configuration. Please check the currently selected instance.',
+  'error.MISSING_INSTANCE_ID':
+    'Missing instance information. Please reselect an instance and try again.',
+  'error.INVALID_INSTANCE':
+    'Invalid instance configuration. Please check the currently selected instance.',
   'error.NOT_TEAM_MEMBER': 'You are not a member of this team and cannot perform this operation.',
   'error.PERMISSION_DENIED': 'You do not have permission to perform this operation.',
   'error.FORBIDDEN': 'You do not have permission to perform this operation.',
@@ -1284,7 +1290,8 @@ export const enUS = {
   'error.CONFLICT': 'The resource state has changed. Please refresh and try again.',
   'error.KERNEL_UNAVAILABLE': 'The kernel service is unavailable. Please try again later.',
   'error.UPSTREAM_ERROR': 'Upstream service call failed. Please try again later.',
-  'error.UNKNOWN_META_ACTION': 'This API is not currently supported. Please refresh the page or contact an administrator.',
+  'error.UNKNOWN_META_ACTION':
+    'This API is not currently supported. Please refresh the page or contact an administrator.',
   'error.NOT_IN_SCOPE': 'This capability is not yet available.',
   'error.MISSING_TEAM_ID': 'Missing team information. Please reselect a team.',
   'error.MISSING_AGENT_ID': 'Missing Agent information. Please reselect an Agent.',
@@ -1294,28 +1301,35 @@ export const enUS = {
   'error.MISSING_TASK_ID': 'Missing Task information. Please reselect a Task.',
   'error.MISSING_ASSET_ID': 'Missing asset ID.',
   'error.ASSET_NOT_FOUND': 'The asset does not exist or has been deleted.',
-  'error.ASSET_NOT_SHARED': 'This asset has not been shared with the team and cannot be allocated to other Agents.',
+  'error.ASSET_NOT_SHARED':
+    'This asset has not been shared with the team and cannot be allocated to other Agents.',
   'error.ASSET_TYPE_MISMATCH': 'Asset type mismatch. Please refresh and try again.',
   'error.MISSING_BLOCK_ID': 'Missing memory asset information.',
   'error.BLOCK_NOT_FOUND': 'The memory asset does not exist or has been deleted.',
   'error.NOT_CHAT_MEMORY': 'This asset is not a Chat Memory.',
-  'error.TEAM_MISMATCH': 'The resource does not belong to the current team. Please refresh and try again.',
+  'error.TEAM_MISMATCH':
+    'The resource does not belong to the current team. Please refresh and try again.',
   'error.INVALID_SCOPE': 'Invalid visibility scope.',
   'error.CANNOT_ALLOCATE_SELF_CHAT_MEMORY': "Cannot allocate an Agent's own memory back to itself.",
   'error.CANNOT_UNBIND_SELF_CHAT_MEMORY': "Cannot unbind an Agent's own memory.",
-  'error.ALREADY_ALLOCATED': 'This asset has already been allocated to this Agent. No need to allocate again.',
+  'error.ALREADY_ALLOCATED':
+    'This asset has already been allocated to this Agent. No need to allocate again.',
   'error.IMPORT_LIMIT_EXCEEDED': 'An Agent can borrow at most 2 memories from other Agents.',
-  'error.ASSET_PRIVATE_INACCESSIBLE': 'This asset has been set to private by its owner. You do not have access.',
-  'error.ASSET_NOT_BINDABLE': 'The visibility scope of this asset does not allow binding to this Agent. Please ask the owner to set it to team-visible and try again.',
+  'error.ASSET_PRIVATE_INACCESSIBLE':
+    'This asset has been set to private by its owner. You do not have access.',
+  'error.ASSET_NOT_BINDABLE':
+    'The visibility scope of this asset does not allow binding to this Agent. Please ask the owner to set it to team-visible and try again.',
   'error.INVALID_TITLE': 'The title cannot be empty and must not exceed the length limit.',
   'error.MISSING_MESSAGES': 'Missing conversation messages.',
   'error.TOO_MANY_MESSAGES': 'You can import at most 100 messages at a time.',
   'error.NO_VALID_MESSAGES': 'No valid messages to import.',
   'error.MISSING_WIKI_ID': 'Missing Wiki information.',
   'error.WIKI_NOT_FOUND': 'The Wiki does not exist or has been deleted.',
-  'error.WIKI_EMPTY_NO_SOURCES': 'No source files have been uploaded for this Wiki. Please upload .md files before extracting.',
+  'error.WIKI_EMPTY_NO_SOURCES':
+    'No source files have been uploaded for this Wiki. Please upload .md files before extracting.',
   'error.MISSING_FILES': 'Please upload at least one file.',
-  'error.TOO_MANY_FILES': 'The number of uploaded files exceeds the limit (max 10). Please upload in batches.',
+  'error.TOO_MANY_FILES':
+    'The number of uploaded files exceeds the limit (max 10). Please upload in batches.',
   'error.FILE_TOO_LARGE': 'A single file cannot exceed 512KB. Please trim it before uploading.',
   'error.TOTAL_TOO_LARGE': 'The total upload size cannot exceed 5MB. Please upload in batches.',
   'error.MISSING_CODE_GRAPH_ID': 'Missing CodeGraph information.',
@@ -1325,7 +1339,8 @@ export const enUS = {
   'error.VALIDATION_ERROR': 'Invalid request parameters. Please check your input and try again.',
   'error.RATE_LIMITED': 'Too many requests. Please try again later.',
   'error.INTERNAL_ERROR': 'Internal server error. Please try again later.',
-  'error.network': 'Network request failed. Please check if the service is available and try again.',
+  'error.network':
+    'Network request failed. Please check if the service is available and try again.',
   'error.timeout': 'Request timed out. Please try again later.',
   'error.emptyResponse': 'The server returned an empty response. Please try again later.',
   'error.fallback': 'Operation failed. Please try again later.',
@@ -1394,7 +1409,8 @@ export const enUS = {
   'guide.back': 'Back',
   'guide.brand': 'Memory Hub · Getting Started',
   'guide.title': 'Getting Started',
-  'guide.subtitle': 'Complete the quick setup first, then use best practices to turn team experience into reusable engineering assets.',
+  'guide.subtitle':
+    'Complete the quick setup first, then use best practices to turn team experience into reusable engineering assets.',
   'guide.tabs.aria': 'Guide categories',
   'guide.copy': 'Copy',
   'guide.copied': 'Copied',
@@ -1424,7 +1440,8 @@ export const enUS = {
 
   // Package download
   'guide.download.title': 'Download the config pack first',
-  'guide.download.desc': 'After downloading and extracting, run the commands below from a location containing the agents directory.',
+  'guide.download.desc':
+    'After downloading and extracting, run the commands below from a location containing the agents directory.',
   'guide.download.button': 'Download config pack (ZIP)',
 
   // Quick setup sub tabs
@@ -1433,14 +1450,18 @@ export const enUS = {
   'guide.quick.ide.sub': 'Configure Proxy & model',
   'guide.quick.history.title': 'Import History',
   'guide.quick.history.sub': 'Share memory and Skills across Agents',
-  'guide.quick.history.desc': 'Run the script from the repo root to import historical Sessions and Skills from local IDEs, so multiple Agents share existing memory and capabilities.',
-  'guide.quick.history.sources': 'Sources such as {{sources}} are supported; replace the target Team and Agent IDs before running.',
-  'guide.quick.history.dupHint': ' If you already chose to import at the end of the script setup, no need to run again.',
+  'guide.quick.history.desc':
+    'Run the script from the repo root to import historical Sessions and Skills from local IDEs, so multiple Agents share existing memory and capabilities.',
+  'guide.quick.history.sources':
+    'Sources such as {{sources}} are supported; replace the target Team and Agent IDs before running.',
+  'guide.quick.history.dupHint':
+    ' If you already chose to import at the end of the script setup, no need to run again.',
 
   // Preparation
   'guide.proxyHint.reading': 'Reading the local Proxy address…',
   'guide.proxyHint.fromInstance': 'Read from local instance "{{name}}"',
-  'guide.proxyHint.defaultHost': 'Instance has no address configured; using current host and default port 8096',
+  'guide.proxyHint.defaultHost':
+    'Instance has no address configured; using current host and default port 8096',
   'guide.proxyHint.noInstance': 'No instance found; using current host and default port 8096',
   'guide.proxyHint.readFailed': 'Failed to read; using current host and default port 8096',
   'guide.prepare.reading': 'Reading…',
@@ -1452,7 +1473,8 @@ export const enUS = {
   'guide.prepare.keyLink': 'Same Key as the login panel — get it from the API Key page',
   'guide.mode.default': 'Default',
   'guide.mode.analyse': 'Analyse',
-  'guide.mode.analyseHint': 'Analyse mode forwards requests normally while also analyzing how recalled assets contributed, and returns the result in the reply',
+  'guide.mode.analyseHint':
+    'Analyse mode forwards requests normally while also analyzing how recalled assets contributed, and returns the result in the reply',
   'guide.mode.analyseNotice':
     'Note: the script / Skill method only writes the Default address. For Analyse, copy the /analyse endpoint from the manual config below and paste it into your IDE config file.',
 
@@ -1462,14 +1484,16 @@ export const enUS = {
   'guide.method.skill.sub': 'Recommended · guided by your Agent',
   'guide.method.skill.step1': 'Prepare the Skill at the repo root',
   'guide.method.skill.step2': 'Send the prompt below to your Agent',
-  'guide.method.skill.hint': 'The Agent probes the environment and Proxy, then writes the config via the bundled script, and asks whether to import local Skills and chat history.',
+  'guide.method.skill.hint':
+    'The Agent probes the environment and Proxy, then writes the config via the bundled script, and asks whether to import local Skills and chat history.',
   'guide.method.script.title': 'Option 2: Script-based',
   'guide.method.script.sub': 'Run the interactive wizard in your terminal',
   'guide.method.script.step1': 'Run at the repo root',
-  'guide.method.script.hint': 'The script scans existing configs, checks the Proxy and writes the selected IDE; finally you may import local Skills and chat history.',
+  'guide.method.script.hint':
+    'The script scans existing configs, checks the Proxy and writes the selected IDE; finally you may import local Skills and chat history.',
 
   // Manual config
-  'guide.manual.expand': 'Can\'t run commands? Configure manually',
+  'guide.manual.expand': "Can't run commands? Configure manually",
   'guide.manual.collapse': 'Collapse manual config',
   'guide.manual.title': 'Manual Configuration',
   'guide.manual.model': 'Model ID',
@@ -1511,7 +1535,8 @@ export const enUS = {
 
   // Guide replay
   'guide.replay.title': 'Frontend Guide Replay',
-  'guide.replay.desc': 'Replay the step-by-step first-run guide to quickly get familiar with pages and actions.',
+  'guide.replay.desc':
+    'Replay the step-by-step first-run guide to quickly get familiar with pages and actions.',
   'guide.replay.button': 'Replay Guide',
   'guide.replayStarted': 'The guide will restart — please follow the prompts.',
 
@@ -1520,57 +1545,79 @@ export const enUS = {
   'guide.practice.team.step1.short': 'One team identity across all IDEs',
   'guide.practice.team.step1.point1': 'Admin creates a dedicated User and Key for each member',
   'guide.practice.team.step1.point2': 'Members use their own Key in Claude Code, CodeBuddy, etc.',
-  'guide.practice.team.step1.point3': 'Don\'t create a User per IDE — that splits memory and permissions',
+  'guide.practice.team.step1.point3':
+    "Don't create a User per IDE — that splits memory and permissions",
   'guide.practice.team.step2.title': 'Import history',
   'guide.practice.team.step2.short': 'Merge experience from all IDEs into one place',
   'guide.practice.team.step2.point1': 'Import existing Sessions and Skills from different IDEs',
-  'guide.practice.team.step2.point2': 'Recall past decisions, preferences, and lessons after switching IDEs',
-  'guide.practice.team.step2.point3': 'Exclude keys, private info, and unrelated chats before import',
+  'guide.practice.team.step2.point2':
+    'Recall past decisions, preferences, and lessons after switching IDEs',
+  'guide.practice.team.step2.point3':
+    'Exclude keys, private info, and unrelated chats before import',
   'guide.practice.team.step3.title': 'Share assets',
   'guide.practice.team.step3.short': 'Let the team reuse validated experience',
   'guide.practice.team.step3.point1': 'Write project facts, decisions, and pitfalls to Memory',
   'guide.practice.team.step3.point2': 'Turn stable, repeatable processes into Skills',
-  'guide.practice.team.step3.point3': 'Put general docs and long-term knowledge in Wiki, then make them team-visible once correct',
+  'guide.practice.team.step3.point3':
+    'Put general docs and long-term knowledge in Wiki, then make them team-visible once correct',
   'guide.practice.team.step4.title': 'Keep governing',
   'guide.practice.team.step4.short': 'Use, validate, update',
   'guide.practice.team.step4.point1': 'Members and Agents recall the same team assets from any IDE',
-  'guide.practice.team.step4.point2': 'Update the original asset when stale or wrong — don\'t create duplicate versions',
-  'guide.practice.team.step4.point3': 'Use Analyse to see whether recalled assets actually helped the reply',
+  'guide.practice.team.step4.point2':
+    "Update the original asset when stale or wrong — don't create duplicate versions",
+  'guide.practice.team.step4.point3':
+    'Use Analyse to see whether recalled assets actually helped the reply',
 
   // Best practice steps (Personal OPC)
   'guide.practice.personal.step1.title': 'Connect multiple IDEs',
   'guide.practice.personal.step1.short': 'Switch tools without losing context',
-  'guide.practice.personal.step1.point1': 'Use the same Proxy and personal Key across your common IDEs',
-  'guide.practice.personal.step1.point2': 'Import historical Sessions and Skills to keep your workflow',
-  'guide.practice.personal.step1.point3': 'Experience gained in any IDE enters the same memory system',
+  'guide.practice.personal.step1.point1':
+    'Use the same Proxy and personal Key across your common IDEs',
+  'guide.practice.personal.step1.point2':
+    'Import historical Sessions and Skills to keep your workflow',
+  'guide.practice.personal.step1.point3':
+    'Experience gained in any IDE enters the same memory system',
   'guide.practice.personal.step2.title': 'Divide Agents',
   'guide.practice.personal.step2.short': 'Independent roles, share assets on demand',
   'guide.practice.personal.step2.point1': 'Create Agents by duty: research, dev, test, review',
   'guide.practice.personal.step2.point2': 'Give each Agent only the assets its role needs',
-  'guide.practice.personal.step2.point3': 'General Memory and Skills can be shared by multiple Agents',
+  'guide.practice.personal.step2.point3':
+    'General Memory and Skills can be shared by multiple Agents',
   'guide.practice.personal.step3.title': 'Relay across ends',
   'guide.practice.personal.step3.short': 'Continue smoothly between IDEs and Agents',
-  'guide.practice.personal.step3.point1': 'Write research conclusions to Memory so a dev Agent can recall them in another IDE',
+  'guide.practice.personal.step3.point1':
+    'Write research conclusions to Memory so a dev Agent can recall them in another IDE',
   'guide.practice.personal.step3.point2': 'Turn test methods into Skills that later Agents follow',
   'guide.practice.personal.step3.point3': 'Handoffs rely on shared assets, not copying full chats',
   'guide.practice.personal.step4.title': 'Maintain assets',
   'guide.practice.personal.step4.short': 'Keep reusable content, clean the noise',
-  'guide.practice.personal.step4.point1': 'Keep rationale, working solutions, failure causes, and acceptance methods',
-  'guide.practice.personal.step4.point2': 'Update stale facts in Memory, mature processes in Skills',
-  'guide.practice.personal.step4.point3': 'Don\'t save small talk, guesses, keys, or personal sensitive info',
+  'guide.practice.personal.step4.point1':
+    'Keep rationale, working solutions, failure causes, and acceptance methods',
+  'guide.practice.personal.step4.point2':
+    'Update stale facts in Memory, mature processes in Skills',
+  'guide.practice.personal.step4.point3':
+    "Don't save small talk, guesses, keys, or personal sensitive info",
 
   // Manual config notes
   'guide.manual.note.claude': 'Start claude directly — it reads env from settings.json',
   'guide.manual.note.codebuddy': 'Select the proxy-memory-agent model in the CodeBuddy dialog',
-  'guide.manual.note.codex': 'Switch to Plan mode (Shift+Tab) to pick Team→Agent→Task before the first chat, then switch back to Agent mode',
+  'guide.manual.note.codex':
+    'Switch to Plan mode (Shift+Tab) to pick Team→Agent→Task before the first chat, then switch back to Agent mode',
   'guide.manual.note.workbuddy': 'Select this model in the WorkBuddy custom model list',
   'guide.manual.note.dsh.0': 'Two files must both be configured',
-  'guide.manual.note.dsh.1': 'Permissions required: chmod 700 ~/.dsh, chmod 600 ~/.dsh/.credentials.yaml',
+  'guide.manual.note.dsh.1':
+    'Permissions required: chmod 700 ~/.dsh, chmod 600 ~/.dsh/.credentials.yaml',
   'guide.manual.note.dsh.2': 'Launch: dsh (CLI) or dsh web --port 3080 (Web UI)',
-  'guide.manual.note.hermes.0': 'Header preselect required: team-id / agent-id / task-id / conversation-id',
-  'guide.manual.note.hermes.1': 'x-conversation-id identifies the current session — change it for each new conversation',
-  'guide.manual.note.hermes.2': 'x-task-id is required in the current version; use "no-task" when there is none',
-  'guide.manual.note.openclaw.0': 'Header preselect required: team-id / agent-id / task-id / conversation-id',
-  'guide.manual.note.openclaw.1': 'x-conversation-id identifies the current session — change it for each new conversation',
-  'guide.manual.note.openclaw.2': 'x-task-id is required in the current version; use "no-task" when there is none',
+  'guide.manual.note.hermes.0':
+    'Header preselect required: team-id / agent-id / task-id / conversation-id',
+  'guide.manual.note.hermes.1':
+    'x-conversation-id identifies the current session — change it for each new conversation',
+  'guide.manual.note.hermes.2':
+    'x-task-id is required in the current version; use "no-task" when there is none',
+  'guide.manual.note.openclaw.0':
+    'Header preselect required: team-id / agent-id / task-id / conversation-id',
+  'guide.manual.note.openclaw.1':
+    'x-conversation-id identifies the current session — change it for each new conversation',
+  'guide.manual.note.openclaw.2':
+    'x-task-id is required in the current version; use "no-task" when there is none',
 };
