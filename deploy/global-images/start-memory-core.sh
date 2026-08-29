@@ -219,9 +219,7 @@ rm -f /tmp/init-admin.$$
 if [[ -s "$ADMIN_KEY_FILE" ]]; then
   ADMIN_KEY=$(cat "$ADMIN_KEY_FILE")
   if verify_user_key "$ADMIN_KEY"; then
-    # 只在末尾做脱敏输出：整串路径 masked，让终端历史里不留全值
-    masked="${ADMIN_KEY:0:11}****${ADMIN_KEY: -4}"
-    ok "admin user_key 校验通过（auth/verify 200）—— $masked"
+    ok "admin user_key 校验通过（auth/verify 200；内容不输出）"
     ok "  key file: $ADMIN_KEY_FILE"
   else
     warn "admin user_key 校验失败（auth/verify 非 200）。检查 $ADMIN_KEY_FILE 与 volume 是否匹配。"

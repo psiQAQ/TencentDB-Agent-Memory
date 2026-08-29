@@ -200,6 +200,16 @@ Panel 后端 → Kernel 的转发不受此变量影响（始终走 `REMOTE_INSTA
 `MEMORY_HUB_PROXY_PUBLIC_URL=http://<真值>:8096`。想让 UI 卡片走老行为（回落到
 gateway_endpoint）就把 `MEMORY_HUB_PROXY_PUBLIC_URL` 显式设为空字符串。
 
+Code Graph 的 `git clone` / `git fetch` 在 `memory-hub` 容器内执行，不继承宿主机
+`~/.gitconfig`。公网 Git 仓库直连不稳定时，可以在 `.env` 中设置：
+
+```bash
+CODE_GRAPH_GIT_PROXY=http://host.docker.internal:10809
+```
+
+该配置通过 Git command-scope config 注入，只影响 Git 子进程。留空表示直连。宿主机
+代理不能填写 `127.0.0.1`，并且必须允许 Docker bridge 连接。
+
 `proxy` 默认关闭 `auth` / `sessionInit` / `costGuard`（这些依赖内部服务），只做纯转发 + `tdai-memory` 上下文注入（injector 名称，非容器名）。要开启完整流水线，需要另行配置 —— 参见 `context_proxy/config.example.yaml`。
 
 ## 常见问题
@@ -210,6 +220,11 @@ gateway_endpoint）就把 `MEMORY_HUB_PROXY_PUBLIC_URL` 显式设为空字符串
 **Q: memory-hub 起来但 Panel 打不开？**
 
 检查 `.env` 里 `KNOWLEDGE_PUBLIC_BASE_URL` 是不是含 `/v3` —— 缺 `/v3` panel 会报错。
+
+**Q: Code Graph clone GitHub 报 GnuTLS / timeout？**
+
+先在容器内运行 `git ls-remote` 验证直连。如果宿主机经代理可用而容器直连失败，设置
+`CODE_GRAPH_GIT_PROXY` 后重建 `memory-hub` 容器。不要使用 `http.sslVerify=false`。
 
 **Q: proxy 转发返回 401？**
 `PROXY_UPSTREAM_API_KEY` 无效或 `PROXY_UPSTREAM_URL` 不匹配。用 `docker logs tdai-proxy` 看错误。

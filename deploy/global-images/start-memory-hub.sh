@@ -66,6 +66,20 @@ if [[ -z "${MEMORY_HUB_PROXY_PUBLIC_URL+x}" ]]; then
   info "  (如需覆盖，在 .env 里显式设 MEMORY_HUB_PROXY_PUBLIC_URL=http://<your-ip>:${PROXY_PORT:-8096})"
 fi
 
+# Code Graph 的 git clone/fetch 可选代理。使用 Git 的 command-scope config 环境变量，
+# 只影响容器内 git 子进程，不会把 Panel、Knowledge LLM 或 Core 请求导向该代理。
+git_proxy_env=()
+if [[ -n "${CODE_GRAPH_GIT_PROXY:-}" ]]; then
+  git_proxy_env=(
+    -e GIT_CONFIG_COUNT=1
+    -e GIT_CONFIG_KEY_0=http.proxy
+    -e GIT_CONFIG_VALUE_0="$CODE_GRAPH_GIT_PROXY"
+  )
+  info "Code Graph Git proxy: enabled"
+else
+  info "Code Graph Git proxy: disabled"
+fi
+
 CONTAINER=tdai-memory-hub
 NETWORK=tdai-memory-stack
 
@@ -107,6 +121,7 @@ $DOCKER run -d --name "$CONTAINER" \
   -e LLM_BASE_URL="$MEMORY_LLM_BASE_URL" \
   -e LLM_MODEL="$MEMORY_LLM_MODEL" \
   -e KNOWLEDGE_LLM_BINDING_SYNC=0 \
+  "${git_proxy_env[@]}" \
   "$MEMORY_HUB_IMAGE" >/dev/null
 
 wait_healthy "$CONTAINER" 120
