@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { atlasCanvasSize, atlasInteractionEdges, directRelationIds, directVisualNodeIds, edgeGeometry, edgePath, layoutAtlas, projectAtlas, summarizeAtlas, type PositionedAtlasNode } from '../web/src/pages/TeamAtlasPage/atlas-graph.js';
+import { atlasCanvasSize, atlasFitArea, atlasInteractionEdges, directRelationIds, directVisualNodeIds, edgeGeometry, edgePath, layoutAtlas, projectAtlas, summarizeAtlas, type PositionedAtlasNode } from '../web/src/pages/TeamAtlasPage/atlas-graph.js';
 import type { TeamAtlasEdge } from '../web/src/lib/api/team-atlas.js';
 import type { TeamAtlasIR, TeamAtlasNode } from '../web/src/lib/api/team-atlas.js';
 
@@ -240,6 +240,13 @@ describe('Team Atlas projection and layout', () => {
       { id: 'identity:u', entity_id: 'u', type: 'identity', label: 'U', x: 310, y: 960, width: 220, height: 72 },
     ];
     expect(atlasCanvasSize({ width: 1210, height: 774 }, nodes)).toEqual({ width: 1210, height: 1062 });
+  });
+
+  it('fits fullscreen content to the Canvas client box after classic scrollbars take space', () => {
+    expect(atlasFitArea({ canvasWidth: 889, canvasHeight: 909, viewportHeight: 926, canvasTop: 0, fullscreen: true }))
+      .toEqual({ width: 889, height: 909 });
+    expect(atlasFitArea({ canvasWidth: 640, canvasHeight: 774, viewportHeight: 710, canvasTop: 320, fullscreen: false }))
+      .toEqual({ width: 640, height: 370 });
   });
 
   it('uses an evenly offset vertical trunk for every edge between the same columns', () => {

@@ -3,7 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { teamAtlasApi, type ChatMemoryStatus, type TeamAtlasIR, type TeamAtlasNode, type TeamAtlasNodeType, type TeamAtlasRelation } from '../../lib/api/team-atlas';
 import { useBackendStore } from '../../stores/backend';
-import { atlasCanvasSize, atlasContentBounds, atlasInteractionEdges, directVisualNodeIds, edgeGeometry, layoutAtlas, projectAtlas, summarizeAtlas } from './atlas-graph';
+import { atlasCanvasSize, atlasContentBounds, atlasFitArea, atlasInteractionEdges, directVisualNodeIds, edgeGeometry, layoutAtlas, projectAtlas, summarizeAtlas } from './atlas-graph';
 import './team-atlas.css';
 
 const ASSET_OPTIONS: Array<TeamAtlasNodeType | 'all'> = ['all', 'skill', 'llm_wiki', 'code_graph', 'chat_memory'];
@@ -105,9 +105,15 @@ export function TeamAtlasPage() {
     const viewScale = Math.max(0.001, Math.min(svgRect.width / Math.max(1, viewBox.width), svgRect.height / Math.max(1, viewBox.height)));
     const viewOffsetX = (svgRect.width - viewBox.width * viewScale) / 2;
     const viewOffsetY = (svgRect.height - viewBox.height * viewScale) / 2;
-    const availableHeight = Math.max(260, window.innerHeight - canvasRect.top - 20);
-    const widthRatio = (canvas.clientWidth - 28) / Math.max(1, contentBounds.width * viewScale);
-    const heightRatio = (availableHeight - 28) / Math.max(1, contentBounds.height * viewScale);
+    const fitArea = atlasFitArea({
+      canvasWidth: canvas.clientWidth,
+      canvasHeight: canvas.clientHeight,
+      viewportHeight: window.visualViewport?.height ?? window.innerHeight,
+      canvasTop: canvasRect.top,
+      fullscreen: canvas.closest('.team-atlas-workspace')?.classList.contains('is-fullscreen') ?? false,
+    });
+    const widthRatio = (fitArea.width - 28) / Math.max(1, contentBounds.width * viewScale);
+    const heightRatio = (fitArea.height - 28) / Math.max(1, contentBounds.height * viewScale);
     const nextZoom = Math.min(1, Math.max(0.2, Math.min(widthRatio, heightRatio)));
     setZoom(nextZoom);
     setPan({
@@ -127,8 +133,14 @@ export function TeamAtlasPage() {
 
   useEffect(() => {
     if (!layout) return;
-    const frame = window.requestAnimationFrame(fitCanvas);
-    return () => window.cancelAnimationFrame(frame);
+    let settledFrame = 0;
+    const layoutFrame = window.requestAnimationFrame(() => {
+      settledFrame = window.requestAnimationFrame(fitCanvas);
+    });
+    return () => {
+      window.cancelAnimationFrame(layoutFrame);
+      window.cancelAnimationFrame(settledFrame);
+    };
   }, [fitCanvas, isCanvasFullscreen, layout]);
 
   useEffect(() => {

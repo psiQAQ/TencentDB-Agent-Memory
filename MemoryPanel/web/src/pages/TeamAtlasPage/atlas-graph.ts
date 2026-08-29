@@ -112,6 +112,21 @@ export function atlasCanvasSize(layout: Pick<AtlasLayout, 'width' | 'height'>, n
   };
 }
 
+export function atlasFitArea(options: {
+  canvasWidth: number;
+  canvasHeight: number;
+  viewportHeight: number;
+  canvasTop: number;
+  fullscreen: boolean;
+}): { width: number; height: number } {
+  const width = Math.max(1, options.canvasWidth);
+  if (options.fullscreen) return { width, height: Math.max(1, options.canvasHeight) };
+  return {
+    width,
+    height: Math.max(260, Math.min(options.canvasHeight, options.viewportHeight - options.canvasTop - 20)),
+  };
+}
+
 export function directRelationIds(edges: TeamAtlasEdge[], nodeId: string | undefined): Set<string> {
   if (!nodeId) return new Set();
   const ids = new Set([nodeId]);
