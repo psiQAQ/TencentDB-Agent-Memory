@@ -82,6 +82,48 @@ function filterEdges(edges: TeamAtlasEdge[], nodes: TeamAtlasNode[]): TeamAtlasE
   return edges.filter((edge) => ids.has(edge.source) && ids.has(edge.target)).sort((a, b) => a.id.localeCompare(b.id));
 }
 
+export function atlasInteractionEdges(edges: TeamAtlasEdge[]): TeamAtlasEdge[] {
+  return edges.filter((edge) => edge.type !== 'owns');
+}
+
+export function directRelationIds(edges: TeamAtlasEdge[], nodeId: string | undefined): Set<string> {
+  if (!nodeId) return new Set();
+  const ids = new Set([nodeId]);
+  for (const edge of edges) {
+    if (edge.source === nodeId) ids.add(edge.target);
+    if (edge.target === nodeId) ids.add(edge.source);
+  }
+  return ids;
+}
+
+export function directVisualNodeIds(
+  nodes: PositionedAtlasNode[],
+  edges: TeamAtlasEdge[],
+  activeNode: PositionedAtlasNode | null,
+): Set<string> {
+  if (!activeNode) return new Set();
+  const ids = new Set([activeNode.id]);
+  const activeLogicalId = activeNode.logical_id ?? activeNode.id;
+
+  for (const edge of edges) {
+    if (edge.source !== activeLogicalId && edge.target !== activeLogicalId) continue;
+    if (edge.type === 'assigned_to') {
+      if (activeNode.type === 'task' && activeNode.parent_agent_id === edge.target) ids.add(edge.target);
+      if (activeNode.type === 'agent' && edge.target === activeLogicalId) {
+        for (const node of nodes) {
+          if (node.type === 'task' && node.logical_id === edge.source && node.parent_agent_id === activeLogicalId) ids.add(node.id);
+        }
+      }
+      continue;
+    }
+    const peerId = edge.source === activeLogicalId ? edge.target : edge.source;
+    for (const node of nodes) {
+      if ((node.logical_id ?? node.id) === peerId) ids.add(node.id);
+    }
+  }
+  return ids;
+}
+
 export function projectAtlas(
   ir: TeamAtlasIR,
   options: {

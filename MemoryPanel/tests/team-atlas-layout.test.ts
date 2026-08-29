@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { edgeGeometry, edgePath, layoutAtlas, projectAtlas, summarizeAtlas, type PositionedAtlasNode } from '../web/src/pages/TeamAtlasPage/atlas-graph.js';
+import { atlasInteractionEdges, directRelationIds, directVisualNodeIds, edgeGeometry, edgePath, layoutAtlas, projectAtlas, summarizeAtlas, type PositionedAtlasNode } from '../web/src/pages/TeamAtlasPage/atlas-graph.js';
 import type { TeamAtlasEdge } from '../web/src/lib/api/team-atlas.js';
 import type { TeamAtlasIR, TeamAtlasNode } from '../web/src/lib/api/team-atlas.js';
 
@@ -197,6 +197,41 @@ describe('Team Atlas projection and layout', () => {
       { id: 'binding', type: 'fixed_binding', source: 'agent:a', target: 'skill:s' },
     ];
     expect(edgeGeometry(edges[0]!, nodes, edges).path).not.toBe(edgeGeometry(edges[1]!, nodes, edges).path);
+  });
+
+  it('omits owns edges from canvas interaction while keeping fixed bindings', () => {
+    const edges: TeamAtlasEdge[] = [
+      { id: 'owns', type: 'owns', source: 'agent:a', target: 'skill:s' },
+      { id: 'binding', type: 'fixed_binding', source: 'agent:a', target: 'skill:s' },
+    ];
+    expect(atlasInteractionEdges(edges)).toEqual([edges[1]]);
+  });
+
+  it('highlights only the selected node and its direct parents and children', () => {
+    const edges: TeamAtlasEdge[] = [
+      { id: 'team-member', type: 'member_of', source: 'team:t', target: 'identity:u' },
+      { id: 'member-agent', type: 'contains', source: 'identity:u', target: 'agent:a' },
+      { id: 'agent-asset', type: 'fixed_binding', source: 'agent:a', target: 'skill:s' },
+      { id: 'sibling-agent', type: 'contains', source: 'identity:u', target: 'agent:b' },
+    ];
+    expect([...directRelationIds(edges, 'agent:a')].sort()).toEqual(['agent:a', 'identity:u', 'skill:s']);
+    expect(directRelationIds(edges, 'agent:a').has('team:t')).toBe(false);
+    expect(directRelationIds(edges, 'agent:a').has('agent:b')).toBe(false);
+  });
+
+  it('highlights only the Task instance attached to the selected Agent', () => {
+    const nodes: PositionedAtlasNode[] = [
+      { id: 'agent:a', entity_id: 'a', type: 'agent', label: 'A', x: 0, y: 0, width: 220, height: 72 },
+      { id: 'agent:b', entity_id: 'b', type: 'agent', label: 'B', x: 0, y: 100, width: 220, height: 72 },
+      { id: 'task:t@agent:a', logical_id: 'task:t', parent_agent_id: 'agent:a', entity_id: 't', type: 'task', label: 'T', x: 240, y: 0, width: 208, height: 40 },
+      { id: 'task:t@agent:b', logical_id: 'task:t', parent_agent_id: 'agent:b', entity_id: 't', type: 'task', label: 'T', x: 240, y: 100, width: 208, height: 40 },
+    ];
+    const edges: TeamAtlasEdge[] = [
+      { id: 'assigned:a', type: 'assigned_to', source: 'task:t', target: 'agent:a' },
+      { id: 'assigned:b', type: 'assigned_to', source: 'task:t', target: 'agent:b' },
+    ];
+    expect([...directVisualNodeIds(nodes, edges, nodes[0]!)].sort()).toEqual(['agent:a', 'task:t@agent:a']);
+    expect([...directVisualNodeIds(nodes, edges, nodes[3]!)].sort()).toEqual(['agent:b', 'task:t@agent:b']);
   });
 
   it('uses an evenly offset vertical trunk for every edge between the same columns', () => {

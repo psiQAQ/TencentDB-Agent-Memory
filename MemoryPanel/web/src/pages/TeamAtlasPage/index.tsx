@@ -3,7 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { teamAtlasApi, type ChatMemoryStatus, type TeamAtlasIR, type TeamAtlasNode, type TeamAtlasNodeType, type TeamAtlasRelation } from '../../lib/api/team-atlas';
 import { useBackendStore } from '../../stores/backend';
-import { edgeGeometry, layoutAtlas, projectAtlas, summarizeAtlas } from './atlas-graph';
+import { atlasInteractionEdges, directVisualNodeIds, edgeGeometry, layoutAtlas, projectAtlas, summarizeAtlas } from './atlas-graph';
 import './team-atlas.css';
 
 const ASSET_OPTIONS: Array<TeamAtlasNodeType | 'all'> = ['all', 'skill', 'llm_wiki', 'code_graph', 'chat_memory'];
@@ -83,6 +83,7 @@ export function TeamAtlasPage() {
 
   const projection = useMemo(() => ir ? projectAtlas(ir, { teamIds: selectedTeamIds, query, assetType, showUnboundAssets, showOtherOwners }) : null, [ir, selectedTeamIds, query, assetType, showUnboundAssets, showOtherOwners]);
   const layout = useMemo(() => projection ? layoutAtlas(projection) : null, [projection]);
+  const interactionEdges = useMemo(() => layout ? atlasInteractionEdges(layout.edges) : [], [layout]);
   const displayedNodes = useMemo(() => layout ? layout.nodes.map((node) => {
     const offset = node.team_id ? teamOffsets[node.team_id] : undefined;
     return offset ? { ...node, x: node.x + offset.x, y: node.y + offset.y } : node;
@@ -132,23 +133,7 @@ export function TeamAtlasPage() {
   const activeId = selectedId;
   const activeNode = displayedNodes.find((node) => node.id === activeId) ?? null;
   const logicalActiveId = activeNode?.logical_id ?? activeNode?.id;
-  const connectedNodeIds = useMemo(() => {
-    const connected = new Set<string>();
-    if (!layout || !logicalActiveId || activeNode?.type === 'team') return connected;
-    connected.add(logicalActiveId);
-    const queue = [logicalActiveId];
-    while (queue.length > 0) {
-      const current = queue.shift()!;
-      for (const edge of layout.edges) {
-        const peer = edge.source === current ? edge.target : edge.target === current ? edge.source : null;
-        if (peer && !connected.has(peer)) {
-          connected.add(peer);
-          queue.push(peer);
-        }
-      }
-    }
-    return connected;
-  }, [activeNode?.type, layout, logicalActiveId]);
+  const directNodeIds = useMemo(() => directVisualNodeIds(displayedNodes, interactionEdges, activeNode), [activeNode, displayedNodes, interactionEdges]);
   const activeRelations = activeNode && layout ? layout.edges
     .filter((edge) => edge.source === logicalActiveId || edge.target === logicalActiveId)
     .map((edge) => ({
@@ -194,7 +179,7 @@ export function TeamAtlasPage() {
     if (!layout) return '';
     const outgoing = layout.edges.filter((edge) => edge.source === node.id);
     const owner = node.metadata?.owner_user_id;
-    if (node.type === 'identity') return node.metadata?.is_current ? t('atlas.currentIdentity') : `${t('atlas.role')} ${String(node.metadata?.role ?? '—')}`;
+    if (node.type === 'identity') return `${node.entity_id} ${String(node.metadata?.role ?? '—')}`;
     if (node.type === 'team') return `${t('atlas.owner')} ${shortId(owner)}`;
     if (node.type === 'task') return `Agent ${outgoing.filter((edge) => edge.type === 'assigned_to').length} · ${t('atlas.creator')} ${shortId(node.metadata?.creator_user_id)}`;
     if (node.type === 'agent') return `${t('atlas.owner')} ${shortId(owner)}`;
@@ -278,27 +263,25 @@ export function TeamAtlasPage() {
           >
             <defs>{RELATIONS.map((relation) => <marker key={relation} id={`atlas-arrow-${relation}`} viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path className="team-atlas-arrow" fill="context-stroke" d="M 0 0 L 10 5 L 0 10 z" /></marker>)}</defs>
             <g transform={`translate(${pan.x} ${pan.y}) scale(${zoom})`}>
-              <g className="team-atlas-edges">{layout.edges.map((edge) => {
-                const geometry = edgeGeometry(edge, displayedNodes, layout.edges);
+              <g className="team-atlas-edges">{interactionEdges.map((edge) => {
+                const geometry = edgeGeometry(edge, displayedNodes, interactionEdges);
                 if (!geometry.path) return null;
                 const targetNode = displayedNodes.find((node) => (node.logical_id ?? node.id) === edge.target);
-                const assetClass = targetNode && ASSET_TYPES.has(targetNode.type) ? ` team-atlas-edge--asset-${targetNode.type}` : '';
-                const active = connectedNodeIds.size > 0
-                  ? connectedNodeIds.has(edge.source) && connectedNodeIds.has(edge.target)
-                  : Boolean(logicalActiveId && (edge.source === logicalActiveId || edge.target === logicalActiveId));
-                return <g key={edge.id} className={`team-atlas-edge team-atlas-edge--${edge.type}${assetClass}${active ? ' is-active' : ''}`}>
+                const targetClass = targetNode ? ` team-atlas-edge--target-${targetNode.type}` : '';
+                const active = Boolean(logicalActiveId && (edge.source === logicalActiveId || edge.target === logicalActiveId));
+                return <g key={edge.id} className={`team-atlas-edge team-atlas-edge--${edge.type}${targetClass}${active ? ' is-active' : ''}`}>
                   <path d={geometry.path} markerEnd={`url(#atlas-arrow-${edge.type})`} />
                 </g>;
               })}</g>
               <g>{displayedNodes.map((node) => {
                 const logicalNodeId = node.logical_id ?? node.id;
                 const active = activeId === node.id;
-                const connected = connectedNodeIds.has(logicalNodeId);
+                const directlyRelated = directNodeIds.has(node.id);
                 const owned = isOwnedByCurrent(node, ir.scope.user_id);
                 const warning = warningByNode.get(logicalNodeId);
                 const caption = nodeCaption(node);
                 return <g key={node.id} className="team-atlas-node-position" transform={`translate(${node.x} ${node.y})`}>
-                  <g role="button" aria-label={`${node.type}: ${node.label}`} className={`${nodeClass(node, owned)}${active ? ' is-active' : ''}${connected ? ' is-connected' : ''}`} onPointerDown={(event) => { event.preventDefault(); event.stopPropagation(); onNodeClick(node); }} onClick={(event) => event.stopPropagation()}>
+                  <g role="button" aria-label={`${node.type}: ${node.label}`} className={`${nodeClass(node, owned)}${active ? ' is-active' : ''}${directlyRelated ? ' is-direct' : ''}`} onPointerDown={(event) => { event.preventDefault(); event.stopPropagation(); onNodeClick(node); }} onClick={(event) => event.stopPropagation()}>
                   {node.type === 'team' && <g className="team-atlas-team-drag-handle" transform={`translate(${node.width / 2} -17)`} aria-label={t('atlas.dragTeam')} onPointerDown={(event) => {
                     event.preventDefault();
                     event.stopPropagation();
