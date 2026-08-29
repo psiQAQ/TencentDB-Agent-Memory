@@ -138,6 +138,14 @@ export function atlasCanvasSize(
   };
 }
 
+export function atlasGraphHeight(
+  contentHeight: number,
+  canvasViewportHeight: number,
+  fullscreen: boolean,
+): number {
+  return fullscreen ? Math.max(contentHeight, canvasViewportHeight) : contentHeight;
+}
+
 export function atlasFitArea(options: {
   canvasWidth: number;
   canvasHeight: number;

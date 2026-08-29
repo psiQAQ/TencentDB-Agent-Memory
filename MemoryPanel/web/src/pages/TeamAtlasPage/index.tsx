@@ -14,6 +14,7 @@ import {
   atlasCanvasSize,
   atlasContentBounds,
   atlasFitArea,
+  atlasGraphHeight,
   atlasInteractionEdges,
   directVisualNodeIds,
   edgeGeometry,
@@ -82,6 +83,7 @@ export function TeamAtlasPage() {
   const [teamOffsets, setTeamOffsets] = useState<Record<string, { x: number; y: number }>>({});
   const [zoom, setZoom] = useState(1);
   const [pan, setPan] = useState({ x: 10, y: 10 });
+  const [canvasViewportHeight, setCanvasViewportHeight] = useState(0);
   const dragRef = useRef<{ x: number; y: number; panX: number; panY: number } | null>(null);
   const teamDragRef = useRef<{
     teamId: string;
@@ -156,6 +158,7 @@ export function TeamAtlasPage() {
     () => (layout ? atlasCanvasSize(layout, displayedNodes) : { width: 1160, height: 620 }),
     [displayedNodes, layout],
   );
+  const graphHeight = atlasGraphHeight(canvasSize.height, canvasViewportHeight, isCanvasFullscreen);
   const summaryCards = useMemo(
     () => (ir ? summarizeAtlas(ir, selectedTeamIds) : []),
     [ir, selectedTeamIds],
@@ -200,14 +203,18 @@ export function TeamAtlasPage() {
 
   useEffect(() => {
     if (!layout) return;
-    const frame = window.requestAnimationFrame(fitCanvas);
-    const observer = new ResizeObserver(fitCanvas);
+    const syncCanvasViewport = () => {
+      setCanvasViewportHeight(canvasRef.current?.clientHeight ?? 0);
+      fitCanvas();
+    };
+    const frame = window.requestAnimationFrame(syncCanvasViewport);
+    const observer = new ResizeObserver(syncCanvasViewport);
     if (canvasRef.current) observer.observe(canvasRef.current);
     return () => {
       window.cancelAnimationFrame(frame);
       observer.disconnect();
     };
-  }, [fitCanvas, layout]);
+  }, [fitCanvas, isCanvasFullscreen, layout]);
 
   useEffect(() => {
     if (!layout) return;
@@ -219,7 +226,7 @@ export function TeamAtlasPage() {
       window.cancelAnimationFrame(layoutFrame);
       window.cancelAnimationFrame(settledFrame);
     };
-  }, [fitCanvas, isCanvasFullscreen, layout]);
+  }, [fitCanvas, graphHeight, isCanvasFullscreen, layout]);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -490,29 +497,43 @@ export function TeamAtlasPage() {
 
       <div className={`team-atlas-workspace${isCanvasFullscreen ? ' is-fullscreen' : ''}`}>
         <div ref={canvasRef} className="team-atlas-canvas">
-          <button
-            type="button"
-            className="team-atlas-fullscreen-toggle"
-            aria-label={t(isCanvasFullscreen ? 'atlas.exitFullscreen' : 'atlas.enterFullscreen')}
-            title={t(isCanvasFullscreen ? 'atlas.exitFullscreen' : 'atlas.enterFullscreen')}
-            onClick={() => setIsCanvasFullscreen((value) => !value)}
-          >
-            <svg viewBox="0 0 20 20" aria-hidden="true">
-              <path
-                d={
-                  isCanvasFullscreen
-                    ? 'M8 2v6H2M12 2v6h6M8 18v-6H2M12 18v-6h6'
-                    : 'M8 2H2v6M12 2h6v6M8 18H2v-6M12 18h6v-6'
-                }
-              />
-            </svg>
-          </button>
+          <div className={`team-atlas-canvas-actions${isCanvasFullscreen ? ' is-fullscreen' : ''}`}>
+            {isCanvasFullscreen && (
+              <button
+                type="button"
+                className="team-atlas-fullscreen-fit"
+                aria-label={t('atlas.fit')}
+                title={t('atlas.fit')}
+                onClick={fitCanvas}
+              >
+                {t('atlas.fit')}
+              </button>
+            )}
+            <button
+              type="button"
+              className="team-atlas-fullscreen-toggle"
+              aria-label={t(isCanvasFullscreen ? 'atlas.exitFullscreen' : 'atlas.enterFullscreen')}
+              title={t(isCanvasFullscreen ? 'atlas.exitFullscreen' : 'atlas.enterFullscreen')}
+              onClick={() => setIsCanvasFullscreen((value) => !value)}
+            >
+              <svg viewBox="0 0 20 20" aria-hidden="true">
+                <path
+                  d={
+                    isCanvasFullscreen
+                      ? 'M8 2v6H2M12 2v6h6M8 18v-6H2M12 18v-6h6'
+                      : 'M8 2H2v6M12 2h6v6M8 18H2v-6M12 18h6v-6'
+                  }
+                />
+              </svg>
+            </button>
+          </div>
           <svg
             ref={svgRef}
+            className="team-atlas-graph"
             role="img"
             aria-label={t('atlas.graphLabel')}
-            viewBox={`0 0 ${canvasSize.width} ${canvasSize.height}`}
-            style={{ width: canvasSize.width, height: canvasSize.height }}
+            viewBox={`0 0 ${canvasSize.width} ${graphHeight}`}
+            style={{ width: canvasSize.width, height: graphHeight }}
             onPointerDown={(event) => {
               if (!(event.target as Element).closest('.team-atlas-node')) {
                 event.currentTarget.setPointerCapture(event.pointerId);

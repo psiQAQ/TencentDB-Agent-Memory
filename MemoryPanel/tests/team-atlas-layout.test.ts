@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { atlasCanvasSize, atlasFitArea, atlasInteractionEdges, directRelationIds, directVisualNodeIds, edgeGeometry, edgePath, layoutAtlas, projectAtlas, summarizeAtlas, type PositionedAtlasNode } from '../web/src/pages/TeamAtlasPage/atlas-graph.js';
+import { atlasCanvasSize, atlasFitArea, atlasGraphHeight, atlasInteractionEdges, directRelationIds, directVisualNodeIds, edgeGeometry, edgePath, layoutAtlas, projectAtlas, summarizeAtlas, type PositionedAtlasNode } from '../web/src/pages/TeamAtlasPage/atlas-graph.js';
 import type { TeamAtlasEdge } from '../web/src/lib/api/team-atlas.js';
 import type { TeamAtlasIR, TeamAtlasNode } from '../web/src/lib/api/team-atlas.js';
 
@@ -243,6 +243,9 @@ describe('Team Atlas projection and layout', () => {
   });
 
   it('fits fullscreen content to the Canvas client box after classic scrollbars take space', () => {
+    expect(atlasGraphHeight(838, 920, true)).toBe(920);
+    expect(atlasGraphHeight(1062, 920, true)).toBe(1062);
+    expect(atlasGraphHeight(838, 920, false)).toBe(838);
     expect(atlasFitArea({ canvasWidth: 889, canvasHeight: 909, viewportHeight: 926, canvasTop: 0, fullscreen: true }))
       .toEqual({ width: 889, height: 909 });
     expect(atlasFitArea({ canvasWidth: 640, canvasHeight: 774, viewportHeight: 710, canvasTop: 320, fullscreen: false }))
