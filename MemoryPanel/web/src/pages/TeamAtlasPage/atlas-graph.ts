@@ -253,10 +253,19 @@ export function layoutAtlas(projection: AtlasProjection): AtlasLayout {
     const assetHeight = assets.length * nodeHeight + Math.max(0, assets.length - 1) * assetGap;
     const blockHeight = Math.max(180, memberHeight, assetHeight);
     let memberY = teamTop + (blockHeight - memberHeight) / 2;
-
-    positioned.push({ ...team, x: TYPE_X.team, y: teamTop + (blockHeight - nodeHeight) / 2, width: nodeWidth, height: nodeHeight });
+    const memberCardYs: number[] = [];
+    let memberCursor = memberY;
     for (const section of memberSections) {
-      const memberCardY = section.agentGroups.length > 0 ? memberY : memberY + (section.height - nodeHeight) / 2;
+      memberCardYs.push(section.agentGroups.length > 0 ? memberCursor : memberCursor + (section.height - nodeHeight) / 2);
+      memberCursor += section.height + memberGap;
+    }
+    const teamCenterY = memberCardYs.length > 0
+      ? memberCardYs.reduce((sum, y) => sum + y + nodeHeight / 2, 0) / memberCardYs.length
+      : teamTop + blockHeight / 2;
+
+    positioned.push({ ...team, x: TYPE_X.team, y: teamCenterY - nodeHeight / 2, width: nodeWidth, height: nodeHeight });
+    for (const [sectionIndex, section] of memberSections.entries()) {
+      const memberCardY = memberCardYs[sectionIndex]!;
       positioned.push({ ...section.member, x: TYPE_X.identity, y: memberCardY, width: nodeWidth, height: nodeHeight });
       let workY = memberY;
       for (const group of section.agentGroups) {

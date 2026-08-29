@@ -40,6 +40,17 @@ export function buildPanelApp(deps: PanelDeps): Hono {
   registerChatMemoryStatusRoutes(api, deps);
   app.route(API_PREFIX, api);
 
+  // The Hub is frequently rebuilt in place during local development. Never let a
+  // long-lived SPA tab reuse an old index.html that points at a superseded bundle.
+  app.use('/*', async (c, next) => {
+    await next();
+    const requestPath = c.req.path;
+    if (!requestPath.startsWith('/api/') && requestPath !== '/health'
+      && (requestPath === '/' || path.extname(requestPath) === '')) {
+      c.header('Cache-Control', 'no-store, no-cache, must-revalidate');
+    }
+  });
+
   app.onError((err, c) => {
     deps.logger.error('panel unhandled error', {
       err: err instanceof Error ? err.message : String(err),

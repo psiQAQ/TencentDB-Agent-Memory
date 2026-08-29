@@ -297,7 +297,8 @@ export function TeamAtlasPage() {
                 const owned = isOwnedByCurrent(node, ir.scope.user_id);
                 const warning = warningByNode.get(logicalNodeId);
                 const caption = nodeCaption(node);
-                return <g key={node.id} role="button" aria-label={`${node.type}: ${node.label}`} className={`${nodeClass(node, owned)}${active ? ' is-active' : ''}${connected ? ' is-connected' : ''}`} transform={`translate(${node.x} ${node.y})`} onPointerDown={(event) => { event.preventDefault(); event.stopPropagation(); onNodeClick(node); }} onClick={(event) => event.stopPropagation()}>
+                return <g key={node.id} className="team-atlas-node-position" transform={`translate(${node.x} ${node.y})`}>
+                  <g role="button" aria-label={`${node.type}: ${node.label}`} className={`${nodeClass(node, owned)}${active ? ' is-active' : ''}${connected ? ' is-connected' : ''}`} onPointerDown={(event) => { event.preventDefault(); event.stopPropagation(); onNodeClick(node); }} onClick={(event) => event.stopPropagation()}>
                   {node.type === 'team' && <g className="team-atlas-team-drag-handle" transform={`translate(${node.width / 2} -17)`} aria-label={t('atlas.dragTeam')} onPointerDown={(event) => {
                     event.preventDefault();
                     event.stopPropagation();
@@ -319,6 +320,7 @@ export function TeamAtlasPage() {
                   {owned && <path className="team-atlas-owner-star" transform={`translate(${node.width - 18} 15)`} d="M0-9 2.65-2.78 8.56-2.78 3.78 1.06 5.29 7.28 0 3.6-5.29 7.28-3.78 1.06-8.56-2.78-2.65-2.78Z" />}
                   {warning && <g className="team-atlas-warning" transform={`translate(${node.width - (owned ? 42 : 18)} 14)`}><circle r="8" /><text y="4">!</text><title>{warning.message}</title></g>}
                   <title>{`${node.label} · ${node.entity_id}`}</title>
+                  </g>
                 </g>;
               })}</g>
             </g>

@@ -105,16 +105,24 @@ describe('Team Atlas projection and layout', () => {
       { id: 'identity:team-a:user-2', entity_id: 'user-2', type: 'identity', label: 'A Other', team_id: 'team-a' },
       { id: 'agent:other', entity_id: 'other', type: 'agent', label: 'A Other', team_id: 'team-a', metadata: { owner_user_id: 'user-2' } },
       { id: 'agent:mine', entity_id: 'mine', type: 'agent', label: 'Z Mine', team_id: 'team-a', metadata: { owner_user_id: 'user-1' } },
+      { id: 'task:one', entity_id: 'one', type: 'task', label: 'One', team_id: 'team-a' },
+      { id: 'task:two', entity_id: 'two', type: 'task', label: 'Two', team_id: 'team-a' },
       { id: 'chat_memory:other', entity_id: 'other-memory', type: 'chat_memory', label: 'A Other', team_id: 'team-a', metadata: { owner_user_id: 'user-2' } },
       { id: 'chat_memory:mine', entity_id: 'mine-memory', type: 'chat_memory', label: 'Z Mine', team_id: 'team-a', metadata: { owner_user_id: 'user-1' } },
     ]);
-    input.edges.push({ id: 'member:other', type: 'member_of', source: 'team:team-a', target: 'identity:team-a:user-2' });
+    input.edges.push(
+      { id: 'member:other', type: 'member_of', source: 'team:team-a', target: 'identity:team-a:user-2' },
+      { id: 'assigned:one', type: 'assigned_to', source: 'task:one', target: 'agent:mine' },
+      { id: 'assigned:two', type: 'assigned_to', source: 'task:two', target: 'agent:mine' },
+    );
     const layout = layoutAtlas(projectAtlas(input));
     const mineIdentity = layout.nodes.find((node) => node.id === 'identity:team-a:user-1')!;
     const mineAgent = layout.nodes.find((node) => node.id === 'agent:mine')!;
     const otherIdentity = layout.nodes.find((node) => node.id === 'identity:team-a:user-2')!;
+    const team = layout.nodes.find((node) => node.id === 'team:team-a')!;
     expect(mineIdentity.y).toBeLessThan(otherIdentity.y);
     expect(mineIdentity.y).toBe(mineAgent.y);
+    expect(team.y + team.height / 2).toBe((mineIdentity.y + mineIdentity.height / 2 + otherIdentity.y + otherIdentity.height / 2) / 2);
     const memories = layout.nodes.filter((node) => node.type === 'chat_memory').sort((a, b) => a.y - b.y);
     expect(memories[0]!.id).toBe('chat_memory:mine');
   });
