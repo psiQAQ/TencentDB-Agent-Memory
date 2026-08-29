@@ -300,6 +300,21 @@ export function useCodeSources() {
   const handleSync = async (cgId: string) => {
     try {
       await knowledgeApi.code.sync(cgId);
+      // sync 也必须进入轮询队列：容器重启后 create 阶段暂存的 owner key
+      // 可能已经丢失，callback 因而只能写 knowledge entity、无法注册 meta asset。
+      // 轮询 ready 后会走与新建仓库相同的 registerMeta 前端兜底。
+      let tracked = sources.find((source) => source.code_graph_id === cgId);
+      try {
+        tracked = await knowledgeApi.code.get(cgId);
+      } catch {
+        // sync 已成功时，短暂的 get 失败不应把操作显示为失败；保留列表快照继续轮询。
+      }
+      if (tracked) {
+        setInFlight((prev) => [
+          ...prev.filter((item) => item.code_graph_id !== cgId),
+          tracked,
+        ]);
+      }
       fetchSources();
     } catch (e: unknown) {
       tea.notify.error(e);
