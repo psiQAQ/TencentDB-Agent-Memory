@@ -27,8 +27,13 @@ fi
 
 load_env
 
-# 交互式确认 LLM 两组配置 + 通路检查 + 写回 .env
-interactive_llm_setup
+# 自动化部署可跳过会把默认值显示在终端的交互流程；仍保留后续必填校验。
+# 交互模式供人工首次配置，NON_INTERACTIVE=1 供受管配置/CI 重启。
+if [[ "${NON_INTERACTIVE:-0}" == "1" ]]; then
+  info "NON_INTERACTIVE=1：使用 .env 现有 LLM 配置，跳过交互提示"
+else
+  interactive_llm_setup
+fi
 
 # 一次性校验全部必填参数，避免拉起 memory 之后才发现 proxy 参数缺
 require_vars \
