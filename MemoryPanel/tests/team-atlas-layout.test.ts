@@ -85,6 +85,40 @@ describe('Team Atlas projection and layout', () => {
     expect(projection.nodes.some((node) => node.id === 'skill:other')).toBe(false);
   });
 
+  it('can hide identities, Agents, and assets owned by other users while retaining the Team', () => {
+    const input = irWithNodes([
+      { id: 'team:team-a', entity_id: 'team-a', type: 'team', label: 'Team A', team_id: 'team-a' },
+      { id: 'identity:team-a:user-2', entity_id: 'user-2', type: 'identity', label: 'Other', team_id: 'team-a' },
+      { id: 'agent:mine', entity_id: 'mine', type: 'agent', label: 'Mine', team_id: 'team-a', metadata: { owner_user_id: 'user-1' } },
+      { id: 'agent:other', entity_id: 'other', type: 'agent', label: 'Other', team_id: 'team-a', metadata: { owner_user_id: 'user-2' } },
+      { id: 'skill:mine', entity_id: 'mine', type: 'skill', label: 'Mine', team_id: 'team-a', metadata: { owner_user_id: 'user-1' } },
+      { id: 'skill:other', entity_id: 'other', type: 'skill', label: 'Other', team_id: 'team-a', metadata: { owner_user_id: 'user-2' } },
+    ]);
+    input.edges.push({ id: 'member:other', type: 'member_of', source: 'team:team-a', target: 'identity:team-a:user-2' });
+    const projection = projectAtlas(input, { showOtherOwners: false });
+    expect(projection.nodes.map((node) => node.id)).toEqual(expect.arrayContaining(['team:team-a', 'identity:team-a:user-1', 'agent:mine', 'skill:mine']));
+    expect(projection.nodes.map((node) => node.id)).not.toEqual(expect.arrayContaining(['identity:team-a:user-2', 'agent:other', 'skill:other']));
+  });
+
+  it('sorts the current owner first and horizontally aligns each Identity with its first Agent', () => {
+    const input = irWithNodes([
+      { id: 'identity:team-a:user-2', entity_id: 'user-2', type: 'identity', label: 'A Other', team_id: 'team-a' },
+      { id: 'agent:other', entity_id: 'other', type: 'agent', label: 'A Other', team_id: 'team-a', metadata: { owner_user_id: 'user-2' } },
+      { id: 'agent:mine', entity_id: 'mine', type: 'agent', label: 'Z Mine', team_id: 'team-a', metadata: { owner_user_id: 'user-1' } },
+      { id: 'chat_memory:other', entity_id: 'other-memory', type: 'chat_memory', label: 'A Other', team_id: 'team-a', metadata: { owner_user_id: 'user-2' } },
+      { id: 'chat_memory:mine', entity_id: 'mine-memory', type: 'chat_memory', label: 'Z Mine', team_id: 'team-a', metadata: { owner_user_id: 'user-1' } },
+    ]);
+    input.edges.push({ id: 'member:other', type: 'member_of', source: 'team:team-a', target: 'identity:team-a:user-2' });
+    const layout = layoutAtlas(projectAtlas(input));
+    const mineIdentity = layout.nodes.find((node) => node.id === 'identity:team-a:user-1')!;
+    const mineAgent = layout.nodes.find((node) => node.id === 'agent:mine')!;
+    const otherIdentity = layout.nodes.find((node) => node.id === 'identity:team-a:user-2')!;
+    expect(mineIdentity.y).toBeLessThan(otherIdentity.y);
+    expect(mineIdentity.y).toBe(mineAgent.y);
+    const memories = layout.nodes.filter((node) => node.type === 'chat_memory').sort((a, b) => a.y - b.y);
+    expect(memories[0]!.id).toBe('chat_memory:mine');
+  });
+
   it('places assigned Tasks below the Agent cards in the shared work lane', () => {
     const input = irWithNodes([
       { id: 'agent:a', entity_id: 'a', type: 'agent', label: 'Agent A', team_id: 'team-a', metadata: { owner_user_id: 'user-1' } },
@@ -165,5 +199,10 @@ describe('Team Atlas projection and layout', () => {
     const edges: TeamAtlasEdge[] = nodes.slice(1).map((node) => ({ id: `member:${node.id}`, type: 'member_of', source: 'team:t', target: node.id }));
     const trunks = edges.map((edge) => edgeGeometry(edge, nodes, edges).path.match(/H ([\d.]+) V/)?.[1]);
     expect(new Set(trunks).size).toBe(edges.length);
+    const orderedByTarget = [...edges].sort((a, b) => nodes.find((node) => node.id === a.target)!.y - nodes.find((node) => node.id === b.target)!.y);
+    const sourcePorts = orderedByTarget.map((edge) => Number(edgeGeometry(edge, nodes, edges).path.match(/^M [\d.]+ ([\d.]+)/)?.[1]));
+    const orderedTrunks = orderedByTarget.map((edge) => Number(edgeGeometry(edge, nodes, edges).path.match(/H ([\d.]+) V/)?.[1]));
+    expect(sourcePorts).toEqual([...sourcePorts].sort((a, b) => a - b));
+    expect(orderedTrunks).toEqual([...orderedTrunks].sort((a, b) => a - b));
   });
 });
