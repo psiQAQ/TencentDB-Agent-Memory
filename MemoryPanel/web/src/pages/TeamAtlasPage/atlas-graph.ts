@@ -146,6 +146,35 @@ export function atlasGraphHeight(
   return fullscreen ? Math.max(contentHeight, canvasViewportHeight) : contentHeight;
 }
 
+export function atlasFitViewport(options: {
+  areaWidth: number;
+  areaHeight: number;
+  contentWidth: number;
+  contentHeight: number;
+  viewScale: number;
+  padding?: number;
+  minZoom?: number;
+  maxZoom?: number;
+}): { zoom: number; paddingX: number; paddingY: number } {
+  const padding = options.padding ?? 14;
+  const minZoom = options.minZoom ?? 0.2;
+  const maxZoom = options.maxZoom ?? 1.6;
+  const viewScale = Math.max(0.001, options.viewScale);
+  const widthRatio =
+    Math.max(1, options.areaWidth - padding * 2) / Math.max(1, options.contentWidth * viewScale);
+  const heightRatio =
+    Math.max(1, options.areaHeight - padding * 2) / Math.max(1, options.contentHeight * viewScale);
+  const zoom = Math.min(maxZoom, Math.max(minZoom, Math.min(widthRatio, heightRatio)));
+  return {
+    zoom,
+    paddingX: Math.max(padding, (options.areaWidth - options.contentWidth * viewScale * zoom) / 2),
+    paddingY: Math.max(
+      padding,
+      (options.areaHeight - options.contentHeight * viewScale * zoom) / 2,
+    ),
+  };
+}
+
 export function atlasFitArea(options: {
   canvasWidth: number;
   canvasHeight: number;

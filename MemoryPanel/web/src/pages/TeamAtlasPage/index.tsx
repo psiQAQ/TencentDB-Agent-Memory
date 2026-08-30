@@ -14,6 +14,7 @@ import {
   atlasCanvasSize,
   atlasContentBounds,
   atlasFitArea,
+  atlasFitViewport,
   atlasGraphHeight,
   atlasInteractionEdges,
   directVisualNodeIds,
@@ -190,13 +191,17 @@ export function TeamAtlasPage() {
       fullscreen:
         canvas.closest('.team-atlas-workspace')?.classList.contains('is-fullscreen') ?? false,
     });
-    const widthRatio = (fitArea.width - 28) / Math.max(1, contentBounds.width * viewScale);
-    const heightRatio = (fitArea.height - 28) / Math.max(1, contentBounds.height * viewScale);
-    const nextZoom = Math.min(1, Math.max(0.2, Math.min(widthRatio, heightRatio)));
-    setZoom(nextZoom);
+    const fitted = atlasFitViewport({
+      areaWidth: fitArea.width,
+      areaHeight: fitArea.height,
+      contentWidth: contentBounds.width,
+      contentHeight: contentBounds.height,
+      viewScale,
+    });
+    setZoom(fitted.zoom);
     setPan({
-      x: (14 - viewOffsetX) / viewScale - contentBounds.minX * nextZoom,
-      y: (14 - viewOffsetY) / viewScale - contentBounds.minY * nextZoom,
+      x: (fitted.paddingX - viewOffsetX) / viewScale - contentBounds.minX * fitted.zoom,
+      y: (fitted.paddingY - viewOffsetY) / viewScale - contentBounds.minY * fitted.zoom,
     });
     canvas.scrollTo({ left: 0, top: 0 });
   }, [layout]);
