@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { atlasCanvasSize, atlasFitArea, atlasInteractionEdges, directRelationIds, directVisualNodeIds, edgeGeometry, edgePath, layoutAtlas, projectAtlas, summarizeAtlas, type PositionedAtlasNode } from '../web/src/pages/TeamAtlasPage/atlas-graph.js';
+import { atlasCanvasSize, atlasFitArea, atlasFitViewport, atlasGraphHeight, atlasInteractionEdges, directRelationIds, directVisualNodeIds, edgeGeometry, edgePath, layoutAtlas, projectAtlas, summarizeAtlas, type PositionedAtlasNode } from '../web/src/pages/TeamAtlasPage/atlas-graph.js';
 import type { TeamAtlasEdge } from '../web/src/lib/api/team-atlas.js';
 import type { TeamAtlasIR, TeamAtlasNode } from '../web/src/lib/api/team-atlas.js';
 
@@ -243,6 +243,15 @@ describe('Team Atlas projection and layout', () => {
   });
 
   it('fits fullscreen content to the Canvas client box after classic scrollbars take space', () => {
+    expect(atlasGraphHeight(838, 920, true)).toBe(920);
+    expect(atlasGraphHeight(1062, 920, true)).toBe(1062);
+    expect(atlasGraphHeight(838, 920, false)).toBe(838);
+    const fitted = atlasFitViewport({ areaWidth: 1516, areaHeight: 926, contentWidth: 1120, contentHeight: 766, viewScale: 1 });
+    expect(fitted.zoom).toBeCloseTo(898 / 766);
+    expect(fitted.zoom).toBeGreaterThan(1);
+    expect(fitted.paddingY).toBeCloseTo(14);
+    expect(fitted.paddingX).toBeGreaterThan(14);
+    expect(atlasFitViewport({ areaWidth: 1516, areaHeight: 926, contentWidth: 200, contentHeight: 100, viewScale: 1 }).zoom).toBe(1.6);
     expect(atlasFitArea({ canvasWidth: 889, canvasHeight: 909, viewportHeight: 926, canvasTop: 0, fullscreen: true }))
       .toEqual({ width: 889, height: 909 });
     expect(atlasFitArea({ canvasWidth: 640, canvasHeight: 774, viewportHeight: 710, canvasTop: 320, fullscreen: false }))
