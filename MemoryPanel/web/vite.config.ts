@@ -36,9 +36,23 @@ export default defineConfig({
   build: {
     outDir: 'dist',
     emptyOutDir: true,
+    // tea-component must stay in one chunk because its barrel exports contain
+    // internal cycles. Its current 1.07 MB minified / 228 KB gzip vendor chunk
+    // is intentional; keep the warning threshold just above that baseline.
+    chunkSizeWarningLimit: 1100,
     rollupOptions: {
       input: {
         main: resolve(__dirname, 'index.html'),
+      },
+      output: {
+        manualChunks(id) {
+          if (
+            id.includes('/node_modules/tea-component/') ||
+            id.includes('/node_modules/tea-icons-react/')
+          ) {
+            return 'vendor-tea';
+          }
+        },
       },
     },
   },

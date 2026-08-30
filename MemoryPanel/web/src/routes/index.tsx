@@ -6,32 +6,52 @@
  */
 import { createHashRouter, type RouteObject } from 'react-router-dom';
 import { ConsoleLayout } from '@/layouts/ConsoleLayout';
-import { WorkbenchPage } from '@/pages/WorkbenchPage';
-import { WikiPage } from '@/pages/WikiPage';
-import { CodePage } from '@/pages/CodePage';
-import { SkillsPage } from '@/pages/SkillsPage';
-import { ChatMemoryPage } from '@/pages/ChatMemoryPage';
-import { MembersPage } from '@/pages/MembersPage';
-import { AgentsPage } from '@/pages/AgentsPage';
-import { ApiKeysPage } from '@/pages/ApiKeysPage';
-import { GuidePage } from '@/pages/GuidePage';
-import { TeamAtlasPage } from '@/pages/TeamAtlasPage';
 
 export const routes: RouteObject[] = [
   {
     path: '/',
     element: <ConsoleLayout />,
     children: [
-      { index: true, element: <WorkbenchPage /> },
-      { path: 'atlas', element: <TeamAtlasPage /> },
-      { path: 'wiki', element: <WikiPage /> },
-      { path: 'code', element: <CodePage /> },
-      { path: 'skills', element: <SkillsPage /> },
-      { path: 'memory', element: <ChatMemoryPage /> },
-      { path: 'team/members', element: <MembersPage /> },
-      { path: 'team/agents', element: <AgentsPage /> },
-      { path: 'team/api-keys', element: <ApiKeysPage /> },
-      { path: 'guide', element: <GuidePage /> },
+      {
+        index: true,
+        lazy: async () => ({ Component: (await import('@/pages/WorkbenchPage')).WorkbenchPage }),
+      },
+      {
+        path: 'atlas',
+        lazy: async () => ({ Component: (await import('@/pages/TeamAtlasPage')).TeamAtlasPage }),
+      },
+      {
+        path: 'wiki',
+        lazy: async () => ({ Component: (await import('@/pages/WikiPage')).WikiPage }),
+      },
+      {
+        path: 'code',
+        lazy: async () => ({ Component: (await import('@/pages/CodePage')).CodePage }),
+      },
+      {
+        path: 'skills',
+        lazy: async () => ({ Component: (await import('@/pages/SkillsPage')).SkillsPage }),
+      },
+      {
+        path: 'memory',
+        lazy: async () => ({ Component: (await import('@/pages/ChatMemoryPage')).ChatMemoryPage }),
+      },
+      {
+        path: 'team/members',
+        lazy: async () => ({ Component: (await import('@/pages/MembersPage')).MembersPage }),
+      },
+      {
+        path: 'team/agents',
+        lazy: async () => ({ Component: (await import('@/pages/AgentsPage')).AgentsPage }),
+      },
+      {
+        path: 'team/api-keys',
+        lazy: async () => ({ Component: (await import('@/pages/ApiKeysPage')).ApiKeysPage }),
+      },
+      {
+        path: 'guide',
+        lazy: async () => ({ Component: (await import('@/pages/GuidePage')).GuidePage }),
+      },
     ],
   },
 ];
