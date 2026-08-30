@@ -212,7 +212,7 @@ function pendingKeyOf(resolved: ResolvedSession, agentSource: string, sessionKey
 
 /**
  * 执行 create：调 kernel createTask，然后绑定 session。
- * agent_id 会尝试从 sessionInfo 取；缺就不传（由 kernel 决定）。
+ * 当前 agent_id 会按 Core taskCreateSchema 的 linked_agents 结构传递；缺失则不关联。
  */
 async function doCreateAndBind(
   resolved: ResolvedSession,
@@ -228,7 +228,9 @@ async function doCreateAndBind(
       creator_user_id: resolved.userId,
       title,
       description,
-      ...(resolved.sessionInfo.agent_id ? { agent_id: resolved.sessionInfo.agent_id } : {}),
+      ...(resolved.sessionInfo.agent_id
+        ? { linked_agents: [{ agent_id: resolved.sessionInfo.agent_id }] }
+        : {}),
     });
   } catch (err) {
     return { ok: false, error: `metadata createTask failed: ${err instanceof Error ? err.message : String(err)}` };

@@ -94,13 +94,11 @@ export interface CreateTaskInput {
   description?: string;
   status?: string;
   source_type?: string;
-  /** 可选：由调用方指定 task_id；缺省时内核自动生成。mem 命令族不传，交给内核生成。 */
-  task_id?: string;
   /**
-   * 可选：关联的 Agent。TAPD 需求：mem:create-task 需要"关联当前 Agent"。
-   * 内核会把它写进 task 的 agent_ids 或元数据字段（具体行为由内核决定，proxy 只透传）。
+   * 可选：创建 Task 时原子写入的 Agent 关联。
+   * 字段与 Core taskCreateSchema 保持一致，避免未知字段被 Zod 静默剥离。
    */
-  agent_id?: string;
+  linked_agents?: Array<{ agent_id: string; role_in_task?: string }>;
 }
 
 /**
@@ -317,8 +315,7 @@ export class MetadataClient {
     if (input.description !== undefined) body.description = input.description;
     if (input.status !== undefined) body.status = input.status;
     if (input.source_type !== undefined) body.source_type = input.source_type;
-    if (input.task_id !== undefined) body.task_id = input.task_id;
-    if (input.agent_id !== undefined) body.agent_id = input.agent_id;
+    if (input.linked_agents !== undefined) body.linked_agents = input.linked_agents;
     return this.fetch<TaskEntity>("/v3/meta/task/create", body);
   }
 
