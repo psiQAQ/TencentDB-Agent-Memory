@@ -464,19 +464,19 @@ export async function handleCodexEndpoint(
   // 本 handler 返一次 Plan 模式提示；后续同 session 请求 bypass 稳态透传。
   if (config.sessionInit?.enabled && sessionId) {
     try {
-      const { getSessionStore, handleSessionInit, parsePresetIdentity } = await import("./session/index.js");
+      const { getSessionStore, handleSessionInit, parsePresetIdentity, sessionStoreKey } = await import("./session/index.js");
       const { getMetadataClient } = await import("./meta/client.js");
       const store = getSessionStore();
       const metadataClient = getMetadataClient(config.coreSkill, spaceId, apiKey);
       const presetIdentity = parsePresetIdentity(config.sessionInit, headers);
 
-      const compositeKey = `${agentSource}:${sessionKey}`;
       const identity = {
         userId: userId || "anonymous",
         agentSource,
         sessionId: sessionKey,
         spaceId,
       };
+      const compositeKey = sessionStoreKey(identity);
       const recovered = await store.getOrRecover(compositeKey, identity, {
         metadataClient,
         // Codex doesn't use messages[] — pass empty for recovery.

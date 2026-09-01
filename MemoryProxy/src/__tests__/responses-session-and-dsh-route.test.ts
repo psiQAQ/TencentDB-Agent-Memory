@@ -4,10 +4,16 @@ import { initAuth } from "../auth.js";
 import { extractCodexSessionId } from "../codexHandler.js";
 import { DEFAULT_CONFIG } from "../config.js";
 import { createApp } from "../server.js";
+import {
+  __resetSessionStoreForTests,
+  getSessionStore,
+  sessionStoreKey,
+} from "../session/store.js";
 import { extractWorkbuddySessionId } from "../workbuddyHandler.js";
 
 afterEach(() => {
   initAuth(DEFAULT_CONFIG.auth);
+  __resetSessionStoreForTests();
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
 });
@@ -25,6 +31,72 @@ describe("Responses session binding and DSH legacy route", () => {
       { "x-conversation-id": "explicit-session", "session-id": "sdk-session" },
       { client_metadata: { session_id: "body-session" } },
     )).toBe("explicit-session");
+  });
+
+  it("uses the collision-safe identity key for Codex session recovery", async () => {
+    const store = getSessionStore();
+    const getOrRecover = vi.spyOn(store, "getOrRecover").mockResolvedValue({
+      status: "initialized",
+      keyId: "explicit-session",
+      startedAt: 1,
+      attemptCount: 0,
+      userId: "anonymous",
+      sessionInfo: {
+        session_id: "explicit-session",
+        user_id: "anonymous",
+        space_id: "space-1",
+        team_id: "team-1",
+        agent_id: "agent-1",
+      },
+    });
+    vi.stubGlobal("fetch", vi.fn(async () => Response.json({
+      id: "response-safe",
+      output: [],
+      usage: {},
+    })));
+    const config = structuredClone(DEFAULT_CONFIG);
+    config.upstream.url = "https://upstream.invalid/v1";
+    config.upstream.apiKey = "server-key";
+    config.upstream.agents.codex = { url: "https://upstream.invalid/v1" };
+    config.sessionInit.enabled = true;
+    config.injection.enabled = false;
+    config.extraction = { enabled: false, extractors: [] };
+    config.creditReport.url = "";
+    config.log.backend = "noop";
+
+    const response = await createApp(config).request(
+      "http://proxy/codex/space-1/v1/responses",
+      {
+        method: "POST",
+        headers: {
+          authorization: "Bearer client-key",
+          "content-type": "application/json",
+          "x-conversation-id": "explicit-session",
+        },
+        body: JSON.stringify({
+          model: "test-model",
+          stream: false,
+          input: [{ type: "message", role: "user", content: "hello" }],
+        }),
+      },
+    );
+
+    expect(response.status).toBe(200);
+    expect(getOrRecover).toHaveBeenCalledWith(
+      sessionStoreKey({
+        spaceId: "space-1",
+        userId: "anonymous",
+        agentSource: "codex",
+        sessionId: "explicit-session",
+      }),
+      expect.objectContaining({
+        spaceId: "space-1",
+        userId: "anonymous",
+        agentSource: "codex",
+        sessionId: "explicit-session",
+      }),
+      expect.any(Object),
+    );
   });
 
   it("normalizes the documented DSH bare route to the OpenAI upstream endpoint", async () => {
