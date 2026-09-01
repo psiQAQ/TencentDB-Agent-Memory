@@ -101,8 +101,6 @@
 | POST | `/api/v1/chat-memory/search` | 分层关键词检索（L0/L1） |
 | POST | `/api/v1/task/list-with-agents` | Task 列表聚合（含 linked agents） |
 | POST | `/api/v1/agent-overview/bootstrap` | Agent 概览引导数据聚合 |
-| POST | `/api/v1/topology/bootstrap` | Team Atlas 可见拓扑聚合 |
-| POST | `/api/v1/chat-memory/status` | Chat Memory 四层数量状态（不返回正文） |
 | POST | `/api/v1/agent/delete-cascade` | 删除 Agent（级联清 skill 后 archive） |
 | POST | `/api/v1/knowledge/wiki/*` | Wiki 知识库业务路由（14 个，见 §3.8） |
 | POST | `/api/v1/knowledge/code-graph/*` | Code-Graph 业务路由（8 个，见 §3.9） |
@@ -1223,61 +1221,6 @@ KS → Panel 的 S2S 状态回调（ingest/sync 完成或进度更新）。**无
 
 ---
 
-## 3.13 Team Atlas
-
-### POST /topology/bootstrap
-
-一次聚合当前用户可见的 Team、Task、Agent、四类 Asset 及其关系。请求省略
-`team_ids` 时返回全部可见 Team；显式指定时，每个 Team 都必须可见，否则返回
-`403 TEAM_NOT_VISIBLE`。
-
-**请求体**
-
-```json
-{ "team_ids": ["team-1", "team-2"] }
-```
-
-**响应 `data`**
-
-| 字段 | 类型 | 说明 |
-|---|---|---|
-| `schema_version` | `1` | IR 契约版本 |
-| `scope` | object | caller `user_id` 与实际 Team 范围 |
-| `completeness` | `complete \| partial` | 子数据源失败时为 `partial` |
-| `summary` | object | Team、Task、Agent、Asset、Edge、Warning 数量 |
-| `nodes` | array | `identity/team/task/agent/skill/llm_wiki/code_graph/chat_memory` |
-| `edges` | array | `member_of/contains/assigned_to/owns/fixed_binding` |
-| `warnings` | array | 缺失关系告警或 `SOURCE_PARTIAL` |
-
-节点 ID 使用 `<type>:<entity_id>` 命名空间。资产必须来自 caller 的
-`asset/list-accessible(action=read)` 结果；响应不会生成指向不可见节点的边。子数据源失败
-时保留已确认数据，并且不会把未知状态推断成“空”。
-
-### POST /chat-memory/status
-
-按与 `/chat-memory/layer` 相同的 ACL 读取系统 Chat Memory 的 L0/L1/L2/L3 数量，
-不返回任何记忆正文。
-
-**请求体**：`{ block_id: string }`
-
-**响应 `data`**
-
-```json
-{
-  "block_id": "chat_memory-team-1-agt-1",
-  "checked_at": "2026-08-28T00:00:00.000Z",
-  "availability": "partial",
-  "layer_counts": { "L0_messages": 12, "L1": null, "L2": 2, "L3": 1 },
-  "unavailable_layers": ["L1"]
-}
-```
-
-- 单层查询失败返回 `null`，不能解释为零。
-- 手动创建且没有 Agent 数据面的 `mem-*` 返回 `not_applicable`。
-- `availability` 取值：`complete`、`partial`、`unavailable`、`not_applicable`。
-
----
-
 ## 4. 附录
 
 ### 4.1 废弃接口
@@ -1306,7 +1249,6 @@ KS → Panel 的 S2S 状态回调（ingest/sync 完成或进度更新）。**无
 | 400 | MISSING_USER_KEY | 缺 `x-tdai-user-key` |
 | 401 | INVALID_USER_KEY | user_key 无效（auth/verify 失败） |
 | 403 | NOT_TEAM_MEMBER | 非团队成员 |
-| 403 | TEAM_NOT_VISIBLE | Team Atlas 请求包含不可见 Team |
 | 403 | FORBIDDEN | 无资源访问权限 |
 | 404 | KNOWLEDGE_NOT_FOUND | 知识资源不存在 |
 | 500 | INTERNAL | 未捕获异常 |
