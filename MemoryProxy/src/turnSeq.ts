@@ -1,8 +1,8 @@
 /**
  * Turn 序号计数 —— 宿主侧无状态推导。
  *
- * 一个 trace = 一个 turn（一次用户输入）。一个 turn 内的工具循环会产生多次 upstream
- * 请求，它们必须算出**相同**的 turn 序号，才能在 Langfuse 中归并到同一个 trace。
+ * turnSeq 只用于进程内顺序与分类。一个 turn 内的工具循环可能产生多次
+ * upstream 请求，它们可以算出相同的 turnSeq，但每个 HTTP 请求仍使用独立的随机 traceId。
  *
  * 由于宿主侧没有逐请求的持久状态（turn 计数器在私有模块内部，不对外
  * 暴露逐 turn 序号），这里直接从 `messages` 历史推导：统计消息序列里"人类输入轮次"的
@@ -11,11 +11,11 @@
  *     纯 tool_result / 纯 system-reminder 是工具循环延续。
  *   - OpenAI：role=user 且含非 <system-reminder> 文本为人类输入；role=tool 是工具循环。
  *
- * 因此：一个 turn 的首次请求与其后续工具循环请求，因为"人类轮次数"相同，turnSeq 一致。
- * 下一个 turn 的请求会多出一条人类输入 → turnSeq +1 → 新 trace。
+ * 因此：一个 turn 的首次请求与其后续工具循环请求，turnSeq 可以一致；
+ * 下一个 turn 的请求会多出一条人类输入而 turnSeq +1。这不提供跨请求 trace 分组。
  *
  * 注意：依赖客户端发送完整历史（Claude Code / CodeBuddy 均如此）。若客户端截断历史，
- * turnSeq 可能偏移，但同一 turn 内仍保持一致（只是绝对值漂移），不影响"同 turn 归一 trace"。
+ * turnSeq 可能偏移，但同一 turn 内仍可保持一致（只是绝对值漂移）。
  */
 
 /** 判断单条 user 消息内容是否为人类输入（非工具循环延续）。 */

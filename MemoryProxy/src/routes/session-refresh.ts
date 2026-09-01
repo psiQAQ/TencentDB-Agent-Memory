@@ -7,21 +7,24 @@
  *
  * 两种使用方式：
  *   1. 函数调用（mem:sync 内部用）— import refreshSessionCache()
- *   2. HTTP 接口（面板前端用）— createSessionRefreshHandler() 注册路由
+ *   2. HTTP 路由保留，但在没有可信 user-scoped lookup 前始终 fail-closed
  */
 
 import type { Context } from "hono";
 import type { ProxyConfig } from "../types.js";
-import { getSessionStore } from "../session/store.js";
+import { getSessionStore, sessionStoreKey } from "../session/store.js";
 import { prewarmFromConfig } from "../injection/index.js";
 import type { SessionInitState, AgentDetail, TaskDetail } from "../session/types.js";
 import { getMetadataClient } from "../meta/client.js";
+import { adminAuthError, checkAdminAuth } from "./admin-auth.js";
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
 export interface RefreshInput {
   sessionKey: string;
   agentSource: string;
+  /** Trusted user id already resolved by the main handler's key verification. */
+  userId: string;
   config: ProxyConfig;
   spaceId: string;
   callerUserKey?: string;
@@ -54,9 +57,15 @@ async function refreshAgentTaskDetail(
   config: ProxyConfig,
   spaceIdFromCaller: string,
   callerUserKey: string | undefined,
-): Promise<{ agentRefreshed: boolean; taskRefreshed: boolean }> {
+): Promise<{
+  agentRefreshed: boolean;
+  taskRefreshed: boolean;
+  invalidated: boolean;
+}> {
   const sessionInfo = state.sessionInfo;
-  if (!sessionInfo) return { agentRefreshed: false, taskRefreshed: false };
+  if (!sessionInfo) {
+    return { agentRefreshed: false, taskRefreshed: false, invalidated: true };
+  }
 
   // ServiceId (space) 取自 sessionInfo；调用方传入的 spaceId 作为兜底。
   const serviceId = sessionInfo.space_id || spaceIdFromCaller || "";
@@ -65,7 +74,7 @@ async function refreshAgentTaskDetail(
 
   if (!serviceId || !userKey || !config.coreSkill?.endpoint) {
     // 缺少 kernel 调用要素 → 直接跳过 detail 刷新，不视为错误。
-    return { agentRefreshed: false, taskRefreshed: false };
+    return { agentRefreshed: false, taskRefreshed: false, invalidated: false };
   }
 
   const client = getMetadataClient(config.coreSkill, serviceId, userKey);
@@ -92,6 +101,12 @@ async function refreshAgentTaskDetail(
       : Promise.resolve(null as TaskDetail | null),
   ]);
 
+  // Metadata lookup yields. Do not let an older refresh write across a
+  // delete/replacement that changed authoritative session visibility.
+  if (getSessionStore().get(compositeKey) !== state) {
+    return { agentRefreshed: false, taskRefreshed: false, invalidated: true };
+  }
+
   let agentRefreshed = false;
   let taskRefreshed = false;
   let nextAgent: AgentDetail | null | undefined = state.agentDetail;
@@ -102,8 +117,7 @@ async function refreshAgentTaskDetail(
     agentRefreshed = true;
   } else if (agentRes.status === "rejected") {
     console.warn(
-      `[session-refresh] getAgent failed for ${compositeKey}: ` +
-        (agentRes.reason instanceof Error ? agentRes.reason.message : String(agentRes.reason)),
+      "[session-refresh] getAgent failed",
     );
   }
 
@@ -112,8 +126,7 @@ async function refreshAgentTaskDetail(
     taskRefreshed = true;
   } else if (taskRes.status === "rejected") {
     console.warn(
-      `[session-refresh] getTask failed for ${compositeKey}: ` +
-        (taskRes.reason instanceof Error ? taskRes.reason.message : String(taskRes.reason)),
+      "[session-refresh] getTask failed",
     );
   }
 
@@ -125,15 +138,15 @@ async function refreshAgentTaskDetail(
     };
     try {
       await getSessionStore().set(compositeKey, nextState);
-    } catch (err) {
+    } catch {
       console.warn(
-        `[session-refresh] store.set failed for ${compositeKey}: ` +
-          (err instanceof Error ? err.message : String(err)),
+        "[session-refresh] store.set failed",
       );
+      return { agentRefreshed: false, taskRefreshed: false, invalidated: true };
     }
   }
 
-  return { agentRefreshed, taskRefreshed };
+  return { agentRefreshed, taskRefreshed, invalidated: false };
 }
 
 /**
@@ -143,19 +156,19 @@ async function refreshAgentTaskDetail(
  * 构建 PrewarmInput → 调用 prewarmFromConfig()
  */
 export async function refreshSessionCache(input: RefreshInput): Promise<RefreshResult> {
-  const { sessionKey, agentSource, config, spaceId, callerUserKey } = input;
+  const { sessionKey, agentSource, userId, config, spaceId, callerUserKey } = input;
 
   // 参数校验
-  if (!sessionKey) {
+  if (!sessionKey || !userId || !spaceId) {
     return {
       success: false, refreshed: [], skipped: [],
       agentRefreshed: false, taskRefreshed: false,
-      tookMs: 0, error: "session_key is required",
+      tookMs: 0, error: "trusted session identity is required",
     };
   }
 
   // 从 SessionStore 取 session 状态
-  const compositeKey = `${agentSource}:${sessionKey}`;
+  const compositeKey = sessionStoreKey({ userId, agentSource, sessionId: sessionKey, spaceId });
   const store = getSessionStore();
   const state: SessionInitState | undefined = store.get(compositeKey);
 
@@ -175,16 +188,38 @@ export async function refreshSessionCache(input: RefreshInput): Promise<RefreshR
     };
   }
 
+  if (
+    state.sessionInfo.user_id !== userId
+    || (state.userId && state.userId !== userId)
+    || state.sessionInfo.session_id !== sessionKey
+    || (state.keyId && state.keyId !== sessionKey)
+    || state.sessionInfo.space_id !== spaceId
+  ) {
+    return {
+      success: false, refreshed: [], skipped: [],
+      agentRefreshed: false, taskRefreshed: false,
+      tookMs: 0, error: "Session identity mismatch",
+    };
+  }
+
   const t0 = Date.now();
 
   // Step 1: 尝试重拉 agent/task detail 并覆写 SessionStore。
   //         失败不阻断 hook 缓存刷新，只是最终返回值里 agentRefreshed/taskRefreshed 为 false。
-  const { agentRefreshed, taskRefreshed } = await refreshAgentTaskDetail(
+  const detailResult = await refreshAgentTaskDetail(
     state, compositeKey, config, spaceId, callerUserKey,
   );
 
   // Step 2: 用最新 state 里的 agent/task detail 构造 PrewarmInput。
-  const latestState = store.get(compositeKey) ?? state;
+  const latestState = store.get(compositeKey);
+  if (detailResult.invalidated || !latestState || !latestState.sessionInfo) {
+    return {
+      success: false, refreshed: [], skipped: [],
+      agentRefreshed: false, taskRefreshed: false,
+      tookMs: Date.now() - t0, error: "Session changed while refresh was running",
+    };
+  }
+  const { agentRefreshed, taskRefreshed } = detailResult;
   const sessionInfo = latestState.sessionInfo!;
   const agentDetail = latestState.agentDetail ?? null;
   const taskDetail = latestState.taskDetail ?? null;
@@ -193,7 +228,7 @@ export async function refreshSessionCache(input: RefreshInput): Promise<RefreshR
     const result = await prewarmFromConfig(
       config,
       {
-        keyId: compositeKey,
+        keyId: sessionKey,
         userId: sessionInfo.user_id || "anonymous",
         agentSource,
         spaceId,
@@ -233,49 +268,27 @@ export async function refreshSessionCache(input: RefreshInput): Promise<RefreshR
 // ── HTTP Handler ───────────────────────────────────────────────────────────
 
 /**
- * 创建 HTTP handler，注册到 server.ts。
- * 走 admin auth 鉴权（复用 admin-auth.ts 的模式）。
+ * Admin auth can authenticate an operator but cannot safely select a
+ * user-scoped session. Keep the route fail-closed until such a lookup exists.
  */
 export function createSessionRefreshHandler(config: ProxyConfig) {
   return async (c: Context): Promise<Response> => {
-    let body: Record<string, unknown>;
-    try {
-      body = await c.req.json<Record<string, unknown>>();
-    } catch {
-      return c.json({ code: 40001, message: "Invalid JSON body", request_id: `refresh-${Date.now()}` }, 400);
+    const adminKey = config.admin.apiKey.trim();
+    if (!adminKey) {
+      return c.json({
+        code: 50301,
+        message: "Session refresh HTTP endpoint requires a configured admin credential",
+        request_id: `refresh-${Date.now()}`,
+      }, 503);
     }
-
-    const sessionKey = typeof body.session_key === "string" ? body.session_key : "";
-    const agentSource = typeof body.agent_source === "string" ? body.agent_source : "claude-code";
-    const callerUserKey = typeof body.user_key === "string" ? body.user_key : undefined;
-    const spaceId = typeof body.space_id === "string" ? body.space_id : "";
-
-    const result = await refreshSessionCache({
-      sessionKey,
-      agentSource,
-      config,
-      spaceId,
-      callerUserKey,
-    });
-
-    const requestId = `refresh-${Date.now()}`;
-
-    if (!result.success) {
-      const status = result.error?.includes("not found") ? 404 : 400;
-      return c.json({ code: status === 404 ? 40401 : 40001, message: result.error, request_id: requestId }, status);
+    const authResult = checkAdminAuth(c, adminKey);
+    if (authResult !== "ok") {
+      return adminAuthError(c, authResult);
     }
-
     return c.json({
-      code: 0,
-      message: "ok",
-      request_id: requestId,
-      data: {
-        refreshed: result.refreshed,
-        skipped: result.skipped,
-        agent_refreshed: result.agentRefreshed,
-        task_refreshed: result.taskRefreshed,
-        took_ms: result.tookMs,
-      },
-    });
+      code: 50101,
+      message: "Secure user-scoped session lookup is unavailable over HTTP; use the authenticated mem:sync command",
+      request_id: `refresh-${Date.now()}`,
+    }, 501);
   };
 }

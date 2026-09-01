@@ -365,8 +365,8 @@ export class KnowledgeToolsInjector implements InjectionHook {
           cacheKey: `knowledge-tools-injector:${scope}`,
         },
       }];
-    } catch (err) {
-      console.warn(`${TAG} ${phase} failed: ${(err as Error).message}`);
+    } catch {
+      console.warn(`${TAG} phase=${phase} failed category=upstream_error`);
       return [];
     }
   }

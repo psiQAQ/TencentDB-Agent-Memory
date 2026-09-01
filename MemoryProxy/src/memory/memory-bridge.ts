@@ -21,15 +21,25 @@
  */
 
 import type { Context } from "hono";
-import { buildBridgeSessionKeyCandidates } from "../session/bridge-key-candidates.js";
-import { getSessionStore } from "../session/store.js";
-import type { BindingRepo } from "../db/binding-repo.js";
+import { extractBearerToken } from "../opik.js";
+import {
+  getSessionStore,
+  SessionContextUnavailableError,
+  SessionIdentityConflictError,
+  SessionStoreUnavailableError,
+  sessionStoreKey,
+  type SessionIdentity,
+} from "../session/store.js";
+import { resolveConversationId } from "../session/session-key.js";
+import { verifyUserKey, isAuthEnabled } from "../auth.js";
 import type { ProxyConfig } from "../types.js";
 import { getMetadataClient } from "../meta/client.js";
 import type { AgentContext } from "../injection/types.js";
 import { resolveFixedAssetCtxs, type FixedAssetCtx } from "../injection/injectors/tdai-fixed-asset.js";
 import type { TdaiIdentity } from "../tdai/types.js";
-import { emitBridgeToolCallTelemetry, emitBridgeRejectTelemetry, agentSourceFromSessionKey } from "./bridge-telemetry.js";
+import { assertAgentSource } from "../storage/key-utils.js";
+import { isRegisteredAgentSource } from "../agent-adapters/index.js";
+import { emitBridgeToolCallTelemetry } from "./bridge-telemetry.js";
 import { taskIdForSearchTarget } from "./search-scope.js";
 
 const TAG = "[memory-bridge]";
@@ -60,7 +70,6 @@ interface SessionIdFields {
   agent_id: string;
   session_id: string;
   task_id?: string;
-  user_key?: string;
   /**
    * Kernel tenant/instance ID for `x-tdai-service-id`. Extracted from
    * `SessionInfo.space_id`（原本来自请求路径 `/{agent}/{spaceId}/...`）。
@@ -68,110 +77,73 @@ interface SessionIdFields {
    * `config.coreSkill.serviceId` 只作为老 session（迁移前缓存）的兜底。
    */
   space_id?: string;
-  /**
-   * Composite key actually used to load state from SessionStore
-   * (`${agentSource}:${sessionId}`). 用于埋点侧对齐 session_init_logs 的
-   * session_key —— 埋点不能猜前缀，必须用真实命中的 key。
-   */
-  composite_key?: string;
-}
-
-/**
- * curl 模板固定 2 header:
- *   - x-conversation-id → sessionId
- *   - x-tdai-service-id → spaceId
- *
- * 不再吃 Authorization。见 docs/design/2026-08-03-binding-flatten.md。
- */
-function deriveSessionId(c: Context): string | null {
-  return (
-    c.req.header("x-conversation-id") ??
-    c.req.header("x-session-id") ??
-    c.req.header("x-chat-id") ??
-    c.req.header("x-thread-id") ??
-    c.req.header("x-claude-code-session-id") ??
-    null
-  );
 }
 
 function toIdFields(
   state: import("../session/types.js").SessionInitState | undefined,
-  compositeKey: string,
+  identity: SessionIdentity,
 ): SessionIdFields | null {
-  if (!state || state.status !== "initialized" || !state.sessionInfo) return null;
+  if (
+    !state
+    || state.status !== "initialized"
+    || state.contextSuppressed
+    || !state.sessionInfo
+  ) return null;
   const s = state.sessionInfo;
   if (!s.user_id || !s.team_id || !s.agent_id || !s.session_id) return null;
+  if (
+    s.user_id !== identity.userId
+    || (state.userId && state.userId !== identity.userId)
+    || (state.keyId && state.keyId !== identity.sessionId)
+    || s.session_id !== identity.sessionId
+    || (s.space_id && s.space_id !== identity.spaceId)
+  ) {
+    return null;
+  }
   return {
     user_id: s.user_id,
     team_id: s.team_id,
     agent_id: s.agent_id,
     session_id: s.session_id,
     task_id: s.task_id,
-    user_key: s.user_key,
-    space_id: s.space_id,
-    composite_key: compositeKey,
-  };
-}
-
-function bindingToIdFields(
-  binding: import("../db/binding-repo.js").SessionBinding,
-  spaceId: string,
-  sessionId: string,
-): SessionIdFields | null {
-  if (binding.outcome !== "initialized") return null;
-  if (!binding.userId || !binding.teamId || !binding.agentId) return null;
-  const agentSource = binding.agentSource || "claude-code";
-  return {
-    user_id: binding.userId,
-    team_id: binding.teamId,
-    agent_id: binding.agentId,
-    session_id: sessionId,
-    task_id: binding.taskId,
-    user_key: binding.userKey,
-    space_id: spaceId,
-    composite_key: `${agentSource}:${sessionId}`,
+    space_id: identity.spaceId,
   };
 }
 
 /**
- * L1 fast path — try in-memory Map with prefix fallback.
- * Returns null on miss (caller decides whether to probe L2).
- */
-function loadSessionIdsL1(sessionId: string): SessionIdFields | null {
-  // handler 层存的 L1 key 形如 `${agentSource}:${sessionId}`; curl 拿到的
-  // 通常是 bare sessionId。按候选前缀顺序探,命中即返回。
-  const candidates = buildBridgeSessionKeyCandidates(sessionId);
-  for (const k of candidates) {
-    const state = getSessionStore().get(k);
-    if (state) {
-      const fields = toIdFields(state, k);
-      if (fields) return fields;
-    }
-  }
-  return null;
-}
-
-/**
- * L2 fallthrough —— 拍平后只吃 (spaceId, sessionId)。见
- * docs/design/2026-08-03-binding-flatten.md。
+ * Resolve an authenticated, identity-scoped session through L1/L2.
  *
- * 不再走 verifyUserKey + getOrRecover 4 段路径:
- *   1) bridge curl 模板没塞 bearer,verify 拿不到 userId
- *   2) 拍平后 binding.json 里已经存了 user_id/team_id/agent_id/agent_source/user_key,
- *      单次 GET 直接凑齐 IdFields
+ * 这是 §6.1 修复：跨 pod 部署时，LLM 手中 curl 走 gateway，gateway 路由到
+ * 与 sessionInit 不同的 pod → L1 miss → 401。加了这一层后，跨 pod 也能
+ * 从共享 COS 里恢复 session 状态。
+ *
+ * 代价：每个 bridge 调用多一次 auth/verify roundtrip（~50ms）。这是读取 L1
+ * victim identity 前必须支付的安全边界；same-user L1 hit 仍不访问持久层。
  */
-async function loadSessionIdsL2(
-  bindingRepo: BindingRepo | null,
-  spaceId: string,
-  sessionId: string,
+async function loadSessionIds(
+  config: ProxyConfig,
+  userKey: string,
+  identity: SessionIdentity,
 ): Promise<SessionIdFields | null> {
-  if (!bindingRepo) return null;
   try {
-    const binding = await bindingRepo.getBinding(spaceId, sessionId);
-    if (!binding) return null;
-    return bindingToIdFields(binding, spaceId, sessionId);
+    const metadataClient = getMetadataClient(
+      config.coreSkill,
+      identity.spaceId ?? "",
+      userKey,
+    );
+    const recovered = await getSessionStore().getOrRecover(
+      sessionStoreKey(identity),
+      identity,
+      { metadataClient },
+    );
+    return toIdFields(recovered, identity);
   } catch (err) {
-    console.warn(`${TAG} L2 getBinding error space=${spaceId} sid=${sessionId}: ${(err as Error).message}`);
+    if (
+      err instanceof SessionIdentityConflictError
+      || err instanceof SessionContextUnavailableError
+      || err instanceof SessionStoreUnavailableError
+    ) throw err;
+    console.warn(`${TAG} session recovery failed`);
     return null;
   }
 }
@@ -193,18 +165,22 @@ function selfCtx(ids: SessionIdFields): FixedAssetCtx {
   return { teamId: ids.team_id, userId: ids.user_id, agentId: ids.agent_id, agentName: ids.agent_id, isSelf: true };
 }
 
-async function resolveMemoryCtxs(config: ProxyConfig, ids: SessionIdFields, sessionKey: string): Promise<FixedAssetCtx[]> {
-  if (!ids.user_key) return [selfCtx(ids)];
+async function resolveMemoryCtxs(
+  config: ProxyConfig,
+  ids: SessionIdFields,
+  sessionKey: string,
+  userKey: string,
+  spaceId: string,
+): Promise<FixedAssetCtx[]> {
   try {
-    const serviceId = ids.space_id || config.tdai?.serviceId || config.coreSkill.serviceId;
-    const metadataClient = getMetadataClient(config.coreSkill, serviceId, ids.user_key);
+    const metadataClient = getMetadataClient(config.coreSkill, spaceId, userKey);
     const identity: TdaiIdentity = {
       teamId: ids.team_id,
       userId: ids.user_id,
       agentId: ids.agent_id,
       sessionId: ids.session_id,
       taskId: ids.task_id,
-      userKey: ids.user_key,
+      userKey,
     };
     const fakeCtx: AgentContext = {
       messages: [],
@@ -217,12 +193,12 @@ async function resolveMemoryCtxs(config: ProxyConfig, ids: SessionIdFields, sess
         modelId: "memory-bridge",
         stream: false,
         agentSource: "memory-bridge",
-        custom: { session: ids, userKey: ids.user_key },
+        custom: { session: ids, userKey },
       },
     };
     return await resolveFixedAssetCtxs(fakeCtx, identity, metadataClient);
-  } catch (err) {
-    console.warn(`${TAG} fixed asset ctx resolve failed: ${(err as Error).message}`);
+  } catch {
+    console.warn(`${TAG} fixed asset ctx resolve failed`);
     return [selfCtx(ids)];
   }
 }
@@ -258,68 +234,59 @@ export function createMemoryBridgeHandler(
 
     const path = new URL(c.req.url).pathname;
     const sub = extractSubpath(path);
-    // 前置校验早退埋点: 每个 return 前落一条 reject_reason 非空的 bridge_call, 与 skill-bridge 对称。
     if (!sub) {
-      emitBridgeRejectTelemetry({
-        sessionKey: "", bridgeSource: "memory-bridge",
-        rejectReason: "unknown_path", httpStatus: 404,
-      });
-      return envelope(40401, `${TAG} unknown path ${path}`, 404);
+      console.warn(`${TAG} request rejected reason=unknown_path`);
+      return envelope(40401, `${TAG} unknown path`, 404);
     }
     if (!ALLOWED_SUBPATHS.has(sub)) {
-      emitBridgeRejectTelemetry({
-        sessionKey: "", bridgeSource: "memory-bridge",
-        rejectReason: "subpath_forbidden", httpStatus: 403,
-        executedEndpoint: sub,
-      });
-      return envelope(40301, `${TAG} subpath '${sub}' not allowed via bridge`, 403);
+      console.warn(`${TAG} request rejected reason=subpath_not_allowed`);
+      return envelope(40301, `${TAG} subpath not allowed via bridge`, 403);
     }
     if (c.req.method !== "POST") {
-      emitBridgeRejectTelemetry({
-        sessionKey: "", bridgeSource: "memory-bridge",
-        rejectReason: "method_not_allowed", httpStatus: 405,
-        executedEndpoint: sub,
-      });
-      return envelope(40501, `${TAG} method ${c.req.method} not allowed`, 405);
+      console.warn(`${TAG} request rejected reason=method_not_allowed`);
+      return envelope(40501, "Method not allowed", 405);
     }
 
     const ct = c.req.header("content-type") ?? "";
     if (!ct.toLowerCase().includes("application/json")) {
-      emitBridgeRejectTelemetry({
-        sessionKey: "", bridgeSource: "memory-bridge",
-        rejectReason: "content_type_invalid", httpStatus: 415,
-        executedEndpoint: sub,
-      });
       return envelope(41501, `${TAG} content-type must be application/json`, 415);
     }
 
-    const sessionKey = deriveSessionId(c);
-    if (!sessionKey) {
-      emitBridgeRejectTelemetry({
-        sessionKey: "", bridgeSource: "memory-bridge",
-        rejectReason: "missing_conversation_id", httpStatus: 401,
-        executedEndpoint: sub,
-      });
-      return envelope(40101, `${TAG} missing x-conversation-id (or x-session-id / x-chat-id / x-thread-id) header`, 401);
+    if (!isAuthEnabled()) {
+      return envelope(50301, `${TAG} user authentication is required`, 503);
     }
-    const spaceId = c.req.header("x-tdai-service-id")
-      ?? config.tdai?.serviceId
-      ?? config.coreSkill?.serviceId
-      ?? "";
-    const bindingRepo = getSessionStore().getBindingRepo() ?? null;
+    const authorization = (c.req.header("authorization") ?? "").trim();
+    const xApiKey = (c.req.header("x-api-key") ?? "").trim();
+    if (authorization && xApiKey) {
+      return envelope(40002, `${TAG} ambiguous authentication headers`, 400);
+    }
+    const bearer = extractBearerToken(authorization);
+    if ((authorization && !bearer) || (!bearer && !xApiKey)) {
+      return envelope(40102, `${TAG} valid Bearer or x-api-key authentication is required`, 401);
+    }
+    const userKey = bearer || xApiKey;
 
-    let ids = loadSessionIdsL1(sessionKey);
-    if (!ids && bindingRepo && spaceId) {
-      console.log(`${TAG} session=${sessionKey} L1 miss → L2 binding lookup (space=${spaceId})`);
-      ids = await loadSessionIdsL2(bindingRepo, spaceId, sessionKey);
+    const spaceId = (c.req.header("x-tdai-service-id") ?? "").trim();
+    if (!spaceId) {
+      return envelope(40003, `${TAG} x-tdai-service-id is required`, 400);
     }
-    if (!ids) {
-      emitBridgeRejectTelemetry({
-        sessionKey, bridgeSource: "memory-bridge",
-        rejectReason: "session_not_initialized", httpStatus: 401,
-        executedEndpoint: sub, spaceId,
-      });
-      return envelope(40101, `${TAG} session not initialized; cannot derive identity`, 401);
+    const agentSource = (c.req.header("x-tdai-agent-source") ?? "").trim();
+    try {
+      assertAgentSource(agentSource);
+      if (!isRegisteredAgentSource(agentSource)) {
+        throw new Error("unregistered agent source");
+      }
+    } catch {
+      return envelope(40004, `${TAG} valid x-tdai-agent-source is required`, 400);
+    }
+    const sessionKey = resolveConversationId(c)?.trim() ?? "";
+    if (!sessionKey) {
+      return envelope(40101, `${TAG} session identity is unavailable`, 401);
+    }
+
+    const verified = await verifyUserKey(userKey, spaceId);
+    if (verified.rejected || !verified.userId) {
+      return envelope(40302, `${TAG} authentication rejected`, 403);
     }
 
     let inboundBody: Record<string, unknown> = {};
@@ -330,25 +297,12 @@ export function createMemoryBridgeHandler(
         if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
           inboundBody = parsed as Record<string, unknown>;
         } else {
-          emitBridgeRejectTelemetry({
-            sessionKey, bridgeSource: "memory-bridge",
-            rejectReason: "body_not_object", httpStatus: 400,
-            executedEndpoint: sub, requestBody: raw.slice(0, 512),
-            spaceId: ids.space_id, userId: ids.user_id, teamId: ids.team_id,
-            agentId: ids.agent_id, agentSource: ids.agent_source,
-          });
           return envelope(40001, `${TAG} body must be a JSON object`, 400);
         }
       }
-    } catch (err) {
-      emitBridgeRejectTelemetry({
-        sessionKey, bridgeSource: "memory-bridge",
-        rejectReason: "invalid_json_body", httpStatus: 400,
-        executedEndpoint: sub,
-        spaceId: ids.space_id, userId: ids.user_id, teamId: ids.team_id,
-        agentId: ids.agent_id, agentSource: ids.agent_source,
-      });
-      return envelope(40001, `${TAG} invalid JSON body: ${(err as Error).message}`, 400);
+    } catch {
+      console.warn(`${TAG} request rejected reason=invalid_json`);
+      return envelope(40001, `${TAG} invalid JSON body`, 400);
     }
 
     // 强制注入 session IdFields — LLM 不能伪造身份。
@@ -363,21 +317,48 @@ export function createMemoryBridgeHandler(
         ? inboundBody.task_id.trim()
         : undefined;
 
+    const identity: SessionIdentity = {
+      userId: verified.userId,
+      agentSource,
+      sessionId: sessionKey,
+      spaceId,
+      taskId: modelTaskId,
+    };
+    let ids: SessionIdFields | null;
+    try {
+      ids = await loadSessionIds(config, userKey, identity);
+    } catch (err) {
+      if (err instanceof SessionIdentityConflictError) {
+        return envelope(40303, `${TAG} session identity conflict`, 403);
+      }
+      if (err instanceof SessionContextUnavailableError) {
+        return envelope(40901, `${TAG} session context unavailable`, 409);
+      }
+      if (err instanceof SessionStoreUnavailableError) {
+        return envelope(50302, `${TAG} session store unavailable`, 503);
+      }
+      throw err;
+    }
+    if (!ids) {
+      return envelope(40101, `${TAG} session identity is unavailable`, 401);
+    }
+    if (modelTaskId && modelTaskId !== ids.task_id) {
+      return envelope(40303, `${TAG} task identity conflict`, 403);
+    }
+
     const upstreamUrl = `${config.coreSkill.endpoint.replace(/\/$/, "")}/v3/${sub}`;
     const upstreamToken =
       config.tdai?.apiKey || config.coreSkill.serviceToken || "local-proxy";
-    const upstreamServiceId =
-      ids.space_id || config.tdai?.serviceId || config.coreSkill.serviceId;
     const headers: Record<string, string> = {
       "Authorization": `Bearer ${upstreamToken}`,
-      "x-tdai-service-id": upstreamServiceId,
+      "x-tdai-service-id": spaceId,
       "Content-Type": "application/json",
     };
 
-    const ctxs = await resolveMemoryCtxs(config, ids, sessionKey);
-    // session_id 保持"仅 caller 显式传"，使 search 默认跨 session。
-    // task_id 只默认约束 self；借入记忆属于另一个 Agent，沿用 reader task 会把
-    // writer 在其它 task 下写入的 L0/L1 全部过滤掉。显式 task_id 仍对所有 target 生效。
+    const ctxs = await resolveMemoryCtxs(config, ids, sessionKey, userKey, spaceId);
+    // session_id remains caller-selectable for explicit cross-session search.
+    // The caller's current task scopes only self memory; imported Agent memory
+    // may have been written under another task.
     const makeOutbound = (target: FixedAssetCtx): Record<string, unknown> => {
       const targetTaskId = taskIdForSearchTarget(target.isSelf, modelTaskId, ids.task_id);
       return {
@@ -385,59 +366,55 @@ export function createMemoryBridgeHandler(
         user_id: target.userId,
         team_id: target.teamId,
         agent_id: target.agentId,
-        session_id: modelSessionId,
-        task_id: targetTaskId,
+        ...(modelSessionId ? { session_id: modelSessionId } : {}),
+        ...(targetTaskId ? { task_id: targetTaskId } : {}),
       };
     };
 
     const callUpstream = async (target: FixedAssetCtx): Promise<{ status: number; text: string; contentType: string }> => {
-      const outboundBody = JSON.stringify(makeOutbound(target));
-      const callStart = (deps.now ?? Date.now)();
-      let status = 0;
-      let text = "";
-      let contentType = "application/json";
+      const startedAt = (deps.now ?? Date.now)();
+      let upstreamStatus = 0;
       try {
         const resp = await fetcher(upstreamUrl, {
           method: "POST",
           headers,
-          body: outboundBody,
+          body: JSON.stringify(makeOutbound(target)),
           signal: AbortSignal.timeout(Math.max(5000, config.coreSkill.timeoutMs * 4)),
+          redirect: "manual",
         });
-        status = resp.status;
-        text = await resp.text().catch(() => "");
-        contentType = resp.headers.get("content-type") ?? "application/json";
-        return { status, text, contentType };
+        upstreamStatus = resp.status;
+        if (resp.status >= 300 && resp.status < 400) {
+          return {
+            status: 502,
+            text: JSON.stringify({ code: 50201, message: `${TAG} upstream redirect rejected` }),
+            contentType: "application/json",
+          };
+        }
+        return {
+          status: resp.status,
+          text: await resp.text().catch(() => ""),
+          contentType: resp.headers.get("content-type") ?? "application/json",
+        };
       } finally {
-        // 埋点：每次实际调用 upstream 都记一条（成功/失败都算，方案 §5.1）
-        // 优先用 loadSessionIdsL1 里真实命中的 compositeKey，跟 session_init_logs 对齐；
-        // 拿不到才回落 raw sessionKey（L1/L2 miss 路径不该走到这里，但保底）。
-        const emitKey = ids.composite_key ?? sessionKey;
         emitBridgeToolCallTelemetry({
-          sessionKey: emitKey,
-          spaceId: ids.space_id,
+          sessionKey: "<redacted>",
+          spaceId,
           userId: target.userId,
-          teamId: target.teamId,
-          agentId: target.agentId,
-          agentSource: agentSourceFromSessionKey(emitKey),
+          agentSource,
           bridgeSource: "memory-bridge",
           executedEndpoint: sub,
-          requestBody: outboundBody.slice(0, 512),
-          upstreamStatus: status,
-          elapsedMs: (deps.now ?? Date.now)() - callStart,
+          requestBody: "",
+          upstreamStatus,
+          elapsedMs: (deps.now ?? Date.now)() - startedAt,
         });
       }
     };
 
     if (MULTI_SEARCH_SUBPATHS.has(sub) && typeof inboundBody.agent_id !== "string") {
       const limit = limitFromBody(inboundBody);
-      // 两类 search 的响应 shape 不同：
-      //   - /v3/atomic/search       → data.items[]（L1 hit）
-      //   - /v3/conversation/search → data.messages[]（L0 hit）
-      // 早期代码固定读 data.items，导致 conversation/search 在 multi 分支
-      // 永远返回空（历史 bug）。这里按 sub 分派读写字段，保持透传语义。
+      const settled = await Promise.allSettled(ctxs.map(async (target) => ({ target, ...(await callUpstream(target)) })));
       const isConversationSearch = sub === "conversation/search";
       const resultKey: "items" | "messages" = isConversationSearch ? "messages" : "items";
-      const settled = await Promise.allSettled(ctxs.map(async (target) => ({ target, ...(await callUpstream(target)) })));
       const collected: Record<string, unknown>[] = [];
       let okCount = 0;
       for (const r of settled) {
@@ -464,21 +441,19 @@ export function createMemoryBridgeHandler(
       collected.sort((a, b) => (typeof b.score === "number" ? b.score : 0) - (typeof a.score === "number" ? a.score : 0));
       const elapsed = (deps.now ?? Date.now)() - t0;
       console.log(`${TAG} sub=${sub} multi targets=${ctxs.length} ok=${okCount} ${resultKey}=${collected.length} elapsed=${elapsed}ms`);
-      const truncated = collected.slice(0, limit);
+      const responseRows = collected.slice(0, limit);
       const searchedAgents = ctxs.map((x) => ({
         agent_id: x.agentId,
         name: x.agentName,
         role: x.isSelf ? "self" : "imported_from",
       }));
-      // 保持透传语义：返回字段名与上游一致（items vs messages）。
-      const responseData: Record<string, unknown> = isConversationSearch
-        ? { messages: truncated, searched_agents: searchedAgents }
-        : { items: truncated, searched_agents: searchedAgents };
       return new Response(JSON.stringify({
         code: 0,
         message: "ok",
         request_id: `mem-bridge-${Date.now()}`,
-        data: responseData,
+        data: isConversationSearch
+          ? { messages: responseRows, searched_agents: searchedAgents }
+          : { items: responseRows, searched_agents: searchedAgents },
       }), {
         status: 200,
         headers: { "content-type": "application/json" },
@@ -488,11 +463,11 @@ export function createMemoryBridgeHandler(
     let upstream;
     try {
       upstream = await callUpstream(selectTargetCtx(ctxs, inboundBody.agent_id));
-    } catch (err) {
+    } catch {
       console.warn(
-        `${TAG} upstream fetch failed sub=${sub} err=${(err as Error).message}`,
+        `${TAG} upstream fetch failed sub=${sub}`,
       );
-      return envelope(50301, `${TAG} upstream unavailable: ${(err as Error).message}`, 502);
+      return envelope(50301, `${TAG} upstream unavailable`, 502);
     }
 
     const respText = upstream.text;

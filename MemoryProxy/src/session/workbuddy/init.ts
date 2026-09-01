@@ -227,10 +227,8 @@ export async function handleWorkbuddySessionInit(
           description: agent.description ?? undefined,
           prompt: agent.prompt ?? undefined,
         };
-      } catch (err) {
-        console.warn(
-          `[workbuddy-init] DEBUG getAgent(${forcedAgentId}) failed: ${err instanceof Error ? err.message : String(err)}`,
-        );
+      } catch {
+        console.warn("[workbuddy-init] debug getAgent failed category=upstream_error");
       }
       try {
         const task = await metadataClient.getTask(forcedTaskId);
@@ -239,10 +237,8 @@ export async function handleWorkbuddySessionInit(
           name: task.title,
           description: task.description ?? undefined,
         };
-      } catch (err) {
-        console.warn(
-          `[workbuddy-init] DEBUG getTask(${forcedTaskId}) failed: ${err instanceof Error ? err.message : String(err)}`,
-        );
+      } catch {
+        console.warn("[workbuddy-init] debug getTask failed category=upstream_error");
       }
     }
 
@@ -333,10 +329,8 @@ export async function handleWorkbuddySessionInit(
         };
       }),
     );
-  } catch (err) {
-    console.warn(
-      `[workbuddy-init] session=${sessionKey} listTeams failed: ${err instanceof Error ? err.message : String(err)}`,
-    );
+  } catch {
+    console.warn("[workbuddy-init] session=<redacted> listTeams failed category=upstream_error");
     // 不落 store bypass —— kernel 错误可能是临时的，下一轮请求可以重试
     return bypassResult("kernel-error");
   }
@@ -362,10 +356,8 @@ export async function handleWorkbuddySessionInit(
         prompt: agent.prompt ?? undefined,
       };
     }
-  } catch (err) {
-    console.warn(
-      `[workbuddy-init] getAgent(${resolution.agentId}) failed: ${err instanceof Error ? err.message : String(err)}`,
-    );
+  } catch {
+    console.warn("[workbuddy-init] getAgent failed category=upstream_error");
   }
   try {
     if (resolution.taskId) {
@@ -376,10 +368,8 @@ export async function handleWorkbuddySessionInit(
         description: task.description ?? undefined,
       };
     }
-  } catch (err) {
-    console.warn(
-      `[workbuddy-init] getTask(${resolution.taskId}) failed: ${err instanceof Error ? err.message : String(err)}`,
-    );
+  } catch {
+    console.warn("[workbuddy-init] getTask failed category=upstream_error");
   }
 
   // ── 6. 构造 SessionInfo & 落 store ────────────────────────────────────────

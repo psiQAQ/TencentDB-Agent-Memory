@@ -1,10 +1,8 @@
 /**
  * RedisHookCacheRepo — Redis-backed persistence for prewarmed injection blocks.
  *
- * Implements the HookCacheRepo interface. Uses Redis Hash:
- *   inj:hook:{spaceId}:{userId}:{agentSource}:{sessionId}  Hash  field=hookId  value=ContextBlock[] JSON
- *
- * spaceId 是 P4 kernel-sts 新增的隔离段。老 caller 传空字符串时用 `_default` 兜底。
+ * Each Redis Hash stores one versioned, collision-safe encoded identity tuple
+ * under `inj:hook:`; fields remain hookId -> ContextBlock[] JSON.
  *
  * TTL follows session lifetime (default 30min).
  * All errors degrade silently — callers treat null/no-cache as equivalent
@@ -13,6 +11,10 @@
 import type { Redis } from "ioredis";
 import type { HookCacheRepo, HookCacheEntry } from "./hookCacheRepo.js";
 import type { ContextBlock } from "../injection/types.js";
+import {
+  legacyPersistedSessionIdentityKey,
+  persistedSessionIdentityKey,
+} from "./session-identity-key.js";
 
 const KEY_PREFIX = "inj:hook:";
 const DEFAULT_TTL = 30 * 60; // 30 minutes
@@ -23,8 +25,30 @@ function keyOf(
   agentSource: string,
   sessionId: string,
 ): string {
-  const sp = spaceId || "_default";
-  return `${KEY_PREFIX}${sp}:${userId}:${agentSource}:${sessionId}`;
+  return KEY_PREFIX + persistedSessionIdentityKey(
+    spaceId,
+    userId,
+    agentSource,
+    sessionId,
+  );
+}
+
+function legacyKeyOf(
+  spaceId: string,
+  userId: string,
+  agentSource: string,
+  sessionId: string,
+): string | null {
+  // Hook payloads contain no owner/space metadata, so the old empty-space
+  // `_default` sentinel cannot be authenticated safely.
+  if (spaceId === "") return null;
+  const tail = legacyPersistedSessionIdentityKey(
+    spaceId,
+    userId,
+    agentSource,
+    sessionId,
+  );
+  return tail ? KEY_PREFIX + tail : null;
 }
 
 export class RedisHookCacheRepo implements HookCacheRepo {
@@ -34,7 +58,11 @@ export class RedisHookCacheRepo implements HookCacheRepo {
     private redis: Redis,
     ttlSeconds?: number,
   ) {
-    this.ttl = ttlSeconds ?? DEFAULT_TTL;
+    const ttl = ttlSeconds ?? DEFAULT_TTL;
+    if (!Number.isSafeInteger(ttl) || ttl <= 0) {
+      throw new Error("invalid Redis hook TTL");
+    }
+    this.ttl = ttl;
   }
 
   async put(
@@ -75,10 +103,19 @@ export class RedisHookCacheRepo implements HookCacheRepo {
     hookId: string,
   ): Promise<ContextBlock[] | null> {
     try {
-      const raw = await this.redis.hget(
-        keyOf(spaceId, userId, agentSource, sessionId),
-        hookId,
-      );
+      const currentKey = keyOf(spaceId, userId, agentSource, sessionId);
+      const current = await this.redis.hgetall(currentKey);
+      let raw: string | undefined;
+      if (current && Object.keys(current).length > 0) {
+        raw = current[hookId];
+      } else {
+        const legacyKey = legacyKeyOf(spaceId, userId, agentSource, sessionId);
+        if (!legacyKey) return null;
+        const legacy = await this.redis.hgetall(legacyKey);
+        if (!legacy || Object.keys(legacy).length === 0) return null;
+        if (await this.redis.ttl(legacyKey) <= 0) return null;
+        raw = legacy[hookId];
+      }
       if (!raw) return null;
       const parsed = JSON.parse(raw) as ContextBlock[];
       return Array.isArray(parsed) ? parsed : null;
@@ -94,7 +131,15 @@ export class RedisHookCacheRepo implements HookCacheRepo {
     sessionId: string,
   ): Promise<HookCacheEntry[]> {
     try {
-      const all = await this.redis.hgetall(keyOf(spaceId, userId, agentSource, sessionId));
+      const currentKey = keyOf(spaceId, userId, agentSource, sessionId);
+      let all = await this.redis.hgetall(currentKey);
+      if (!all || Object.keys(all).length === 0) {
+        const legacyKey = legacyKeyOf(spaceId, userId, agentSource, sessionId);
+        if (!legacyKey) return [];
+        all = await this.redis.hgetall(legacyKey);
+        if (!all || Object.keys(all).length === 0) return [];
+        if (await this.redis.ttl(legacyKey) <= 0) return [];
+      }
       const out: HookCacheEntry[] = [];
       for (const [hookId, raw] of Object.entries(all)) {
         try {

@@ -53,6 +53,16 @@ import { trackWrite, withL0Retry } from "./tdai/pending-writes.js";
 import type { TdaiIdentity, TdaiMessage } from "./tdai/types.js";
 import { triggerSkillExtractIfReady } from "./skill/handler-glue.js";
 import { isExtractionAllowed, logExtractionSkipped } from "./extraction-gate.js";
+import {
+  SessionContextUnavailableError,
+  SessionIdentityConflictError,
+  SessionStoreUnavailableError,
+} from "./session/store.js";
+import {
+  buildSafeUpstreamHeaders,
+  MissingUpstreamCredentialError,
+  sameOrigin,
+} from "./upstream-headers.js";
 
 // ── Handler-level constants ──────────────────────────────────────────────────
 
@@ -382,8 +392,8 @@ async function triggerWorkbuddyArchiveHooks(
     trackWrite(
       withL0Retry(() =>
         recordTdaiTurn(ctx.tdaiClient!, ctx.tdaiIdentity, ctx.tdaiUserMessage, assistantText || null),
-      ).catch((err: unknown) => {
-        console.warn("[workbuddy-tdai-l0] failed:", err instanceof Error ? err.message : String(err));
+      ).catch(() => {
+        console.warn("[workbuddy-tdai-l0] failed category=upstream_error");
       }),
     );
   } else if (ctx.tdaiClient) {
@@ -449,16 +459,18 @@ function buildWorkbuddyLangfuseInput(body: Record<string, unknown>): unknown {
   return hasInput ? body.input : { instructions: body.instructions };
 }
 
-function buildUpstreamHeaders(c: Context, config: ProxyConfig): Record<string, string> {
-  const h: Record<string, string> = {};
-  for (const [k, v] of c.req.raw.headers.entries()) {
-    if (!SKIP_REQUEST_HEADERS.has(k.toLowerCase())) h[k] = v;
-  }
-  if (config.upstream.apiKey) {
-    h["authorization"] = `Bearer ${config.upstream.apiKey}`;
-    delete h["x-api-key"];
-  }
-  return h;
+function buildUpstreamHeaders(
+  c: Context,
+  config: ProxyConfig,
+  upstreamBase: string,
+  agentApiKey?: string,
+): Record<string, string> {
+  const apiKey = agentApiKey?.trim()
+    || (sameOrigin(upstreamBase, config.upstream.url) ? config.upstream.apiKey : "");
+  return buildSafeUpstreamHeaders(c.req.raw.headers, {
+    protocol: "openai",
+    apiKey,
+  });
 }
 
 function filterResponseHeaders(source: Headers): Headers {
@@ -495,11 +507,14 @@ async function forwardToUpstream(
   const upstreamPath = c.req.path.replace(/^\/workbuddy\/[^/]+/, "");
   const upstreamUrl = joinUrl(upstreamBase, upstreamPath);
 
-  const headers = buildUpstreamHeaders(c, config);
-  // 若 per-agent 指定了独立 apiKey，覆盖全局注入的 authorization
-  if (perAgent?.apiKey) {
-    headers["authorization"] = `Bearer ${perAgent.apiKey}`;
-    delete headers["x-api-key"];
+  let headers: Record<string, string>;
+  try {
+    headers = buildUpstreamHeaders(c, config, upstreamBase, perAgent?.apiKey);
+  } catch (err) {
+    if (err instanceof MissingUpstreamCredentialError) {
+      return c.json({ error: "Upstream server credentials are not configured" }, 503);
+    }
+    throw err;
   }
   const bodyStr = JSON.stringify(body);
 
@@ -527,10 +542,10 @@ async function forwardToUpstream(
       method: "POST",
       headers,
       body: bodyStr,
+      redirect: "manual",
     });
   } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    pipe.info("WORKBUDDY_FORWARD_ERR", msg);
+    pipe.info("WORKBUDDY_FORWARD_ERR", "upstream_fetch_failed");
     // 网络层失败 → langfuse failure 上报，让线上可视化能看到
     if (lf) {
       try {
@@ -539,8 +554,7 @@ async function forwardToUpstream(
           model: modelId,
           startTime,
           endTime: new Date().toISOString(),
-          input: buildWorkbuddyLangfuseInput(body),
-          statusMessage: `fetch_failed: ${msg}`.slice(0, 500),
+          statusMessage: "upstream_fetch_failed",
           extraTags: ["error"],
           observationMetadata: {
             stage: "forward",
@@ -553,7 +567,12 @@ async function forwardToUpstream(
         pipe.error("LANGFUSE_SPAN", lfErr);
       }
     }
-    return c.json({ error: `Upstream fetch failed: ${msg}` }, 502);
+    return c.json({ error: "Upstream fetch failed" }, 502);
+  }
+
+  if (upstreamResp.status >= 300 && upstreamResp.status < 400) {
+    pipe.info("WORKBUDDY_FORWARD_REDIRECT", "blocked");
+    return c.json({ error: "Upstream redirect blocked" }, 502);
   }
 
   const respHeaders = filterResponseHeaders(upstreamResp.headers);
@@ -732,8 +751,8 @@ async function consumeWorkbuddyStream(
         }
       }
     }
-  } catch (err) {
-    ctx.pipe.info("WORKBUDDY_STREAM_ERR", err instanceof Error ? err.message : String(err));
+  } catch {
+    ctx.pipe.info("WORKBUDDY_STREAM_ERR", "stream_processing_failed");
   } finally {
     streamCompleted = true;
     clearTimeout(timeoutHandle);
@@ -805,7 +824,7 @@ async function consumeWorkbuddyStream(
  *   4. Classify    - main vs auxiliary
  *   5. Aux         - 短路透传（不注入、不上报 langfuse）
  *   6. Session ID  - header/body 提取 session id，构造 langfuse turn ctx
- *   7. Session init- 复用 CB 状态机 (handleSessionInit, agentSource="codex")
+ *   7. Session init - 复用 CB 状态机并保留 agentSource="workbuddy"
  *                   + codex form builder 渲染 Responses API SSE 弹窗
  *   8. Mem command - / 命令拦截（session 已注册时）
  *   9. Injection   - 通用 injection pipeline，注入到 body.input[0].content[]
@@ -880,7 +899,7 @@ export async function handleWorkbuddyEndpoint(
   const turnSeq = countHumanTurnsWorkbuddy(body.input);
   const userQuery = workbuddyAdapter.extractUserText(body.input) ?? "";
   const lf: LangfuseTurnContext = {
-    traceId: langfuseTurnTraceId(sessionKey, turnSeq),
+    traceId: langfuseTurnTraceId(traceId),
     turnSeq,
     traceName: `${modelId} / ${keyId}`,
     userId: keyId,
@@ -895,16 +914,15 @@ export async function handleWorkbuddyEndpoint(
     userQuery,
   };
 
-  // ── 7. Session-init state machine (reuses CB with agentSource="codex") ───
+  // ── 7. Session-init state machine (Responses UI, WorkBuddy identity) ─────
   //
-  // WorkBuddy 与 codex 走同一份 Responses API wire，弹窗骨架直接复用 codex/form.ts
-  // 的 buildFormResponse + CB 状态机（handleSessionInit + agentSource="codex"）。
-  // 这里的 agentSource 传 "codex" 而非 "workbuddy" —— 因为状态机内部靠 source 决定：
-  //   - 是否走两步式分页 (codex-only)
+  // WorkBuddy 与 Codex 走同一份 Responses API wire，弹窗骨架直接复用
+  // codex/form.ts。状态机把两者都识别为 Responses 客户端，但持久化 identity
+  // 始终使用真实的 workbuddy source，避免同 session id 与 Codex 碰撞：
+  //   - 是否走两步式分页 (Responses-only)
   //   - Default gate 字符串识别
   //   - formData.{teamPage,agentPage,taskPage} 是否填充
-  // 三者都是 codex 客户端专有行为，WorkBuddy 亦然。langfuse tag/日志侧的
-  // agent_source 保持 "workbuddy" 不受影响。
+  // 三者都是 Responses 客户端行为。
   let sessionInfo: Record<string, unknown> | null | undefined;
   let assetCapabilities: import("./injection/types.js").AssetCapabilityFlags | undefined;
   let injectionSkipped = false;
@@ -923,9 +941,14 @@ export async function handleWorkbuddyEndpoint(
       const userText = workbuddyAdapter.extractUserText(input) ?? "";
       const memCmd = parseCommandFromText(userText);
       if (memCmd && isMemCommandAllowed(config.memCommand, memCmd.command)) {
-        const { getSessionStore } = await import("./session/store.js");
+        const { getSessionStore, sessionStoreKey } = await import("./session/store.js");
         const store = getSessionStore();
-        const compositeKey = `codex:${sessionKey}`;
+        const compositeKey = sessionStoreKey({
+          userId: userId || "anonymous",
+          agentSource,
+          sessionId: sessionKey,
+          spaceId,
+        });
         store.bind(compositeKey, { userId: userId || "anonymous", agentSource, sessionId: sessionKey, spaceId });
 
         // ── 强制归档旧 agent 的 skill buffer（best-effort）──
@@ -947,9 +970,9 @@ export async function handleWorkbuddyEndpoint(
                 },
                 { serviceId: si.space_id },
               ).then((res) => {
-                console.log(`[session-reset] force-archive old buffer: status=${res.status} session=${sessionKey} agent=${si.agent_id}`);
-              }).catch((err) => {
-                console.warn(`[session-reset] force-archive failed (best-effort): ${err instanceof Error ? err.message : String(err)}`);
+                console.log(`[session-reset] force-archive status=${res.status} session=<redacted>`);
+              }).catch(() => {
+                console.warn("[session-reset] force-archive failed category=upstream_error");
               });
             }).catch(() => {});
           }
@@ -958,15 +981,15 @@ export async function handleWorkbuddyEndpoint(
         const resetEpoch = Date.now();
         await store.set(compositeKey, { status: "uninitialized", keyId: sessionKey, startedAt: resetEpoch, attemptCount: 0, userId: userId || "anonymous", resetEpoch, resetFlow: true });
         const bindingRepo = store.getBindingRepo();
-        if (bindingRepo) await bindingRepo.deleteBinding(spaceId, sessionKey).catch(() => {});
-        console.log(`[mem-command:pre] session-reset session=${sessionKey} → falling through to pop form`);
+        if (bindingRepo) await bindingRepo.deleteBinding(spaceId, userId || "anonymous", agentSource, sessionKey).catch(() => {});
+        console.log("[mem-command:pre] session-reset session=<redacted> action=show_form");
       }
     }
   }
 
   if (config.sessionInit?.enabled && sessionId) {
     try {
-      const { getSessionStore, handleSessionInit, parsePresetIdentity } = await import(
+      const { getSessionStore, handleSessionInit, parsePresetIdentity, sessionStoreKey } = await import(
         "./session/index.js"
       );
       const { getMetadataClient } = await import("./meta/client.js");
@@ -977,10 +1000,15 @@ export async function handleWorkbuddyEndpoint(
       const metadataClient = getMetadataClient(config.coreSkill, spaceId, apiKey);
       const presetIdentity = parsePresetIdentity(config.sessionInit, headers);
 
-      const compositeKey = `codex:${sessionKey}`;
+      const compositeKey = sessionStoreKey({
+        userId: userId || "anonymous",
+        agentSource,
+        sessionId: sessionKey,
+        spaceId,
+      });
       const identity = {
         userId: userId || "anonymous",
-        agentSource: "codex" as const,
+        agentSource,
         sessionId: sessionKey,
         spaceId,
       };
@@ -1022,20 +1050,17 @@ export async function handleWorkbuddyEndpoint(
         };
       } else {
         // Run the state machine — reuses CB's handleSessionInit with
-        // agentSource="codex". CB parses picks from `messages[]`, but codex/workbuddy
+        // Responses clients send picks via input[] rather than messages[].
         // clients send them as `function_call_output.output` items in body.input[]。
         // 我们用 codexFormAnswersAsMessages 把 output 合成成 minimal messages[]
         // 供 CB 的 extractor 识别（extractor 只看 last user/tool message text）。
         const synthesizedMessages = codexFormAnswersAsMessages(input);
-        const rawOutputs = input
-          .filter((it: any) => it?.type === "function_call_output")
-          .map((it: any) => ({
-            call_id: it.call_id,
-            output_preview: String(it.output ?? "").slice(0, 200),
-          }));
-        if (rawOutputs.length > 0) {
+        const functionOutputCount = input.filter(
+          (it: any) => it?.type === "function_call_output",
+        ).length;
+        if (functionOutputCount > 0) {
           console.log(
-            `[workbuddy-debug] session=${sessionKey} function_call_outputs=${JSON.stringify(rawOutputs)} synth_msgs=${JSON.stringify(synthesizedMessages).slice(0, 500)}`,
+            `[workbuddy-debug] session=<redacted> function_call_outputs=${functionOutputCount} synthesized_messages=${synthesizedMessages.length}`,
           );
         }
         initResult = await handleSessionInit(
@@ -1051,7 +1076,7 @@ export async function handleWorkbuddyEndpoint(
             // 把原始 input[] 交给 CB 状态机识别 Default gate 与 MORE 翻页
             codexAnswerInput: input,
           },
-          "codex", // ← 状态机 source: 复用 codex 分支
+          agentSource,
           metadataClient,
           apiKey,
           spaceId,
@@ -1100,9 +1125,7 @@ export async function handleWorkbuddyEndpoint(
 
       if (initResult.bypassed) {
         injectionSkipped = true;
-        console.log(
-          `[workbuddy] session=${sessionKey} bypassed (reason=${(initResult as any).bypassReason ?? "unknown"}) → skipping injection`,
-        );
+        console.log("[workbuddy] session=<redacted> bypassed=true injection=skipped");
         if (initResult.resetFlow) {
           _resetFlowResult = { agentName: "", agentIdShort: "", teamId: "", bypassed: true };
         }
@@ -1120,10 +1143,8 @@ export async function handleWorkbuddyEndpoint(
             userKey: callerUserKey,
             timeoutMs: config.tdai.memory.timeoutMs,
           });
-        } catch (err) {
-          console.warn(
-            `[workbuddy] asset-capability resolve failed: ${err instanceof Error ? err.message : String(err)}`,
-          );
+        } catch {
+          console.warn("[workbuddy] asset-capability resolve failed category=upstream_error");
         }
       }
 
@@ -1138,14 +1159,11 @@ export async function handleWorkbuddyEndpoint(
             const peek = parseCommandFromText(userTextPeek);
             if (peek && isMemCommandAllowed(config.memCommand, peek.command)) {
               memCommandPending = true;
-              console.log(`[workbuddy] prewarm skipped: mem-command pending (cmd=${peek.command}) session=${sessionKey}`);
+              console.log(`[workbuddy] prewarm skipped reason=mem_command command=${peek.command} session=<redacted>`);
             }
           }
-        } catch (err) {
-          console.warn(
-            "[workbuddy] pre-prewarm peek failed:",
-            err instanceof Error ? err.message : String(err),
-          );
+        } catch {
+          console.warn("[workbuddy] pre-prewarm peek failed category=parse_error");
         }
       }
 
@@ -1170,11 +1188,8 @@ export async function handleWorkbuddyEndpoint(
             assetCapabilities,
             callerUserKey: callerUserKey ?? undefined,
           }, { clearBefore: true });
-        } catch (err) {
-          console.warn(
-            "[workbuddy] prewarm error:",
-            err instanceof Error ? err.message : String(err),
-          );
+        } catch {
+          console.warn("[workbuddy] prewarm failed category=upstream_error");
         }
       }
 
@@ -1196,12 +1211,18 @@ export async function handleWorkbuddyEndpoint(
         };
       }
     } catch (err: unknown) {
-      console.error(
-        "[workbuddy] session-init error:",
-        err instanceof Error ? err.message : String(err),
-      );
-      sessionInfo = undefined;
-      injectionSkipped = true;
+      if (err instanceof SessionIdentityConflictError) {
+        return c.json({ error: "session_identity_conflict" }, 403);
+      }
+      if (err instanceof SessionContextUnavailableError) {
+        return c.json({ error: "session_context_unavailable" }, 409);
+      }
+      if (err instanceof SessionStoreUnavailableError) {
+        console.error("[session-init] failed category=store_unavailable protocol=responses source=workbuddy");
+        return c.json({ error: "session_store_unavailable" }, 503);
+      }
+      console.error("[session-init] failed category=unexpected_error protocol=responses source=workbuddy");
+      return c.json({ error: "session_store_unavailable" }, 503);
     }
   }
 
@@ -1222,7 +1243,7 @@ export async function handleWorkbuddyEndpoint(
     const text = (lines as string[]).join("\n");
 
     const { buildMemResponse } = await import("./mem-command/response-builder.js");
-    console.log(`[mem-command:session-reset] completed: bypassed=${!!bypassed} agent=${agentName} (${agentIdShort})`);
+    console.log(`[mem-command:session-reset] completed bypassed=${!!bypassed} session=<redacted>`);
     return buildMemResponse(text, {
       protocol: "responses",
       stream: isStream,
@@ -1250,9 +1271,7 @@ export async function handleWorkbuddyEndpoint(
             stream: isStream,
             requestId: `mem-cmd-${Date.now()}`,
           });
-          console.log(
-            `[workbuddy] mem-command cmd=${memCmd.command} args="${truncateArgs(memCmd.args)}" session=${sessionKey} blocked: session not initialized`,
-          );
+          console.log(`[workbuddy] mem-command command=${memCmd.command} session=<redacted> result=session_not_initialized`);
           return errResponse;
         }
         pipe.info("WORKBUDDY_MEM_CMD", `mem command intercepted: ${memCmd.command}`);
@@ -1293,11 +1312,8 @@ export async function handleWorkbuddyEndpoint(
           assetCapabilities,
         });
         if (memArchiveCtx) {
-          void triggerWorkbuddyArchiveHooks(memArchiveCtx, memResult.messageText ?? "").catch((err: unknown) => {
-            pipe.info(
-              "WORKBUDDY_MEM_ARCHIVE_ERR",
-              err instanceof Error ? err.message : String(err),
-            );
+          void triggerWorkbuddyArchiveHooks(memArchiveCtx, memResult.messageText ?? "").catch(() => {
+            pipe.info("WORKBUDDY_MEM_ARCHIVE_ERR", "archive_failed");
           });
         }
 
@@ -1324,16 +1340,11 @@ export async function handleWorkbuddyEndpoint(
               protocol: "responses",
             },
           });
-        } catch (err: unknown) {
-          pipe.info(
-            "WORKBUDDY_MEM_LANGFUSE_ERR",
-            err instanceof Error ? err.message : String(err),
-          );
+        } catch {
+          pipe.info("WORKBUDDY_MEM_LANGFUSE_ERR", "telemetry_failed");
         }
 
-        console.log(
-          `[workbuddy] mem-command cmd=${memCmd.command} args="${truncateArgs(memCmd.args)}" session=${sessionKey} success=${memResult.success}`,
-        );
+        console.log(`[workbuddy] mem-command command=${memCmd.command} session=<redacted> success=${memResult.success}`);
         return memResult.response;
       }
     }
@@ -1395,11 +1406,8 @@ export async function handleWorkbuddyEndpoint(
       if (injectedText.length > 0) {
         body = injectWorkbuddyAssets(body, { raw: injectedText });
       }
-    } catch (err: unknown) {
-      console.error(
-        "[workbuddy] injection pipeline error:",
-        err instanceof Error ? err.message : String(err),
-      );
+    } catch {
+      console.error("[workbuddy] injection pipeline failed category=internal_error");
       // Degrade gracefully: forward without injection
     }
   }

@@ -1,7 +1,8 @@
 /**
  * ClickHouse async batch writer for usage logs (official @clickhouse/client SDK).
  *
- * 定位：**自建/云 ClickHouse 的用量上报**，用于给每个用户展示 token 消耗（按 turn）。
+ * 定位：**自建/云 ClickHouse 的聚合用量上报**。业务进程内完成格式识别和成本计算，
+ * 最终行固定脱敏身份/模型/路由字段，只支持总量与固定类别统计。
  * 与 Langfuse / Opik 上报互相独立 —— Langfuse 做 trace 可视化，这里做用量/计费数据源。
  *
  * Features:
@@ -22,6 +23,12 @@ import { createHash } from "node:crypto";
 import { computeCreditDelta } from "./credit-reporter.js";
 import { getModelPricing, resolveModelName } from "./pricing.js";
 import type { CreditPricingConfig, CreditPricingEntry } from "./types.js";
+import {
+  privacySafeSessionId,
+  privacySafeOrigin,
+  privacySafeText,
+  privacySafeUsage,
+} from "./telemetry-privacy.js";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -34,7 +41,7 @@ export interface ClickHouseConfig {
   database: string;
   /** Table name for usage logs. */
   table: string;
-  /** Raw usage traceability table (non-TokenHub / unrecognized format). */
+  /** Categorical fallback table; identity/content fields remain fixed redaction. */
   rawTable: string;
   /** Auth user. */
   user: string;
@@ -48,16 +55,16 @@ export interface ClickHouseConfig {
   ttlDays: number;
 }
 
-/** One row = one upstream request (primary usage or extension telemetry). turn 由 (session_key, turn_seq) 标识。 */
+/** One privacy-safe aggregate row per upstream request. Identity columns are not linkable. */
 export interface ClickHouseRow {
   timestamp: string;       // ClickHouse DateTime64 format "YYYY-MM-DD HH:MM:SS.mmm"
   event: string;           // 'usage' | 'analyzer_usage' (extension telemetry)
-  session_key: string;     // 会话隔离键（turn 归并用）
-  turn_seq: number;        // turn 序号
-  user_input: string;      // 该 turn 的用户输入（仅首请求有值，去噪后；其余为空）
-  model_id: string;
-  model_name: string;      // UI 展示名（来自定价表 modelName；未匹配时回落 modelId）
-  user_id: string;         // 用户标识（auth 启用时为 user_id，否则为 SHA-256(apiKey)[:8]）
+  session_key: string;     // fixed redaction; unavailable for grouping
+  turn_seq: number;        // numeric sequence only; no linkable session identity
+  user_input: string;      // fixed redaction when content was present
+  model_id: string;        // fixed redaction; unavailable for model grouping
+  model_name: string;      // fixed redaction; unavailable for UI/report breakdown
+  user_id: string;         // fixed redaction; unavailable for billing attribution
   upstream_url: string;
   stream: number;          // 0 or 1
   prompt_tokens: number;
@@ -71,9 +78,9 @@ export interface ClickHouseRow {
   cache_creation_ephemeral_5m_input_tokens: number;      // 5m TTL 缓存写入
   cache_creation_ephemeral_1h_input_tokens: number;      // 1h TTL 缓存写入
   credit: number;
-  credit_saved: number;        // 路由节省的 credit（仅 event=usage 且 routed_from 非空时有值）
-  routed_from: string;
-  space_id: string;            // 空间/租户标识（从 /proxy/<spaceId>/... 路径提取）
+  credit_saved: number;        // computed from raw in-process routedFrom before redaction
+  routed_from: string;         // fixed redaction; unavailable for model grouping
+  space_id: string;            // fixed redaction; unavailable for tenant grouping
   source_tag: string;          // 来源标记，恒定为 "proxy"
   host: string;
   upstream_request_id: string; // 上游响应 header `x-request-id`（tokenhub/OpenAI 兼容网关生成），用于跨系统追溯
@@ -95,38 +102,44 @@ export interface ClickHouseRow {
 }
 
 /**
- * Raw usage row for traceability (non-TokenHub or unrecognized format).
+ * Minimized categorical fallback row (non-TokenHub or unrecognized format).
  *
  * 字段与主表 `ClickHouseRow` 尽量对齐，方便运维/报表跨表 JOIN 查询。
  * 与 `usage_logs` 的差异：
- *  - 保留 `usage` 原文（JSON 字符串），不做解析
+ *  - `usage` 只保留固定数值字段，不保留任意 key/value 或失败详情
  *  - `reason` 字段记录落入 raw 表的原因（unknown_model / invalid_format / ...）
- *  - `key_id` 与 `user_id` **双写**（老表用 key_id，新表用 user_id），
- *    通过 ClickHouse `JSONEachRow` 格式的容错性实现双向兼容
+ *  - `key_id` 与 `user_id` 保留旧 schema 列，但都写固定脱敏值
  */
 export interface ClickHouseRawUsageRow {
   timestamp: string;
-  model_id: string;
-  model_name: string;          // 展示名（与主表对齐；无定价配置时回落 model_id）
-  key_id: string;              // 老列（兼容存量表）
-  user_id: string;             // 新列（与主表 user_id 命名统一），值 = key_id
+  model_id: string;            // fixed redaction
+  model_name: string;          // fixed redaction
+  key_id: string;              // legacy column; fixed redaction
+  user_id: string;             // legacy column; fixed redaction
   session_key: string;
   turn_seq: number;            // 与主表对齐
   user_input: string;          // 与主表对齐（用户输入前缀）
   upstream_url: string;
   stream: number;
-  usage: string;               // JSON.stringify(raw usage), unmodified
+  usage: string;               // JSON of allowlisted finite numeric usage counters
   reason: string;              // 'non_tokenhub' | 'unknown_model' | 'invalid_format' | 'invalid_credit' | 'report_failed'
-  routed_from: string;         // 路由前的原始模型
-  space_id: string;            // 空间/租户标识（从 /proxy/<spaceId>/... 提取）
+  routed_from: string;         // fixed redaction
+  space_id: string;            // fixed redaction; unavailable for tenant grouping
   source_tag: string;          // 来源标记，恒为 "proxy"
   host: string;
-  upstream_request_id: string; // 上游响应 header `x-request-id`（追溯用；与主表对齐）
+  upstream_request_id: string; // fixed redaction
 }
 
 // ── Writer state ────────────────────────────────────────────────────────────
 
-const HOST_ID = hostname();
+const SAFE_HOST_CATEGORY = "proxy";
+const SAFE_RAW_REASONS = new Set([
+  "invalid_credit",
+  "invalid_format",
+  "non_tokenhub",
+  "report_failed",
+  "unknown_model",
+]);
 
 let config: ClickHouseConfig | null = null;
 let client: ClickHouseClient | null = null;
@@ -258,7 +271,7 @@ async function ensureClickHouse(cfg: ClickHouseConfig): Promise<void> {
     clickhouse_settings: { wait_end_of_query: 1 },
   });
 
-  // Raw usage table (traceability for non-TokenHub / unrecognized format).
+  // Categorical fallback table for non-TokenHub / unrecognized format.
   if (cfg.rawTable) {
     // 新表默认排序键用 user_id（与主表对齐）；老表继续用 key_id（在 migrate 里补齐 user_id 列即可）
     const rawDdl = [
@@ -368,7 +381,7 @@ export async function migrateSchema(
       type: "LowCardinality(String) DEFAULT 'proxy'",
     },
     // 上游响应 header `x-request-id`（tokenhub 等 OpenAI/Anthropic 兼容网关返回）。
-    // 本次新增：用于跨系统追溯（客户端 x-request-id → 我方 upstream_request_id → 上游日志）。
+    // Legacy schema column retained; privacy-safe rows write fixed redaction.
     { table: cfg.table, column: "upstream_request_id", type: "String DEFAULT ''" },
     // cost-guard 压缩节省 token：max(0, preCompressTokens − postCompressTokens)
     { table: cfg.table, column: "compress_tokens_saved", type: "UInt64 DEFAULT 0" },
@@ -377,7 +390,7 @@ export async function migrateSchema(
     { table: cfg.table, column: "post_compress_tokens", type: "UInt64 DEFAULT 0" },
   ];
 
-  // usage_raw：追溯表补齐（本次新增 6 列 + model_name + upstream_request_id）
+  // usage_raw：兼容旧表字段；privacy-safe rows 不提供身份或 request-id 追溯。
   if (cfg.rawTable) {
     migrations.push(
       { table: cfg.rawTable, column: "user_id", type: "String DEFAULT ''" },
@@ -469,7 +482,7 @@ const CREDIT_SANITY_CAP = 1_000_000;
 
 /**
  * Detect whether a computed credit value is anomalous and should be routed
- * to the raw traceability table instead of trusted for billing.
+ * to the categorical fallback table instead of trusted for aggregate cost.
  *
  * Triggers:
  *   - NaN / Infinity / -Infinity (arithmetic broke somewhere)
@@ -490,7 +503,7 @@ export interface ClickHouseWriteEntry {
   timestamp: string;
   event: string;
   modelId: string;
-  /** User identifier: user_id from auth/verify when enabled, or SHA-256(apiKey)[:8] fallback. */
+  /** In-process identity used for business logic; final rows use fixed redaction. */
   keyId: string;
   sessionKey?: string;
   turnSeq?: number;
@@ -499,13 +512,12 @@ export interface ClickHouseWriteEntry {
   stream: boolean;
   usage?: Record<string, unknown>;
   routedFrom?: string;
-  /** Space/tenant ID extracted from /proxy/<spaceId>/... path. */
+  /** In-process space/tenant ID; final rows use fixed redaction. */
   spaceId?: string;
   /**
    * Upstream request id — 来自上游响应 header `x-request-id`（tokenhub 等
-   * OpenAI/Anthropic 兼容网关会返回）。缺失时上游没返回或读取失败，落表为 ""。
-   * 用于跨系统追溯：客户端拿到的 x-request-id → 我方 usage_logs.upstream_request_id
-   * → 上游服务日志。
+   * OpenAI/Anthropic 兼容网关会返回）。仅用于进程内业务逻辑；隐私安全行写固定
+   * 脱敏值，不能用于跨系统追溯。
    */
   upstreamRequestId?: string;
   /**
@@ -616,13 +628,13 @@ export function buildClickHouseRow(entry: ClickHouseWriteEntry): ClickHouseRow |
   return {
     timestamp: toChTimestamp(entry.timestamp),
     event: entry.event,
-    session_key: entry.sessionKey ?? "",
+    session_key: privacySafeSessionId(entry.sessionKey),
     turn_seq: entry.turnSeq ?? 0,
-    user_input: entry.userInput ?? "",
-    model_id: entry.modelId,
+    user_input: privacySafeText(entry.userInput),
+    model_id: entry.modelId ?? "",
     model_name: resolveModelName(entry.pricingConfig, entry.modelId),
-    user_id: entry.keyId,
-    upstream_url: entry.upstreamUrl,
+    user_id: entry.keyId ?? "",
+    upstream_url: privacySafeOrigin(entry.upstreamUrl),
     stream: entry.stream ? 1 : 0,
     prompt_tokens: promptTokens,
     completion_tokens: completionTokens,
@@ -639,8 +651,8 @@ export function buildClickHouseRow(entry: ClickHouseWriteEntry): ClickHouseRow |
     routed_from: entry.routedFrom ?? "",
     space_id: entry.spaceId ?? "",
     source_tag: "proxy",
-    host: HOST_ID,
-    upstream_request_id: entry.upstreamRequestId ?? "",
+    host: SAFE_HOST_CATEGORY,
+    upstream_request_id: "",
     compress_tokens_saved: compressTokens.saved,
     pre_compress_tokens: compressTokens.pre,
     post_compress_tokens: compressTokens.post,
@@ -648,7 +660,7 @@ export function buildClickHouseRow(entry: ClickHouseWriteEntry): ClickHouseRow |
 }
 
 /**
- * Determine if usage should be written to the raw traceability table.
+ * Determine if usage should be written to the categorical fallback table.
  *
  * Returns the reason string when the usage should be captured raw:
  *   - 'non_tokenhub'    — upstream URL does not contain "tokenhub"
@@ -702,32 +714,31 @@ export function buildRawUsageRow(
 ): ClickHouseRawUsageRow {
   return {
     timestamp: toChTimestamp(entry.timestamp),
-    model_id: entry.modelId,
+    model_id: entry.modelId ?? "",
     model_name: resolveModelName(entry.pricingConfig, entry.modelId),
-    key_id: entry.keyId,          // 老列兼容（老 usage_raw 表仍以 key_id 作为主键的一部分）
-    user_id: entry.keyId,          // 新列（与主表统一）；双写靠 JSONEachRow 容错
-    session_key: entry.sessionKey ?? "",
+    key_id: entry.keyId ?? "",
+    user_id: entry.keyId ?? "",
+    session_key: privacySafeSessionId(entry.sessionKey),
     turn_seq: entry.turnSeq ?? 0,
-    user_input: entry.userInput ?? "",
-    upstream_url: entry.upstreamUrl,
+    user_input: privacySafeText(entry.userInput),
+    upstream_url: privacySafeOrigin(entry.upstreamUrl),
     stream: entry.stream ? 1 : 0,
-    usage: JSON.stringify(entry.usage ?? {}),
-    reason,
+    usage: JSON.stringify(privacySafeUsage(entry.usage)),
+    reason: SAFE_RAW_REASONS.has(reason) ? reason : "invalid_format",
     routed_from: entry.routedFrom ?? "",
     space_id: entry.spaceId ?? "",
     source_tag: "proxy",
-    host: HOST_ID,
-    upstream_request_id: entry.upstreamRequestId ?? "",
+    host: SAFE_HOST_CATEGORY,
+    upstream_request_id: "",
   };
 }
 
 /**
  * Pure mapper: build a raw-table row for a **failed credit report** scenario.
  *
- * Reason is fixed to `"report_failed"`. The error detail (HTTP status / timeout
- * / upstream code message) is embedded into the usage JSON under a meta field
- * `__report_error`, so the raw table's `usage` column self-contains everything
- * an ops user needs to reconstruct the failure without a JOIN.
+ * Reason is fixed to `"report_failed"`. Error details are intentionally not
+ * stored; the usage JSON contains only allowlisted numeric counters plus a
+ * fixed `report_failed` category flag.
  *
  * Row shape is identical to `buildRawUsageRow` output, allowing it to be
  * appended to the same `usage_raw` table and flushed by `flushRaw`.
@@ -736,33 +747,31 @@ export function buildFailedReportRawRow(
   entry: ClickHouseWriteEntry,
   errorDetail: string,
 ): ClickHouseRawUsageRow {
-  const usageWithError = {
-    ...(entry.usage ?? {}),
-    __report_error: errorDetail,
-  };
+  void errorDetail;
+  const usageWithError = { ...privacySafeUsage(entry.usage), report_failed: 1 };
   return {
     timestamp: toChTimestamp(entry.timestamp),
-    model_id: entry.modelId,
+    model_id: entry.modelId ?? "",
     model_name: resolveModelName(entry.pricingConfig, entry.modelId),
-    key_id: entry.keyId,
-    user_id: entry.keyId,
-    session_key: entry.sessionKey ?? "",
+    key_id: entry.keyId ?? "",
+    user_id: entry.keyId ?? "",
+    session_key: privacySafeSessionId(entry.sessionKey),
     turn_seq: entry.turnSeq ?? 0,
-    user_input: entry.userInput ?? "",
-    upstream_url: entry.upstreamUrl,
+    user_input: privacySafeText(entry.userInput),
+    upstream_url: privacySafeOrigin(entry.upstreamUrl),
     stream: entry.stream ? 1 : 0,
     usage: JSON.stringify(usageWithError),
     reason: "report_failed",
     routed_from: entry.routedFrom ?? "",
     space_id: entry.spaceId ?? "",
     source_tag: "proxy",
-    host: HOST_ID,
-    upstream_request_id: entry.upstreamRequestId ?? "",
+    host: SAFE_HOST_CATEGORY,
+    upstream_request_id: "",
   };
 }
 
 /**
- * Enqueue a "credit report failed" raw record to the traceability table.
+ * Enqueue a "credit report failed" categorical fallback record.
  *
  * Fire-and-forget: never throws, no-op when ClickHouse disabled or `rawTable`
  * not configured. Uses the same `rawBuffer` and `flushRaw` machinery as
@@ -793,7 +802,7 @@ export function writeClickHouse(entry: ClickHouseWriteEntry): void {
   if (disabled || !config) return;
 
   try {
-    // Raw usage traceability (only when rawTable is configured).
+    // Categorical fallback (only when rawTable is configured).
     if (config.rawTable) {
       const rawReason = getRawUsageReason(
         entry.upstreamUrl,
@@ -1052,43 +1061,42 @@ export function buildSessionInitLogRow(input: SessionInitLogInput): SessionInitL
   const reason = (input.bypassReason ?? "").slice(0, BYPASS_REASON_MAX_CHARS);
   return {
     timestamp: toChTimestamp(input.timestamp),
-    session_key: input.sessionKey ?? "",
+    session_key: privacySafeSessionId(input.sessionKey),
     space_id: input.spaceId ?? "",
     user_id: input.userId ?? "",
-    team_id: input.teamId ?? "",
-    agent_id: input.agentId ?? "",
+    team_id: privacySafeText(input.teamId),
+    agent_id: privacySafeText(input.agentId),
     agent_source: input.agentSource,
     bypassed: input.bypassed ? 1 : 0,
     bypass_reason: reason,
     final_status: input.finalStatus,
     source_tag: "proxy",
-    host: HOST_ID,
+    host: SAFE_HOST_CATEGORY,
   };
 }
 
 /** 构造 tool_call 行；纯函数便于测试。 */
 export function buildToolCallLogRow(input: ToolCallLogInput): ToolCallLogRow {
-  const body = (input.requestBody ?? "").slice(0, TOOL_CALL_BODY_MAX_BYTES);
   return {
     timestamp: toChTimestamp(input.timestamp),
-    session_key: input.sessionKey ?? "",
+    session_key: privacySafeSessionId(input.sessionKey),
     turn_seq: input.turnSeq ?? 0,
     space_id: input.spaceId ?? "",
     user_id: input.userId ?? "",
-    team_id: input.teamId ?? "",
-    agent_id: input.agentId ?? "",
+    team_id: privacySafeText(input.teamId),
+    agent_id: privacySafeText(input.agentId),
     agent_source: input.agentSource,
     kind: input.kind,
     bridge_source: input.bridgeSource ?? "",
     initiated_tool: input.initiatedTool ?? "",
     executed_endpoint: input.executedEndpoint,
-    request_body: body,
-    request_body_hash: bodyHash16(body),
+    request_body: "",
+    request_body_hash: "",
     upstream_status: input.upstreamStatus ?? 0,
     elapsed_ms: input.elapsedMs ?? 0,
     reject_reason: (input.rejectReason ?? "").slice(0, REJECT_REASON_MAX_CHARS),
     source_tag: "proxy",
-    host: HOST_ID,
+    host: SAFE_HOST_CATEGORY,
   };
 }
 

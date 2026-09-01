@@ -1,7 +1,6 @@
 /** Core request handler: intercept → forward → parse usage → log. */
 
 import type { Context } from "hono";
-import { createHash } from "node:crypto";
 import { writeLog, createPipeline } from "./logger.js";
 import {
   apiKeyToKeyId,
@@ -57,6 +56,21 @@ import {
   isRateLimitExceededError,
   recordInputTokenUsage,
 } from "./rate-limit/guard.js";
+import {
+  buildSafeUpstreamHeaders,
+  MissingUpstreamCredentialError,
+  sameOrigin,
+} from "./upstream-headers.js";
+import {
+  SessionContextUnavailableError,
+  SessionIdentityConflictError,
+  SessionStoreUnavailableError,
+  sessionStoreKey,
+} from "./session/store.js";
+import {
+  getOpenAISourceBindingError,
+  type OpenAIChatSource,
+} from "./agent-adapters/index.js";
 
 /**
  * Build a per-request TdaiClient. `spaceId` (extracted from the request path
@@ -202,13 +216,6 @@ function flattenMessagesForOpik(messages: unknown[]): unknown[] {
   return result;
 }
 
-const SKIP_REQUEST_HEADERS = new Set([
-  "host",
-  "content-length",
-  "transfer-encoding",
-  "connection",
-]);
-
 const SKIP_RESPONSE_HEADERS = new Set([
   "content-encoding",
   "transfer-encoding",
@@ -255,43 +262,41 @@ function buildUpstreamBody(
 }
 
 /**
- * Build upstream headers from request headers + routing auth overrides.
- * If config.upstream.apiKey is set, it overrides the request's Authorization header
- * only for the default route (not alternate model route).
+ * Build upstream headers without letting an extension redirect configured credentials.
  */
 function buildUpstreamHeaders(
   c: Context,
-  _config: ProxyConfig,
   target: ForwardTarget,
-  sessionKey?: string,
+  credentialOrigin: string,
   effectiveApiKey?: string,
 ): Record<string, string> {
-  const headers: Record<string, string> = {};
-  for (const [k, v] of c.req.raw.headers.entries()) {
-    if (!SKIP_REQUEST_HEADERS.has(k.toLowerCase())) {
-      headers[k] = v;
-    }
-  }
-  headers["content-type"] = "application/json";
+  const originBoundApiKey = target.authHeaders === null
+    && sameOrigin(target.url, credentialOrigin)
+    ? effectiveApiKey
+    : undefined;
+  return buildSafeUpstreamHeaders(c.req.raw.headers, {
+    protocol: "openai",
+    apiKey: originBoundApiKey,
+    authHeaders: target.authHeaders,
+  });
+}
 
-  // `effectiveApiKey` is pre-resolved by the caller — see the resolveEffective
-  // block near the call site. Non-empty → inject as server-side Bearer;
-  // empty/undefined → passthrough (client's own Authorization survives).
-  // cost-guard's `target.authHeaders` still gets to override everything.
-  if (effectiveApiKey && !target.authHeaders) {
-    headers["authorization"] = `Bearer ${effectiveApiKey}`;
+function buildRetryUpstreamHeaders(
+  c: Context,
+  target: ForwardTarget,
+  primaryHeaders: Record<string, string>,
+): Record<string, string> | null {
+  if (!target.retryTarget) return null;
+  if (target.retryTarget.authHeaders !== null) {
+    return buildSafeUpstreamHeaders(c.req.raw.headers, {
+      protocol: "openai",
+      authHeaders: target.retryTarget.authHeaders,
+    });
   }
-
-  if (target.authHeaders) {
-    for (const [k, v] of Object.entries(target.authHeaders)) {
-      headers[k] = v;
-    }
+  if (sameOrigin(target.url, target.retryTarget.url)) {
+    return { ...primaryHeaders };
   }
-
-  if (sessionKey) {
-    headers["x-vertex-ai-session-id"] = sessionKey;
-  }
-  return headers;
+  throw new MissingUpstreamCredentialError();
 }
 
 /**
@@ -300,33 +305,15 @@ function buildUpstreamHeaders(
 async function forwardWithRetry(
   target: ForwardTarget,
   upstreamHeaders: Record<string, string>,
+  retryHeaders: Record<string, string> | null,
   upstreamBody: Record<string, unknown>,
   originalBody: Record<string, unknown>,
-  originalHeaders: Record<string, string>,
   pipe: ReturnType<typeof createPipeline>,
   forwardTimeoutMs: number,
-  sessionKeyForDebug?: string,
   rateLimitContext?: { config: ProxyConfig; instanceId?: string },
 ): Promise<{ resp: Response; retried: boolean }> {
   let upstreamResp: Response | undefined;
   let forwardFailed = false;
-
-  // ── Optional full-body dump (dev only) ───────────────────────────────
-  // 打开: PROXY_DEBUG_DUMP_BODY=/tmp/proxy-outbound
-  // 每次 forward 落一个文件,方便排查上游 400。
-  if (process.env.PROXY_DEBUG_DUMP_BODY) {
-    try {
-      const fs = await import("node:fs");
-      const dir = process.env.PROXY_DEBUG_DUMP_BODY;
-      fs.mkdirSync(dir, { recursive: true });
-      const ts = new Date().toISOString().replace(/[:.]/g, "-");
-      const fn = `${dir}/${ts}-${sessionKeyForDebug ?? "nosid"}.json`;
-      fs.writeFileSync(fn, JSON.stringify({ url: target.url, headers: upstreamHeaders, body: upstreamBody }, null, 2));
-      console.log(`[dump-body] wrote ${fn}`);
-    } catch (e) {
-      console.log(`[dump-body] error: ${(e as Error).message}`);
-    }
-  }
 
   // ── Optional outbound body md5 debug log (see anthropicHandler.ts) ─────
   // openai 协议侧没有 cache_control 概念，只算 sys + 整个 messages 数组两个 md5。
@@ -338,15 +325,13 @@ async function forwardWithRetry(
         ? sysMsg.content
         : sysMsg?.content ? JSON.stringify(sysMsg.content) : "";
       const msgsFullStr = JSON.stringify(msgs);
-      const sysMd5 = createHash("md5").update(sysStr).digest("hex").slice(0, 12);
-      const msgsFullMd5 = createHash("md5").update(msgsFullStr).digest("hex").slice(0, 12);
       // eslint-disable-next-line no-console
       console.log(
-        `[outbound-md5] session=${sessionKeyForDebug ?? "?"} protocol=openai sysBytes=${sysStr.length} sysMd5=${sysMd5} msgsCount=${msgs.length} msgsFullBytes=${msgsFullStr.length} msgsFullMd5=${msgsFullMd5}`,
+        `[outbound-summary] protocol=openai system_present=${sysMsg !== undefined} sysBytes=${sysStr.length} msgsCount=${msgs.length} msgsBytes=${msgsFullStr.length}`,
       );
-    } catch (e) {
+    } catch {
       // eslint-disable-next-line no-console
-      console.log(`[outbound-md5] session=${sessionKeyForDebug ?? "?"} <error: ${(e as Error).message}>`);
+      console.log("[outbound-summary] protocol=openai failed");
     }
   }
 
@@ -354,6 +339,7 @@ async function forwardWithRetry(
     method: "POST",
     headers: upstreamHeaders,
     body: JSON.stringify(upstreamBody),
+    redirect: "manual",
   };
   if (forwardTimeoutMs > 0) {
     fetchOpts.signal = AbortSignal.timeout(forwardTimeoutMs);
@@ -378,6 +364,12 @@ async function forwardWithRetry(
     forwardFailed = true;
   }
 
+  if (upstreamResp && upstreamResp.status >= 300 && upstreamResp.status < 400) {
+    pipe.forwardDone(upstreamResp.status);
+    pipe.error("FORWARD_REDIRECT", "Upstream redirect rejected");
+    throw new Error("Upstream redirect rejected");
+  }
+
   if (upstreamResp) {
     pipe.forwardDone(upstreamResp.status);
   }
@@ -390,11 +382,7 @@ async function forwardWithRetry(
     pipe.info("RETRY", `Routed model failed (${reason}), retryUrl=${target.retryTarget.url} model=${target.retryTarget.model}`);
 
     const retryBody = { ...originalBody, model: target.retryTarget.model };
-    const retryHeaders: Record<string, string> = { ...originalHeaders };
-    retryHeaders["content-type"] = "application/json";
-    if (sessionKeyForDebug) {
-      retryHeaders["x-vertex-ai-session-id"] = sessionKeyForDebug;
-    }
+    if (!retryHeaders) throw new MissingUpstreamCredentialError();
 
     try {
       if (rateLimitContext) {
@@ -409,11 +397,15 @@ async function forwardWithRetry(
         method: "POST",
         headers: retryHeaders,
         body: JSON.stringify(retryBody),
+        redirect: "manual",
       };
       if (forwardTimeoutMs > 0) {
         retryFetchOpts.signal = AbortSignal.timeout(forwardTimeoutMs);
       }
       upstreamResp = await fetch(target.retryTarget.url, retryFetchOpts);
+      if (upstreamResp.status >= 300 && upstreamResp.status < 400) {
+        throw new Error("Upstream redirect rejected");
+      }
       if (upstreamResp.ok) {
         pipe.info("RETRY_SUCCESS", `Retry returned ${upstreamResp.status}`);
       } else {
@@ -446,7 +438,31 @@ async function forwardWithRetry(
 export async function handleChatCompletions(
   c: Context,
   config: ProxyConfig,
+  boundAgentSource?: OpenAIChatSource,
 ): Promise<Response> {
+  const endpoint = matchWhitelistEndpoint(c.req.path);
+  if (!endpoint || endpoint.protocol !== "openai" || !endpoint.isPrimary) {
+    return c.json(
+      { error: { type: "not_found_error", message: "Unsupported OpenAI endpoint" } },
+      404,
+    );
+  }
+  // The URL route, not a caller header or arbitrary path prefix, binds the
+  // product platform. Reject before auth, body parsing, cache/Core or logs.
+  const sourceBindingError = getOpenAISourceBindingError(c.req.path, boundAgentSource);
+  if (sourceBindingError === "unbound") {
+    return c.json(
+      { error: { type: "not_found_error", message: "Unsupported OpenAI platform route" } },
+      404,
+    );
+  }
+  if (sourceBindingError === "conflict") {
+    return c.json(
+      { error: { type: "invalid_request_error", message: "Platform route binding mismatch" } },
+      400,
+    );
+  }
+  const agentSource = boundAgentSource!;
   const startTime = new Date().toISOString();
   const traceId = uuidv7();
 
@@ -577,8 +593,8 @@ export async function handleChatCompletions(
   // 400，避免请求转发成功却因无定价而漏计费。价目表为空时跳过（向后兼容）。
   //
   // 内部/外部用户一视同仁 —— internal callers must also request by
-  // `modelName`, ensuring upstream ids and billing/observability keys align
-  // across all traffic.
+  // `modelName`, keeping upstream IDs and in-process pricing lookup aligned.
+  // Privacy-safe telemetry exports do not retain the model identity.
   const requestedModel = typeof body.model === "string" ? body.model : "unknown";
   if (!isModelInPricing(config.creditPricing, requestedModel)) {
     return c.json(
@@ -622,27 +638,18 @@ export async function handleChatCompletions(
   let messages = Array.isArray(body.messages) ? body.messages : [];
   const isStream = body.stream === true;
 
-  // [debug] Log last 3 message roles and content types to diagnose session-init issues
+  // Privacy-safe request-tail shape for session-init diagnosis.
   if (config.sessionInit?.enabled && messages.length > 2) {
     const tail = messages.slice(-3);
-    const summary = tail.map((m: any, idx: number) => {
-      const role = m.role;
-      const ct = m.content;
-      const contentType = typeof ct === "string" ? `string(${ct.slice(0, 80)})` :
-        Array.isArray(ct) ? `array[${ct.map((b: any) => b.type).join(",")}]` :
-        ct === null ? "null" : typeof ct;
-      const tcid = m.tool_call_id;
-      const tcs = m.tool_calls ? `tool_calls[${m.tool_calls.map((t: any) => t.id).join(",")}]` : "";
-      return `[${idx}]role=${role} content=${contentType} tool_call_id=${tcid} ${tcs}`;
-    }).join(" | ");
-    console.log(`[session-init-debug] raw-tail msgs=${messages.length} ${summary}`);
+    const toolMessageCount = tail.filter((message: any) =>
+      Boolean(message?.tool_call_id) || Array.isArray(message?.tool_calls)
+    ).length;
+    console.log("[session-init-debug] request_tail", {
+      messageCount: messages.length,
+      tailCount: tail.length,
+      toolMessageCount,
+    });
   }
-
-  // ── Resolve agent source from URL path (e.g. /claude-code/v1/chat/completions) ──
-  const pathParts = c.req.path.split("/").filter(Boolean);
-  const agentFromPath = pathParts[0] && !["v1", "proxy", "skill-bridge", "memory-bridge"].includes(pathParts[0])
-    ? pathParts[0] : undefined;
-  const agentSource = agentFromPath ?? "claude-code";
 
   // ── Identity inspection ──────────────────────────────────────────────────
   const reqHeaders: Record<string, string> = {};
@@ -772,7 +779,12 @@ export async function handleChatCompletions(
       if (memCmd && isMemCommandAllowed(config.memCommand, memCmd.command)) {
         const { getSessionStore } = await import("./session/store.js");
         const store = getSessionStore();
-        const compositeKey = `${agentSource}:${sessionKey}`;
+        const compositeKey = sessionStoreKey({
+          userId: userId || "anonymous",
+          agentSource,
+          sessionId: sessionKey,
+          spaceId,
+        });
         store.bind(compositeKey, { userId: userId || "anonymous", agentSource, sessionId: sessionKey, spaceId });
 
         // ── 强制归档旧 agent 的 skill buffer（best-effort）──
@@ -795,9 +807,9 @@ export async function handleChatCompletions(
                 },
                 { serviceId: si.space_id },
               ).then((res) => {
-                console.log(`[session-reset] force-archive old buffer: status=${res.status} session=${sessionKey} agent=${si.agent_id}`);
-              }).catch((err) => {
-                console.warn(`[session-reset] force-archive failed (best-effort): ${err instanceof Error ? err.message : String(err)}`);
+                console.log(`[session-reset] force-archive completed status=${res.status}`);
+              }).catch(() => {
+                console.warn("[session-reset] force-archive failed category=upstream_error");
               });
             }).catch(() => {});
           }
@@ -806,7 +818,7 @@ export async function handleChatCompletions(
         const resetEpoch = Date.now();
         await store.set(compositeKey, { status: "uninitialized", keyId: sessionKey, startedAt: resetEpoch, attemptCount: 0, userId: userId || "anonymous", resetEpoch, resetFlow: true });
         const bindingRepo = store.getBindingRepo();
-        if (bindingRepo) await bindingRepo.deleteBinding(spaceId, sessionKey).catch(() => {});
+        if (bindingRepo) await bindingRepo.deleteBinding(spaceId, userId || "anonymous", agentSource, sessionKey).catch(() => {});
         console.log(`[mem-command:pre] session-reset session=${sessionKey} → falling through to pop form`);
       }
     }
@@ -818,7 +830,7 @@ export async function handleChatCompletions(
   let injectedSkipped = !conversationId || isAuxiliary || _dshMemoryBypass;
   let sessionJustRegistered = false;
   let _resetFlowResult: { agentName: string; agentIdShort: string; teamId: string; taskName?: string | null; bypassed?: boolean } | null = null;
-  console.log(`[injection-debug] conversationId=${conversationId} sessionKey=${sessionKey} userId=${userId} agentSource=${agentSource} kind=${_requestKind} dshHeadless=${_dshHeadless} dshMemoryBypass=${_dshMemoryBypass} sessionInitEnabled=${_sessionInitConfig.enabled} injectionEnabled=${config.injection?.enabled} injectors=${JSON.stringify(config.injection?.injectors)} injectedSkipped=${injectedSkipped} spaceId=${spaceId}`);
+  console.log(`[injection-debug] request identity=${conversationId ? "present" : "none"} user=${userId ? "present" : "none"} agentSource=${agentSource} kind=${_requestKind} dshHeadless=${_dshHeadless} dshMemoryBypass=${_dshMemoryBypass} sessionInitEnabled=${_sessionInitConfig.enabled} injectionEnabled=${config.injection?.enabled} injectorCount=${config.injection?.injectors?.length ?? 0} injectedSkipped=${injectedSkipped} space=${spaceId ? "present" : "none"}`);
   if (_sessionInitConfig.enabled && conversationId && !isAuxiliary && !_dshMemoryBypass) {
     try {
       const { getSessionStore, handleSessionInit, parsePresetIdentity } = await import("./session/index.js");
@@ -839,7 +851,6 @@ export async function handleChatCompletions(
       const presetIdentity = parsePresetIdentity(_sessionInitConfig, lcHeaders);
 
       // ── Session Recovery: try L2b binding before falling into session-init form ──
-      const compositeKey = `${agentSource}:${sessionKey}`;
       // Identity for repo/binding writes. userId 缺失时 fallback 到 `anonymous`
       // 复合键，保证 key path 分段合法（`u=anonymous` 走独立命名空间，天然与
       // 有 userId 的请求隔离）。参见 §4.4 边界处理。
@@ -848,12 +859,20 @@ export async function handleChatCompletions(
         agentSource,
         sessionId: sessionKey,
         spaceId,
+        teamId: presetIdentity?.teamId,
+        agentId: presetIdentity?.agentId,
+        taskId: presetIdentity?.taskId,
       };
+      const compositeKey = sessionStoreKey(identity);
       const recovered = await store.getOrRecover(compositeKey, identity, {
         metadataClient,
         messages: body.messages as Array<Record<string, unknown>> ?? [],
         presetIdentity,
       });
+      if (recovered?.contextSuppressed) {
+        console.warn("[session-init] request rejected reason=context_unavailable");
+        return c.json({ error: "session_context_unavailable" }, 409);
+      }
 
       let initResult: Awaited<ReturnType<typeof handleSessionInit>>;
       // Only treat the session as "recovered" when it's in a terminal state
@@ -940,7 +959,7 @@ export async function handleChatCompletions(
         return initResult.response;
       }
 
-      console.log(`[injection-debug] initResult session=${sessionKey} intercepted=${initResult.intercepted} bypassed=${initResult.bypassed} justRegistered=${initResult.justRegistered} resetFlow=${(initResult as any).resetFlow} hasSessionInfo=${!!initResult.sessionInfo} hasAgentDetail=${!!initResult.agentDetail}`);
+      console.log(`[injection-debug] initResult session=<redacted> intercepted=${initResult.intercepted} bypassed=${initResult.bypassed} justRegistered=${initResult.justRegistered} resetFlow=${(initResult as any).resetFlow} hasSessionInfo=${!!initResult.sessionInfo} hasAgentDetail=${!!initResult.agentDetail}`);
       // 见 anthropicHandler 对称位置：只在真正走 sessionInit state machine 时继承。
       if (wentThroughSessionInitStateMachine && initResult.justRegistered) sessionJustRegistered = true;
 
@@ -965,9 +984,9 @@ export async function handleChatCompletions(
             userKey: apiKey || null,
             timeoutMs: config.tdai.memory.timeoutMs,
           });
-          console.log(`[asset-capability] user=${(initResult.sessionInfo as { user_id?: string }).user_id ?? "-"} flags=${JSON.stringify(assetCapabilities)}`);
-        } catch (err) {
-          console.warn(`[asset-capability] resolve failed: ${err instanceof Error ? err.message : String(err)}`);
+          console.log("[asset-capability] resolved user=present");
+        } catch {
+          console.warn("[asset-capability] resolve failed");
         }
       }
 
@@ -1001,13 +1020,10 @@ export async function handleChatCompletions(
           }
           if (peek && isMemCommandAllowed(config.memCommand, peek.command)) {
             memCommandPending = true;
-            console.log(`[hook-cache] prewarm skipped: mem-command pending (cmd=${peek.command}) session=${sessionKey}`);
+            console.log("[hook-cache] prewarm skipped reason=mem_command_pending");
           }
-        } catch (err) {
-          console.warn(
-            "[mem-command] pre-prewarm peek failed:",
-            err instanceof Error ? err.message : String(err),
-          );
+        } catch {
+          console.warn("[mem-command] pre-prewarm peek failed category=unexpected_error");
           // peek 失败不阻塞主链路，退化为原有行为（正常 prewarm）。
         }
       }
@@ -1037,11 +1053,8 @@ export async function handleChatCompletions(
             assetCapabilities,
             callerUserKey: apiKey ?? undefined,
           }, { clearBefore: true });
-        } catch (err) {
-          console.warn(
-            "[hook-cache] handler prewarm error:",
-            err instanceof Error ? err.message : String(err),
-          );
+        } catch {
+          console.warn("[hook-cache] handler prewarm failed category=unexpected_error");
           // Don't re-throw: the pipeline's resolveHookBlocks has its own
           // cache-miss → execute() fallback as a safety net (see pipeline.ts).
         }
@@ -1073,9 +1086,18 @@ export async function handleChatCompletions(
         };
       }
     } catch (err: unknown) {
-      console.error("[session-init] Error in handleSessionInit:", err instanceof Error ? err.message : String(err));
-      sessionInfo = undefined;
-      injectedSkipped = true;
+      if (err instanceof SessionIdentityConflictError) {
+        return c.json({ error: "session_identity_conflict" }, 403);
+      }
+      if (err instanceof SessionContextUnavailableError) {
+        return c.json({ error: "session_context_unavailable" }, 409);
+      }
+      if (err instanceof SessionStoreUnavailableError) {
+        console.error("[session-init] failed category=store_unavailable");
+        return c.json({ error: "session_store_unavailable" }, 503);
+      }
+      console.error("[session-init] failed category=unexpected_error");
+      return c.json({ error: "session_store_unavailable" }, 503);
     }
   }
 
@@ -1118,7 +1140,7 @@ export async function handleChatCompletions(
   // 请求分类：OpenAI 协议不做 CC 的 fork/sidequery 分流（handler.ts 没接 CC
   // routing），所有请求都视为 main —— 与 codebuddy adapter classifyRequest 一致。
   if (config.memCommand?.enabled && !isAuxiliary && !_dshHeadless) {
-    const { parseMemCommand, isMemCommandAllowed, executeMemCommand, buildMemResponse, extractSimpleMessages, truncateArgs } = await import("./mem-command/index.js");
+    const { parseMemCommand, isMemCommandAllowed, executeMemCommand, buildMemResponse, extractSimpleMessages } = await import("./mem-command/index.js");
     // 常规检测：最后一条 user message
     let memCmd = parseMemCommand(body as Record<string, unknown>, agentSource);
     // Session init 状态机在本 turn 完成终态（初始化 or bypass）时，最后一条
@@ -1139,7 +1161,7 @@ export async function handleChatCompletions(
           stream: isStream,
           requestId: `mem-cmd-${Date.now()}`,
         });
-        console.log(`[mem-command] cmd=${memCmd.command} args="${truncateArgs(memCmd.args)}" session=${sessionKey} blocked: session not initialized`);
+        console.log("[mem-command] blocked session=<redacted> reason=session_not_initialized");
         return errResponse;
       }
       const memResult = await executeMemCommand(memCmd, {
@@ -1158,6 +1180,11 @@ export async function handleChatCompletions(
         // OpenAI 协议无 extended thinking 概念，恒 false
       });
 
+      if (!memResult.success) {
+        console.log("[mem-command] completed session=<redacted> success=false");
+        return memResult.response;
+      }
+
       // L0 写入 — 同步 await 保证落盘再返回（跟主对话路径的 trackWrite/withL0Retry
       // 兜底不同，这里 mem 命令是"仅这一次"路径，必须显式等）。
       const tdaiClientForMem = createTdaiClient(config, spaceId);
@@ -1170,8 +1197,8 @@ export async function handleChatCompletions(
         const userMsg = { role: "user" as const, content: memCmd.rawMessage };
         try {
           await recordTdaiTurn(tdaiClientForMem, tdaiIdentityForMem, userMsg, memResult.messageText);
-        } catch (err: unknown) {
-          console.error("[mem-command] L0 write error:", err);
+        } catch {
+          console.error("[mem-command] L0 write failed");
         }
       }
 
@@ -1191,17 +1218,17 @@ export async function handleChatCompletions(
             protocol: "openai",
             assetCapabilities,
           });
-        } catch (err: unknown) {
-          console.warn("[mem-command] skill extract trigger error:", err instanceof Error ? err.message : String(err));
+        } catch {
+          console.warn("[mem-command] skill extract trigger failed");
         }
       }
 
-      console.log(`[mem-command] cmd=${memCmd.command} args="${truncateArgs(memCmd.args)}" session=${sessionKey} success=${memResult.success}`);
+      console.log(`[mem-command] completed session=<redacted> success=${memResult.success}`);
 
       // Langfuse: 上报 mem-command（跟 anthropicHandler 对称）。
       //   lf 在 L955 才构造，这里 inline 推导 turnSeq → traceId。
       const memTurnSeq = countHumanTurns(messages, "openai");
-      const memTraceId = langfuseTurnTraceId(sessionKey, memTurnSeq);
+      const memTraceId = langfuseTurnTraceId(traceId);
       langfuseReportGeneration({
         traceId: memTraceId,
         name: "memory-proxy",
@@ -1281,23 +1308,18 @@ export async function handleChatCompletions(
   // upstream.agents[agent] is a single map keyed by agent name — same lookup
   // as anthropicHandler. Empty / missing entry → fall back to upstream.url,
   // preserving legacy behavior for configs that don't declare `agents:` at all.
-  const agentUpstreamEntry = agentFromPath ? config.upstream.agents?.[agentFromPath] : undefined;
-  // Per-agent apiKey resolution — three cases:
-  //   (a) no entry in agents map           → global upstream.apiKey (兜底)
-  //   (b) entry present, apiKey empty      → "" (passthrough, keep client key)
-  //   (c) entry present, apiKey non-empty  → agent.apiKey (server-side key)
-  // Presence of an entry (case b/c) cuts the global fallback — that's what
-  // lets one proxy serve mixed server-key / client-key agents at once.
-  const effectiveApiKey = agentUpstreamEntry
-    ? (agentUpstreamEntry.apiKey ?? "")
-    : config.upstream.apiKey;
+  const agentUpstreamEntry = config.upstream.agents?.[agentSource];
+  // Caller credentials terminate at MemoryProxy. URL-only agent entries use
+  // the global server key; if no server key exists, forwarding fails closed.
+  const credentialOrigin = agentUpstreamEntry?.url ?? config.upstream.url;
+  const effectiveApiKey = agentUpstreamEntry?.apiKey?.trim() || config.upstream.apiKey.trim();
   // Normalize the request path to the canonical upstream endpoint so the
   // extension's URL joining matches the host whitelist behavior.
   const forwardEndpoint = matchWhitelistEndpoint(c.req.path)?.upstreamEndpoint ?? "/chat/completions";
   // Isolation key is user-namespaced (`${user}:${session}`) so two users that
   // share the same client session id can't contaminate each other's state /
-  // turn counting. ClickHouse keeps the raw session_key (it has its own
-  // user_id column); this composite is internal to the extension only.
+  // turn counting. ClickHouse writes fixed-redaction session/user columns;
+  // this composite remains in-process and is internal to the extension only.
   const target: ForwardTarget = await resolveForwardTarget(config, {
     keyId: `${keyId}:${sessionKey}`,
     messages,
@@ -1316,7 +1338,7 @@ export async function handleChatCompletions(
     // markerOptIn=true (test env): only requests with the `/cost-guard`
     //   segment activate the router; bare paths passthrough.
     useGuard: config.costGuard.markerOptIn ? hasCostGuardMarker(c.req.path) : true,
-    agentName: agentFromPath,
+    agentName: agentSource,
   });
 
   // ── Create pipeline logger ──────────────────────────────────────────────
@@ -1336,13 +1358,12 @@ export async function handleChatCompletions(
     `session:${sessionKey}`,
   ];
 
-  // ── Langfuse turn context: one trace = one turn (deterministic traceId) ──
-  // Same (sessionKey, turnSeq) across a turn's tool-loop requests → same trace.
-  // Prefer the extension's monotonic per-session turnSeq (survives context
-  // compaction); fall back to the stateless count when it's not tracked.
+  // ── Langfuse request context: one random request trace per proxy call ─────
+  // turnSeq remains useful for in-process ordering, but privacy-safe export
+  // deliberately provides no deterministic cross-request/session grouping.
   const turnSeq = target.turnSeq > 0 ? target.turnSeq : countHumanTurns(messages, "openai");
   const lf: LangfuseTurnContext = {
-    traceId: langfuseTurnTraceId(sessionKey, turnSeq),
+    traceId: langfuseTurnTraceId(traceId),
     turnSeq,
     traceName: `${target.model} / ${keyId}`,
     userId: keyId,
@@ -1403,7 +1424,17 @@ export async function handleChatCompletions(
   writeRequestLog(config, body);
 
   // ── Build upstream request ───────────────────────────────────────────────
-  const upstreamHeaders = buildUpstreamHeaders(c, config, target, sessionKey, effectiveApiKey);
+  let upstreamHeaders: Record<string, string>;
+  let retryHeaders: Record<string, string> | null;
+  try {
+    upstreamHeaders = buildUpstreamHeaders(c, target, credentialOrigin, effectiveApiKey);
+    retryHeaders = buildRetryUpstreamHeaders(c, target, upstreamHeaders);
+  } catch (err: unknown) {
+    if (err instanceof MissingUpstreamCredentialError) {
+      return c.json({ error: err.message }, 503);
+    }
+    throw err;
+  }
 
   // Optional private preparation stage. It rewrites `body` / `messages` in
   // place, so it has to land after every host-side mutation (injection, agent
@@ -1429,23 +1460,6 @@ export async function handleChatCompletions(
   });
 
   const upstreamBody = buildUpstreamBody(body, target);
-  // Retry headers: preserve original client headers (x-request-id, user-agent,
-  // etc.), then force the primary upstream's auth — retry always goes to the
-  // default upstream (never the alternate route), so its apiKey must be applied
-  // just like the first-attempt path. Without this, retry sends the
-  // client's raw auth to tokenhub and gets 401.
-  const originalHeaders: Record<string, string> = {};
-  for (const [k, v] of c.req.raw.headers.entries()) {
-    if (!SKIP_REQUEST_HEADERS.has(k.toLowerCase())) {
-      originalHeaders[k] = v;
-    }
-  }
-  // Retry uses the same effective key as the primary path — when it
-  // resolves to "" (agent entry present but no apiKey), retry also runs
-  // on the client's own key, preserving the passthrough intent.
-  if (effectiveApiKey) {
-    originalHeaders["authorization"] = `Bearer ${effectiveApiKey}`;
-  }
 
   // Inject stream_options.include_usage for OpenAI compat
   if (isStream) {
@@ -1467,10 +1481,9 @@ export async function handleChatCompletions(
 
   try {
     const result = await forwardWithRetry(
-      target, upstreamHeaders, upstreamBody,
-      body, originalHeaders,
+      target, upstreamHeaders, retryHeaders, upstreamBody,
+      body,
       pipe, forwardTimeoutMs,
-      sessionKey,
       { config, instanceId: spaceId || undefined },
     );
     upstreamResp = result.resp;
@@ -1757,7 +1770,7 @@ export async function handleChatCompletions(
       },
     });
 
-    // Langfuse: report this LLM call as a generation under the turn trace
+    // Langfuse: report this LLM call under the current request trace.
     langfuseReportGeneration({
       traceId: lf.traceId,
       name: effectiveModel,
@@ -1903,7 +1916,7 @@ interface TapContext {
    * Header-selected DSH headless requests keep downstream side-effects enabled. */
   isDshHeadless: boolean;
   sessionInfo: Record<string, unknown> | null | undefined;
-  /** Langfuse turn-trace context (trace = one turn). */
+  /** Langfuse request-scoped trace context (historical type name retained). */
   lf: LangfuseTurnContext;
   /** Space/tenant ID from request path. */
   spaceId?: string;
@@ -2158,7 +2171,7 @@ function createUsageTapTransform(ctx: TapContext): TransformStream<Uint8Array, U
         pipe.error("OPIK_SPAN", opikErr);
       }
 
-      // Langfuse: report this LLM call as a generation under the turn trace
+      // Langfuse: report this LLM call under the current request trace.
       // 流式路径 inputMessages 保持原样（其它下游流水线也用同一份引用）；
       // debug=true 时把 tool_call 累积计数塞进 metadata 兜底。
       try {

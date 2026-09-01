@@ -10,6 +10,7 @@
 
 import { log } from "./report/log.js";
 import type { AuthConfig } from "./types.js";
+import { privacySafeOrigin } from "./telemetry-privacy.js";
 
 export type { AuthConfig };
 
@@ -42,7 +43,7 @@ export function initAuth(cfg: AuthConfig): void {
     return;
   }
   config = cfg;
-  log.info("auth.init", { url: cfg.url });
+  log.info("auth.init", { origin: privacySafeOrigin(cfg.url) });
 }
 
 /** Check if auth verification is enabled. */
@@ -73,12 +74,16 @@ export async function verifyUserKey(userKey: string, serviceId: string): Promise
   if (!userKey) return { userId: "", rejected: true, rejectReason: "missing user_key" };
 
   try {
+    const headers: Record<string, string> = {
+      "content-type": "application/json",
+      "x-tdai-service-id": serviceId,
+    };
+    if (config.serviceToken) {
+      headers.Authorization = `Bearer ${config.serviceToken}`;
+    }
     const fetchOpts: RequestInit = {
       method: "POST",
-      headers: {
-        "content-type": "application/json",
-        "x-tdai-service-id": serviceId,
-      },
+      headers,
       body: JSON.stringify({ user_key: userKey }),
     };
     if (config.timeoutMs > 0) {
@@ -90,7 +95,7 @@ export async function verifyUserKey(userKey: string, serviceId: string): Promise
 
     if (!resp.ok) {
       const reason = `auth service returned HTTP ${resp.status}`;
-      log.warn("auth.verify.httpError", { status: resp.status, serviceId });
+      log.warn("auth.verify.httpError", { status: resp.status });
       return { userId: "", rejected: true, rejectReason: reason };
     }
 
@@ -113,8 +118,8 @@ export async function verifyUserKey(userKey: string, serviceId: string): Promise
     const isTimeout = err instanceof DOMException && err.name === "TimeoutError";
     const reason = isTimeout
       ? `auth service timeout (${config.timeoutMs}ms)`
-      : `auth service error: ${err instanceof Error ? err.message : String(err)}`;
-    log.warn("auth.verify.error", { error: reason, serviceId });
+      : "auth service unavailable";
+    log.warn("auth.verify.error", { category: isTimeout ? "timeout" : "network_error" });
     return { userId: "", rejected: true, rejectReason: reason };
   }
 }

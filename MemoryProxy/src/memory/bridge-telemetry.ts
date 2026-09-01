@@ -2,7 +2,7 @@
  * Bridge-side tool-call 埋点 helper（memory-bridge + skill-bridge 共用）。
  *
  * 设计：每次 upstream fetch 完成（成功或失败）都发一条 kind='bridge_call'。
- *      调用方负责把 body 脱敏到 <= 512 字节（本函数不再清洗），只做透传。
+ *      helper 自身执行最终 allowlist，调用方无法重新开启原始 body/session 导出。
  *
  * 硬约束（§7.-1）：
  *   - 同步返回 void
@@ -48,18 +48,24 @@ export function emitBridgeToolCallTelemetry(
   try {
     const row: ToolCallLogInput = {
       timestamp: new Date().toISOString(),
-      sessionKey: input.sessionKey,
+      sessionKey: "<redacted>",
       turnSeq: input.turnSeq,
       spaceId: input.spaceId,
       userId: input.userId,
-      teamId: input.teamId,
-      agentId: input.agentId,
-      agentSource: input.agentSource,
+      teamId: undefined,
+      agentId: undefined,
+      agentSource: /^[a-z0-9-]{1,40}$/.test(input.agentSource)
+        ? input.agentSource
+        : "unknown",
       kind: "bridge_call",
-      bridgeSource: input.bridgeSource,
+      bridgeSource: input.bridgeSource === "memory-bridge" || input.bridgeSource === "skill-bridge"
+        ? input.bridgeSource
+        : "unknown",
       initiatedTool: "",
-      executedEndpoint: input.executedEndpoint,
-      requestBody: input.requestBody,
+      executedEndpoint: /^[a-z0-9_/-]{0,80}$/.test(input.executedEndpoint)
+        ? input.executedEndpoint
+        : "unknown",
+      requestBody: "",
       upstreamStatus: input.upstreamStatus,
       elapsedMs: input.elapsedMs,
       rejectReason: input.rejectReason,
@@ -75,12 +81,11 @@ export function emitBridgeToolCallTelemetry(
 }
 
 /**
- * 从 proxy session-key 反解 agentSource。
- *   "claude-code:conv-abc" → "claude-code"
- *   "codebuddy:conv-abc"   → "codebuddy"
- *   "conv-abc"（无前缀）    → "unknown"
+ * Legacy helper retained for existing callers. Collision-safe JSON keys and
+ * raw session ids intentionally do not expose a source through telemetry.
  */
 export function agentSourceFromSessionKey(sessionKey: string): string {
+  if (sessionKey.startsWith("[")) return "unknown";
   const idx = sessionKey.indexOf(":");
   if (idx <= 0) return "unknown";
   return sessionKey.slice(0, idx);

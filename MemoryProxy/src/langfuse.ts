@@ -3,18 +3,8 @@
  *
  * 使用 Langfuse 官方 SDK（@langfuse/tracing + @langfuse/otel）上报 LLM 调用。
  *
- * 核心语义：**一个 trace = 一个会话里的一次用户输入（一个 turn）**。
- *   - 同一 turn 内的工具循环（model → tool → model → …）会产生多次 upstream 请求，
- *     它们共享同一个确定性 traceId，因此在 Langfuse 里归并到同一个 trace 下，
- *     每次 LLM 调用是该 trace 下的一个 generation observation。
- *   - traceId 由 `sessionKey + turnSeq` 经 SHA-256 派生（确定性），与官方
- *     `createTraceId(seed)` 的算法逐字节一致（取 SHA-256 hex 前 32 位）。
- *
- * 跨请求归并的机制：
- *   一个 turn 的多次请求是彼此独立的 HTTP handler 调用，没有共享的 async context。
- *   因此通过 `startObservation(..., { parentSpanContext: { traceId, ... } })` 显式把
- *   每个 generation 挂到已知的确定性 traceId 下（SDK 内部走
- *   `trace.setSpanContext(context.active(), parentSpanContext)`）。
+ * 隐私边界：traceId 每次随机生成，不从 session/user/key 派生。这样无法跨请求按
+ * user/session/turn 做稳定归并；导出仅支持单次调用的总量和固定类别指标。
  *
  * 设计原则：
  *   - Fire-and-forget：span 由 LangfuseSpanProcessor 异步批量导出
@@ -22,11 +12,19 @@
  *   - 与 Opik 上报完全独立（各用各的 traceId）
  */
 
-import { createHash } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import { TraceFlags } from "@opentelemetry/api";
 import { startObservation, LangfuseOtelSpanAttributes } from "@langfuse/tracing";
 import type { ProxyConfig } from "./types.js";
 import { log } from "./report/log.js";
+import {
+  privacySafeMetadata,
+  privacySafeSessionId,
+  privacySafeTags,
+  privacySafeText,
+  privacySafeUsage,
+  summarizeTelemetryValue,
+} from "./telemetry-privacy.js";
 
 // ============================
 // 生命周期
@@ -85,8 +83,8 @@ export async function initLangfuse(config: ProxyConfig): Promise<boolean> {
       maxQueueSize: lf.maxQueueSize,
     });
     return true;
-  } catch (err: unknown) {
-    log.warn("langfuse.init_failed", { error: String(err) });
+  } catch {
+    log.warn("langfuse.init_failed", { category: "initialization_error" });
     _enabled = false;
     return false;
   }
@@ -99,8 +97,8 @@ export async function shutdownLangfuse(): Promise<void> {
   if (_sdk) {
     try {
       await _sdk.shutdown();
-    } catch (err: unknown) {
-      log.warn("langfuse.shutdown_error", { error: String(err) });
+    } catch {
+      log.warn("langfuse.shutdown_error", { category: "shutdown_error" });
     }
     _sdk = null;
   }
@@ -109,19 +107,17 @@ export async function shutdownLangfuse(): Promise<void> {
 }
 
 // ============================
-// 确定性 turn traceId
+// 不可跨请求关联的 request traceId
 // ============================
 
 /**
- * 由 `sessionKey + turnSeq` 派生确定性 traceId（32 位小写 hex）。
- *
- * 与官方 `createTraceId(seed)` 算法一致：SHA-256(seed) 的 hex 取前 32 位。
- * 同一 turn 内每次请求都用相同 (sessionKey, turnSeq) → 得到相同 traceId →
- * 在 Langfuse 中归并到同一个 trace。
+ * 把本次请求已有的 UUID traceId 规范化为 32 位小写 hex。它只在同一 HTTP 请求
+ * 内关联各 sink，不从 session/user/key 派生，也不提供跨请求稳定关联。
  */
-export function langfuseTurnTraceId(sessionKey: string, turnSeq: number): string {
-  const seed = `${sessionKey}:${turnSeq}`;
-  return createHash("sha256").update(seed).digest("hex").slice(0, 32);
+export function langfuseTurnTraceId(requestTraceId: string): string {
+  const normalized = requestTraceId.replaceAll("-", "").toLowerCase();
+  if (/^[0-9a-f]{32}$/.test(normalized)) return normalized;
+  return randomUUID().replaceAll("-", "");
 }
 
 // ============================
@@ -129,23 +125,23 @@ export function langfuseTurnTraceId(sessionKey: string, turnSeq: number): string
 // ============================
 
 /**
- * Langfuse turn-trace 上下文 —— 同属一个 turn（一个 Langfuse trace）的所有
- * generation 共享的 trace 级属性。由 handler 构造后传给各上报函数。
+ * Langfuse 请求 trace 上下文。类型名保留 `Turn` 以避免破坏现有 API，
+ * 但每个实例仅对应一次 HTTP 请求，不在工具循环或 session 之间稳定关联。
  */
 export interface LangfuseTurnContext {
-  /** 该 turn 的确定性 traceId（langfuseTurnTraceId 生成）。 */
+  /** 本次请求的随机 traceId（langfuseTurnTraceId 生成）。 */
   traceId: string;
-  /** turn 序号（countHumanTurns）—— 也用于 ClickHouse 按 turn 聚合。 */
+  /** 进程内 turn 序号；隐私安全导出不承诺按 session/turn 稳定聚合。 */
   turnSeq: number;
-  /** trace 名。 */
+  /** In-process trace name; outbound value is fixed redaction. */
   traceName: string;
-  /** trace userId（一般为 keyId）。 */
+  /** In-process userId; outbound value is fixed redaction. */
   userId: string;
-  /** trace sessionId（会话隔离键；可据此聚合多个 turn）。 */
+  /** trace sessionId（导出时固定脱敏，不可用于关联）。 */
   sessionId: string;
   /**
-   * trace 级标签 —— 只放该 turn 内稳定的维度（protocol / stream / session），
-   * 不含随请求变化的路由标签，避免同一 turn 的工具循环请求互相覆盖（last-write-wins）。
+   * trace 级标签导出前只保留 protocol/stream 等固定类别；session 标签固定脱敏，
+   * 不可用于跨请求关联。
    */
   tags: string[];
   /**
@@ -154,15 +150,15 @@ export interface LangfuseTurnContext {
    */
   routeTags: string[];
   /**
-   * 去噪后的最新用户问题 —— 仅在该 turn 首次人类输入请求非空，工具循环延续时为 ""。
-   * 用作 trace 级 input。
+   * 去噪后的最新用户问题；工具循环延续请求为 ""。
+   * 用于生成当前请求 trace 的 input 摘要，不导出原文。
    */
   userQuery: string;
 }
 
-/** 一次 LLM 调用的上报参数（挂到指定 turn trace 下的 generation）。 */
+/** 一次 LLM 调用的上报参数（挂到当前请求 trace 下的 generation）。 */
 export interface LangfuseGenerationReport {
-  /** 所属 turn 的确定性 traceId（langfuseTurnTraceId 生成）。 */
+  /** 所属请求的随机 traceId（langfuseTurnTraceId 生成）。 */
   traceId: string;
   /** observation 名称（一般为模型名，或 `[internal] <model>`）。 */
   name: string;
@@ -172,9 +168,9 @@ export interface LangfuseGenerationReport {
   startTime: string;
   /** ISO 8601 结束时间。 */
   endTime: string;
-  /** generation 输入（messages 数组或字符串）。 */
+  /** generation 输入（导出前只保留类型和计数摘要）。 */
   input?: unknown;
-  /** generation 输出（assistant message 或字符串）。 */
+  /** generation 输出（导出前只保留类型和计数摘要）。 */
   output?: unknown;
   /** 原始 usage 对象（会被归一化为 Langfuse usageDetails）。 */
   usage?: Record<string, unknown>;
@@ -182,24 +178,23 @@ export interface LangfuseGenerationReport {
   level?: "DEBUG" | "DEFAULT" | "WARNING" | "ERROR";
   /** 状态信息（一般用于 ERROR，描述失败原因）。 */
   statusMessage?: string;
-  // ── trace 级属性（同一 turn 的多次调用应传相同值；last-write-wins）──
-  /** trace 名。 */
+  // ── trace 级属性（仅限本次随机 trace；不提供跨请求稳定关联）──
+  /** In-process trace name; outbound value is fixed redaction. */
   traceName: string;
-  /** trace userId（一般为 keyId）。 */
+  /** In-process userId; outbound value is fixed redaction. */
   userId: string;
-  /** trace sessionId（会话隔离键；Langfuse 上可据此聚合多个 turn）。 */
+  /** trace sessionId（导出时固定脱敏，不可用于关联）。 */
   sessionId: string;
   /** trace 标签。 */
   tags?: string[];
   /**
-   * trace 级 input —— 仅在该 turn 的"首次人类输入"请求传入（传 turn 最初的用户问题）。
-   * 工具循环延续请求应留空，避免把带 tool_result 的请求体覆盖成 trace input。
+   * trace 级 input 来源。新人类输入请求可传入，导出时只保留摘要。
+   * 工具循环延续请求应留空，避免把 tool_result 作为请求输入摘要。
    * 内部路由等子步骤也应留空，避免污染 trace 级输入。
    */
   traceInput?: unknown;
   /**
-   * trace 级 output —— 传该 turn 的最终回答。同一 turn 多次调用 last-write-wins，
-   * 因此最后一次（turn 收尾）的输出会成为 trace output。
+   * trace 级 output —— 传当前请求的输出摘要。
    */
   traceOutput?: unknown;
   /** trace 级 metadata。 */
@@ -210,8 +205,8 @@ export interface LangfuseGenerationReport {
 
 /**
  * 派生一个合法的 phantom parent spanId（16 位 hex，非零）。
- * 用于把 generation 挂到确定性 traceId 下。同一 traceId 始终得到同一 spanId，
- * 因此一个 turn 内所有 generation 的 parent 一致（指向同一个不存在的 root span，
+ * 用于把 generation 挂到本次随机 traceId 下。同一 traceId 始终得到同一 spanId，
+ * 因此单次上报内 generation 的 parent 一致（指向同一个不存在的 root span，
  * Langfuse 据此把它们都视为该 trace 下的顶层 observation）。
  */
 function deriveParentSpanId(traceId: string): string {
@@ -281,7 +276,7 @@ function asAttrString(v: unknown): string {
 }
 
 /**
- * 上报一次 LLM 调用：在指定 turn trace 下创建一个 generation observation，
+ * 上报一次 LLM 调用：在指定请求 trace 下创建一个 generation observation，
  * 并把 trace 级属性写到该 span 上（SDK 会据此设置所属 trace 的字段）。
  *
  * 失败静默（仅 debug 日志），绝不影响业务请求。
@@ -291,15 +286,17 @@ export function langfuseReportGeneration(report: LangfuseGenerationReport): void
 
   try {
     const generation = startObservation(
-      report.name,
+      privacySafeText(report.name),
       {
-        model: report.model,
-        input: report.input,
-        output: report.output,
-        usageDetails: report.usage ? normalizeUsageDetails(report.usage) : undefined,
-        metadata: report.observationMetadata,
+        model: privacySafeText(report.model),
+        input: summarizeTelemetryValue(report.input),
+        output: summarizeTelemetryValue(report.output),
+        usageDetails: report.usage
+          ? normalizeUsageDetails(privacySafeUsage(report.usage))
+          : undefined,
+        metadata: privacySafeMetadata(report.observationMetadata),
         level: report.level,
-        statusMessage: report.statusMessage,
+        statusMessage: report.statusMessage ? "[redacted]" : undefined,
       },
       {
         asType: "generation",
@@ -315,36 +312,56 @@ export function langfuseReportGeneration(report: LangfuseGenerationReport): void
 
     // trace 级属性：直接写 OTel 属性，SDK 会传播到所属 trace。
     const span = generation.otelSpan;
-    span.setAttribute(LangfuseOtelSpanAttributes.TRACE_NAME, report.traceName);
-    span.setAttribute(LangfuseOtelSpanAttributes.TRACE_USER_ID, report.userId);
-    span.setAttribute(LangfuseOtelSpanAttributes.TRACE_SESSION_ID, report.sessionId);
+    span.setAttribute(
+      LangfuseOtelSpanAttributes.TRACE_NAME,
+      privacySafeText(report.traceName),
+    );
+    span.setAttribute(
+      LangfuseOtelSpanAttributes.TRACE_USER_ID,
+      privacySafeText(report.userId),
+    );
+    span.setAttribute(
+      LangfuseOtelSpanAttributes.TRACE_SESSION_ID,
+      privacySafeSessionId(report.sessionId),
+    );
     if (report.tags && report.tags.length > 0) {
-      span.setAttribute(LangfuseOtelSpanAttributes.TRACE_TAGS, JSON.stringify(report.tags));
+      span.setAttribute(
+        LangfuseOtelSpanAttributes.TRACE_TAGS,
+        JSON.stringify(privacySafeTags(report.tags)),
+      );
     }
     // trace 级 input/output 与 observation 级解耦：仅在显式传入时写。
-    // 首次人类输入请求传 traceInput（turn 最初的问题）；收尾请求传 traceOutput。
+    // 当前请求可分别传入 traceInput / traceOutput 摘要。
     if (report.traceInput !== undefined) {
-      span.setAttribute(LangfuseOtelSpanAttributes.TRACE_INPUT, asAttrString(report.traceInput));
+      span.setAttribute(
+        LangfuseOtelSpanAttributes.TRACE_INPUT,
+        asAttrString(summarizeTelemetryValue(report.traceInput)),
+      );
     }
     if (report.traceOutput !== undefined) {
-      span.setAttribute(LangfuseOtelSpanAttributes.TRACE_OUTPUT, asAttrString(report.traceOutput));
+      span.setAttribute(
+        LangfuseOtelSpanAttributes.TRACE_OUTPUT,
+        asAttrString(summarizeTelemetryValue(report.traceOutput)),
+      );
     }
     if (report.traceMetadata) {
       span.setAttribute(
         LangfuseOtelSpanAttributes.TRACE_METADATA,
-        JSON.stringify(report.traceMetadata),
+        JSON.stringify(privacySafeMetadata(report.traceMetadata)),
       );
     }
 
     generation.end(new Date(report.endTime));
   } catch (err: unknown) {
-    log.debug("langfuse.report_error", { error: String(err) });
+    log.debug("langfuse.report_error", {
+      errorCategory: err instanceof Error ? "error" : "unknown",
+    });
   }
 }
 
 /** 一次失败请求的上报参数（上游错误 / 转发失败）。 */
 export interface LangfuseFailureReport {
-  /** turn 上下文。 */
+  /** 当前请求 trace 上下文。 */
   lf: LangfuseTurnContext;
   /** observation 名称（一般为模型名）。 */
   model: string;
@@ -352,7 +369,7 @@ export interface LangfuseFailureReport {
   startTime: string;
   /** ISO 8601 结束时间。 */
   endTime: string;
-  /** 该请求的输入 messages（用于排查）。 */
+  /** 该请求的输入 messages（导出时只保留摘要）。 */
   input?: unknown;
   /** HTTP 状态码（转发异常时可缺省）。 */
   status?: number;
@@ -365,8 +382,8 @@ export interface LangfuseFailureReport {
 }
 
 /**
- * 上报一次失败请求：在所属 turn trace 下创建一个 ERROR generation。
- * 不设 trace 级 input/output（失败不代表 turn 的最终结果），仅记录该次失败本身。
+ * 上报一次失败请求：在当前请求 trace 下创建一个 ERROR generation。
+ * 不设 trace 级 input/output，仅记录该次失败的安全类别与状态。
  */
 export function langfuseReportFailure(report: LangfuseFailureReport): void {
   if (!_enabled) return;
@@ -388,7 +405,7 @@ export function langfuseReportFailure(report: LangfuseFailureReport): void {
     userId: lf.userId,
     sessionId: lf.sessionId,
     tags: report.extraTags && report.extraTags.length > 0 ? [...lf.tags, ...report.extraTags] : lf.tags,
-    // trace 级 input 仍记录用户问题（便于在失败 trace 上看到原始诉求）；不写 output。
+    // 失败 trace 只记录用户输入摘要，不导出原文或写 trace output。
     traceInput: lf.userQuery || undefined,
     observationMetadata: {
       ...report.observationMetadata,

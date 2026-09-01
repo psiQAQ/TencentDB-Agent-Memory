@@ -375,6 +375,7 @@ clickhouse:
 auth:
   enabled: true            # 是否启用鉴权
   url: "http://kernel.example.com:8420"   # 内核鉴权服务 base URL（自动拼接 /v3/meta/auth/verify）
+  serviceToken: ""         # 可选；非空时作为 Bearer token 调用 Core，绝不使用客户端 user_key
   timeoutMs: 5000          # 鉴权请求超时（毫秒）
 
 

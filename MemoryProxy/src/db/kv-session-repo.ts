@@ -14,17 +14,26 @@
  * 落到 pod B 的 turn-2 因 L2a miss 掉入 tryHistoryScan 兜底 → bypass）。
  * 写失败保留静默降级：catch 后仅 warn，不 throw —— 上层 L1 仍是权威。
  *
- * 读接口 async，miss 返回 null，不抛。
+ * 读接口 async；miss 返回 null，后端失败抛出固定、无敏感细节的错误。
  *
  * `loadAllInitialized`：
  *   - CosStorage 后端下强制返回 [] （关闭启动 hydrate，走 probeL2a 懒加载）
  *   - SqliteStorage / FsStorage / MemoryStorage 走 listNames + getJSON，
  *     从 key 里反解回 (spaceId, userId, agentSource, sessionId) 四段身份
  */
-import type { SessionRepo, HydratedSessionRow } from "./sessionRepo.js";
-import type { SessionInitState } from "../session/types.js";
+import {
+  SessionRepoReadError,
+  type SessionRepo,
+  type HydratedSessionRow,
+} from "./sessionRepo.js";
+import {
+  isPersistedSessionInitState,
+  normalizePersistedSessionInitState,
+  type SessionInitState,
+} from "../session/types.js";
 import type { ProxyStorage } from "../storage/proxy-storage.js";
 import { sessionDirOf } from "../storage/key-utils.js";
+import { persistedStateOwnsIdentity } from "./session-identity-key.js";
 
 const TTL_BUCKET_PREFIX = "ttl/";
 const MAIN_FILENAME = "inj-sess.json";
@@ -48,12 +57,14 @@ export class KvSessionRepo implements SessionRepo {
     agentSource: string,
     sessionId: string,
     state: SessionInitState,
-  ): Promise<void> {
+  ): Promise<boolean> {
     // 提前算 key —— assertKeySegment / assertAgentSource 校验会在此同步抛出，
     // 让调用方在装配层就能观测到非法参数（而不是变成静默的 async 失败）。
     const key = mainKey(spaceId, userId, agentSource, sessionId);
+    if (!isPersistedSessionInitState(state)) return false;
     try {
       await this.storage.putJSON(key, state);
+      return true;
     } catch (err) {
       // 静默降级：L1 仍是权威 write-through 目标；L2a 写失败不阻塞主流程。
       const e = err as { statusCode?: number; code?: string; message?: string };
@@ -61,6 +72,7 @@ export class KvSessionRepo implements SessionRepo {
         `[kv-session] upsert FAIL key=${key}: ` +
           `${e?.statusCode ?? ""} ${e?.code ?? ""} ${e?.message ?? String(err)}`,
       );
+      return false;
     }
   }
 
@@ -71,23 +83,32 @@ export class KvSessionRepo implements SessionRepo {
     sessionId: string,
   ): Promise<SessionInitState | null> {
     try {
-      return await this.storage.getJSON<SessionInitState>(
-        mainKey(spaceId, userId, agentSource, sessionId),
-      );
+      const raw = await this.storage.getText(mainKey(spaceId, userId, agentSource, sessionId));
+      if (raw === null) return null;
+      const parsed = JSON.parse(raw) as unknown;
+      const state = normalizePersistedSessionInitState(parsed);
+      if (
+        !state
+        || !persistedStateOwnsIdentity(state, { spaceId, userId, agentSource, sessionId })
+      ) throw new SessionRepoReadError();
+      return state;
     } catch {
-      return null;
+      throw new SessionRepoReadError();
     }
   }
 
-  deleteBySessionId(
+  async deleteBySessionId(
     spaceId: string,
     userId: string,
     agentSource: string,
     sessionId: string,
-  ): void {
-    this.storage
-      .del(mainKey(spaceId, userId, agentSource, sessionId))
-      .catch(() => { /* silent */ });
+  ): Promise<boolean> {
+    try {
+      await this.storage.del(mainKey(spaceId, userId, agentSource, sessionId));
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   async loadAllInitialized(): Promise<HydratedSessionRow[]> {
@@ -107,15 +128,20 @@ export class KvSessionRepo implements SessionRepo {
         const segs = stem.split("/");
         if (segs.length !== 4) continue;
         const [spaceId, userId, agentSource, sessionId] = segs;
-        const state = await this.storage.getJSON<SessionInitState>(
-          TTL_BUCKET_PREFIX + name,
-        );
-        if (!state || state.status !== "initialized") continue;
+        const raw = await this.storage.getText(TTL_BUCKET_PREFIX + name);
+        if (raw === null) continue;
+        const parsed = JSON.parse(raw) as unknown;
+        const state = normalizePersistedSessionInitState(parsed);
+        if (!state) throw new SessionRepoReadError();
+        if (!persistedStateOwnsIdentity(state, { spaceId, userId, agentSource, sessionId })) {
+          throw new SessionRepoReadError();
+        }
+        if (state.status !== "initialized") continue;
         out.push({ spaceId, userId, agentSource, sessionId, state });
       }
       return out;
     } catch {
-      return [];
+      throw new SessionRepoReadError();
     }
   }
 }

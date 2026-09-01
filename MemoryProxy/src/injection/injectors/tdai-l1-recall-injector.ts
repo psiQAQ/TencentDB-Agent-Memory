@@ -56,8 +56,9 @@ export class TdaiL1RecallInjector implements InjectionHook {
     if (!query) return [];
 
     // 拿 self + 借入 ≤2 个的 ctx 列表
-    const session = (ctx.metadata.custom as any)?.session as { user_key?: string; space_id?: string } | undefined;
-    const userKey = session?.user_key;
+    const custom = ctx.metadata.custom as Record<string, unknown> | undefined;
+    const session = custom?.session as { space_id?: string } | undefined;
+    const userKey = typeof custom?.userKey === "string" ? custom.userKey : undefined;
     // spaceId 来自 session 注册时保存的 URL path 中的 `/proxy/<spaceId>/...`；
     // 用作内核的 `x-tdai-service-id` 头做租户路由。
     const spaceId = session?.space_id ?? "";

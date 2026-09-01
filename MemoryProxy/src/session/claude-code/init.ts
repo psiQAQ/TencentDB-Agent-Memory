@@ -20,7 +20,7 @@ import type {
   TeamOption,
 } from "../types.js";
 import { DEFAULT_TASK_LABEL } from "../types.js";
-import { SessionStore } from "../store.js";
+import { SessionStore, sessionStoreKey } from "../store.js";
 import { buildSessionInfo } from "../registrar.js";
 import {
   injectSessionContextWithToggles,
@@ -85,6 +85,16 @@ export interface SessionInitResult {
 // ── Helpers ────────────────────────────────────────────────────────────────────
 
 type MessageArr = Record<string, unknown>[];
+
+type SessionDiagnosticFields = Record<string, boolean | number>;
+
+function logSessionEvent(event: string, fields?: SessionDiagnosticFields): void {
+  console.log(`[session-init:cc] ${event}`, fields ?? {});
+}
+
+function warnSessionEvent(event: string, fields?: SessionDiagnosticFields): void {
+  console.warn(`[session-init:cc] ${event}`, fields ?? {});
+}
 
 function isFreshCCConversation(messages: MessageArr): boolean {
   let userCount = 0;
@@ -221,9 +231,7 @@ async function advanceFromTeamPicked(
   const teamId = team.team_id;
 
   if (team.agents.length === 0) {
-    console.warn(
-      `[session-init:cc] session=${compositeKey} team=${teamId} has no agents → bypass`,
-    );
+    warnSessionEvent("team_has_no_agents", { bypassed: true });
     await store.set(compositeKey, {
       ...state,
       status: "initialized",
@@ -237,9 +245,7 @@ async function advanceFromTeamPicked(
   // Only 1 agent — pick it, then decide task step.
   if (team.agents.length === 1) {
     const agentId = team.agents[0].agent_id;
-    console.log(
-      `[session-init:cc] session=${compositeKey} team=${teamId} auto-select single agent=${agentId}`,
-    );
+    logSessionEvent("single_agent_selected");
     return advanceFromAgentPicked(
       team, agentId, cachedTeams, compositeKey, sessionKey, userId,
       { ...state, selectedTeamId: teamId },
@@ -256,9 +262,7 @@ async function advanceFromTeamPicked(
     attemptCount: 0,
     agentPageIndex: 0,
   });
-  console.log(
-    `[session-init:cc] session=${compositeKey} team=${teamId} → pending_agent_select (agents=${team.agents.length})`,
-  );
+  logSessionEvent("pending_agent_select", { agentCount: team.agents.length });
   const fd: FormData = {
     teams: cachedTeams,
     stage: "agent_select",
@@ -296,9 +300,7 @@ async function advanceFromAgentPicked(
   //   历史行为是"注册但 task_id=undefined，只注入 [Agent] 段"，现改为完全 bypass。
   // 1 task → auto-select，直接推进到 completeRegistration。
   if (team.tasks.length === 0) {
-    console.log(
-      `[session-init:cc] session=${compositeKey} team=${teamId} agent=${agentId} has 0 tasks → bypass`,
-    );
+    logSessionEvent("team_has_no_tasks", { bypassed: true });
     await store.set(compositeKey, {
       ...state,
       status: "initialized",
@@ -314,9 +316,7 @@ async function advanceFromAgentPicked(
   }
   if (team.tasks.length === 1) {
     const taskId = team.tasks[0].task_id;
-    console.log(
-      `[session-init:cc] session=${compositeKey} agent=${agentId} auto-select single task=${taskId}`,
-    );
+    logSessionEvent("single_task_selected");
     return completeRegistration(
       { agent_id: agentId, task_id: taskId },
       state, cachedTeams, teamId, compositeKey, sessionKey, userId,
@@ -334,9 +334,7 @@ async function advanceFromAgentPicked(
     attemptCount: 0,
     agentPageIndex: 0,
   });
-  console.log(
-    `[session-init:cc] session=${compositeKey} agent=${agentId} → pending_task_select (tasks=${team.tasks.length})`,
-  );
+  logSessionEvent("pending_task_select", { taskCount: team.tasks.length });
   const fd: FormData = {
     teams: cachedTeams,
     stage: "task_select",
@@ -409,12 +407,13 @@ function applyArtifactsAndContext(
   const injected = out;
   const injectedChanged = protocol === "anthropic" ? systemAppend !== null : injected !== messages;
   if (injectedChanged) {
-    const finalRoles = (injected as unknown[]).map((m: any) => m.role);
-    console.log(
-      `[session-init:cc] session=${sessionKey} processed: ${messages.length} msgs, ` +
-        `ctx=${agentDetail ? "Y" : "N"}/${taskDetail ? "Y" : "N"} ` +
-        `protocol=${protocol ?? "openai"} systemAppend=${systemAppend ? "Y" : "N"} final=[${finalRoles.join(",")}]`,
-    );
+    logSessionEvent("context_processed", {
+      messageCount: messages.length,
+      agentContext: agentDetail !== null,
+      taskContext: taskDetail !== null,
+      anthropic: protocol === "anthropic",
+      systemAppended: systemAppend !== null,
+    });
   }
   return { messages: injected, systemAppend };
 }
@@ -437,9 +436,7 @@ async function completeRegistration(
 ): Promise<SessionInitResult> {
   const regUserId = (state as any).userId || userId;
   if (!regUserId) {
-    console.warn(
-      `[session-init:cc] session=${compositeKey} no user_id available → bypass`,
-    );
+    warnSessionEvent("missing_user", { bypassed: true });
     await store.set(compositeKey, { status: "initialized", bypassed: true } as SessionInitState);
     return { intercepted: false, bypassed: true, resetFlow: state?.resetFlow ?? false };
   }
@@ -452,9 +449,7 @@ async function completeRegistration(
   // bypass when task_id is missing/undefined.
   const regData = buildRegistrationData(resolved, cachedTeams, sessionKey, regUserId);
   if (!regData) {
-    console.warn(
-      `[session-init:cc] session=${compositeKey} agent=${resolved.agent_id} not bound to any team → bypass`,
-    );
+    warnSessionEvent("agent_not_bound", { bypassed: true });
     await store.set(compositeKey, { status: "initialized", bypassed: true } as SessionInitState);
     return { intercepted: false, bypassed: true, resetFlow: state?.resetFlow ?? false };
   }
@@ -482,16 +477,15 @@ async function completeRegistration(
         : Promise.resolve(null),
     ]);
     if (agentRes.status === "fulfilled") agentDetail = agentRes.value;
-    else console.warn(`[session-init:cc] getAgent failed: ${String(agentRes.reason)}`);
+    else warnSessionEvent("get_agent_failed");
     if (taskRes.status === "fulfilled") taskDetail = taskRes.value;
-    else console.warn(`[session-init:cc] getTask failed: ${String(taskRes.reason)}`);
+    else warnSessionEvent("get_task_failed");
   }
 
   const sessionInfo = buildSessionInfo(regData, userKey, spaceId);
-  console.log(
-    `[session-init:cc] session=${compositeKey} → initialized ` +
-      `agent=${resolved.agent_id} task=${regData.task_id ?? "-"} team=${regData.team_id} user=${sessionInfo.user_id}`,
-  );
+  logSessionEvent("initialized", {
+    taskConfigured: Boolean(regData.task_id),
+  });
 
   // Fire-and-forget: 记录一条 (team, task, agent, user) 参与日志，供看板"实际参与"
   // 分区展示。bypass 路径已在上方 return，走不到这里；debug forceIdentity 路径也
@@ -509,10 +503,8 @@ async function completeRegistration(
         user_id: regData.user_id,
         source: "context_proxy:claude-code",
       })
-      .catch((err: unknown) => {
-        console.warn(
-          `[session-init:cc] participation-log append failed for session=${compositeKey}: ${err instanceof Error ? err.message : String(err)}`,
-        );
+      .catch(() => {
+        warnSessionEvent("participation_log_failed");
       });
   }
 
@@ -567,7 +559,12 @@ export async function handleSessionInit(
   spaceId?: string,
   presetIdentity?: PresetIdentity,
 ): Promise<SessionInitResult> {
-  const compositeKey = `claude-code:${sessionKey}`;
+  const compositeKey = sessionStoreKey({
+    userId: userId || "anonymous",
+    agentSource: "claude-code",
+    sessionId: sessionKey,
+    spaceId,
+  });
   const prevStatus = store.get(compositeKey)?.status ?? "uninitialized";
   try {
     return await handleSessionInitInner(
@@ -597,7 +594,12 @@ async function handleSessionInitInner(
   spaceId?: string,
   presetIdentity?: PresetIdentity,
 ): Promise<SessionInitResult> {
-  const compositeKey = `claude-code:${sessionKey}`;
+  const compositeKey = sessionStoreKey({
+    userId: userId || "anonymous",
+    agentSource: "claude-code",
+    sessionId: sessionKey,
+    spaceId,
+  });
   if (sessionKey === "unknown" || !sessionKey) return { intercepted: false };
 
   const state = store.get(compositeKey);
@@ -617,10 +619,9 @@ async function handleSessionInitInner(
     const forced = config.debugForceIdentity;
     // Debug path only — real production sessions never reach here.
     const forcedUserId = userId || "u_debug";
-    console.log(
-      `[session-init:cc] session=${compositeKey} DEBUG bypass — force identity ` +
-        `team=${forced.team_id} agent=${forced.agent_id} task=${forced.task_id ?? "-"} user=${forcedUserId}`,
-    );
+    logSessionEvent("debug_force_identity", {
+      taskConfigured: Boolean(forced.task_id),
+    });
     return completeRegistration(
       { agent_id: forced.agent_id, task_id: forced.task_id },
       // Seed a minimal state so completeRegistration has the required shape.
@@ -667,11 +668,9 @@ async function handleSessionInitInner(
 
   // ── Case 1: Uninitialized → 先弹 asset_confirm 对话框 ───────────────────
   if (!state || state.status === "uninitialized") {
-    console.log(`[session-init:cc] session=${compositeKey} state=${state?.status ?? "none"} → uninitialized`);
+    logSessionEvent("uninitialized", { statePresent: Boolean(state) });
     if (!userId) {
-      console.warn(
-        `[session-init:cc] session=${compositeKey} no userId, bypassing`,
-      );
+      warnSessionEvent("missing_user", { bypassed: true });
       await store.set(compositeKey, {
         status: "initialized",
         keyId: sessionKey,
@@ -685,9 +684,7 @@ async function handleSessionInitInner(
       return { intercepted: false, bypassed: true, resetFlow: state?.resetFlow ?? false };
     }
     if (!metadataClient) {
-      console.warn(
-        `[session-init:cc] session=${compositeKey} no metadataClient, bypassing`,
-      );
+      warnSessionEvent("missing_metadata_client", { bypassed: true });
       await store.set(compositeKey, {
         status: "initialized",
         keyId: sessionKey,
@@ -705,10 +702,8 @@ async function handleSessionInitInner(
     try {
       const cfg = await fetchTeamsAndAgents(userId, config, metadataClient);
       teams = cfg.teams;
-    } catch (err) {
-      console.warn(
-        `[session-init:cc] session=${compositeKey} kernel unavailable for user=${userId}, bypassing: ${err instanceof Error ? err.message : String(err)}`,
-      );
+    } catch {
+      warnSessionEvent("kernel_unavailable", { bypassed: true });
       await store.set(compositeKey, {
         status: "initialized",
         keyId: sessionKey,
@@ -725,9 +720,10 @@ async function handleSessionInitInner(
 
     const totalAgents = teams.reduce((acc, t) => acc + t.agents.length, 0);
     if (totalAgents === 0) {
-      console.warn(
-        `[session-init:cc] session=${compositeKey} user=${userId} has no active agents, bypassing`,
-      );
+      warnSessionEvent("no_active_agents", {
+        teamCount: teams.length,
+        bypassed: true,
+      });
       await store.set(compositeKey, {
         status: "initialized",
         keyId: sessionKey,
@@ -749,7 +745,7 @@ async function handleSessionInitInner(
 
       if (pr.hadMismatch) {
         if (config.headerAutoSelect.onMismatch === "bypass") {
-          console.warn(`[session-init:cc] session=${compositeKey} preset mismatch → bypass`);
+          warnSessionEvent("preset_mismatch", { bypassed: true });
           await store.set(compositeKey, {
             status: "initialized",
             keyId: sessionKey,
@@ -764,7 +760,7 @@ async function handleSessionInitInner(
           } as SessionInitState);
           return { intercepted: false, bypassed: true, resetFlow: state?.resetFlow ?? false };
         }
-        console.warn(`[session-init:cc] session=${compositeKey} preset mismatch → fallback to form`);
+        warnSessionEvent("preset_mismatch", { bypassed: false });
         // fall through to the normal asset_confirm flow below
       } else if (pr.canRegister) {
         // team + agent resolved → register directly (task optional). A missing
@@ -799,9 +795,7 @@ async function handleSessionInitInner(
         // the "1 agent + 1 task" full auto-register case.
         const presetTeam = teams.find((t) => t.team_id === pr.teamId);
         if (presetTeam) {
-          console.log(
-            `[session-init:cc] session=${compositeKey} preset team=${pr.teamId} → advance`,
-          );
+          logSessionEvent("preset_team_selected");
           const seedState: SessionInitState = {
             status: "uninitialized",
             keyId: sessionKey,
@@ -833,9 +827,7 @@ async function handleSessionInitInner(
       resetFlow: state?.resetFlow,
       resetEpoch: state?.resetEpoch,
     });
-    console.log(
-      `[session-init:cc] session=${compositeKey} user=${userId} → pending_asset_confirm (teams=${teams.length})`,
-    );
+    logSessionEvent("pending_asset_confirm", { teamCount: teams.length });
     const fd: FormData = {
       teams,
       stage: "asset_confirm",
@@ -849,7 +841,10 @@ async function handleSessionInitInner(
   if (state.status === "pending_asset_confirm") {
     const lastUserText = getLastUserMessageText(messages);
     const choice = extractAssetConfirm(lastUserText);
-    console.log(`[session-init:cc:debug] session=${compositeKey} pending_asset_confirm lastUserText=${JSON.stringify(lastUserText.slice(0,500))} choice=${choice}`);
+    logSessionEvent("asset_confirm_choice", {
+      recognized: choice !== null,
+      accepted: choice === true,
+    });
 
     if (choice === false) {
       // bypass: 用户明确选择"不关联" —— 保留 form 对话原样，不删。
@@ -868,7 +863,7 @@ async function handleSessionInitInner(
         resetFlow: state.resetFlow,
         resetEpoch: state.resetEpoch,
       } as SessionInitState);
-      console.log(`[session-init:cc] session=${compositeKey} user chose no-asset → bypass`);
+      console.log("[session-init:cc] session=<redacted> selection=no_asset bypass=true");
       return { intercepted: false, messages: messages as Record<string, unknown>[], bypassed: true, resetFlow: state?.resetFlow ?? false };
     }
 
@@ -879,9 +874,7 @@ async function handleSessionInitInner(
       // agent 阶段（agent 内部再判断是否 auto-select）。这样"1 team + 1 agent
       // + 1 task"的最小配置在 asset_confirm=是 之后不再弹任何额外表单。
       if (teams.length === 1) {
-        console.log(
-          `[session-init:cc] session=${compositeKey} auto-select single team=${teams[0].team_id}`,
-        );
+        logSessionEvent("single_team_selected");
         return advanceFromTeamPicked(
           teams[0], teams, compositeKey, sessionKey, userId,
           { ...state, cachedTeams: teams } as SessionInitState,
@@ -900,9 +893,7 @@ async function handleSessionInitInner(
         resetFlow: state.resetFlow,
         resetEpoch: state.resetEpoch,
       });
-      console.log(
-        `[session-init:cc] session=${compositeKey} → pending_team_select (teams=${teams.length})`,
-      );
+      logSessionEvent("pending_team_select", { teamCount: teams.length });
       const fd: FormData = {
         teams,
         stage: "team",
@@ -913,7 +904,7 @@ async function handleSessionInitInner(
     }
 
     // 未识别 → bypass (保留 form 对话原样)
-    console.warn(`[session-init:cc] session=${compositeKey} asset-confirm unrecognized, bypassing`);
+    warnSessionEvent("asset_confirm_unrecognized", { bypassed: true });
     await store.set(compositeKey, { status: "initialized", bypassed: true } as SessionInitState);
     return { intercepted: false, messages: messages as Record<string, unknown>[], bypassed: true, resetFlow: state?.resetFlow ?? false };
   }
@@ -938,7 +929,7 @@ async function handleSessionInitInner(
       // Extracted teamId not in cached list — treat as unrecognized.
     }
 
-    console.warn(`[session-init:cc] session=${compositeKey} team-select unrecognized, bypassing`);
+    warnSessionEvent("team_select_unrecognized", { bypassed: true });
     // bypass: 保留 form 对话原样, 不删。
     await store.set(compositeKey, { status: "initialized", bypassed: true } as SessionInitState);
     return { intercepted: false, messages: messages as Record<string, unknown>[], bypassed: true, resetFlow: state?.resetFlow ?? false };
@@ -969,9 +960,7 @@ async function handleSessionInitInner(
       // 到这里 auto-select，从旧行为角度也是可接受的降级）。
       const soloOnNext = autoSelectSoloAgent(team, safeNextPage);
       if (soloOnNext) {
-        console.log(
-          `[session-init:cc] session=${compositeKey} MORE landed on solo page ${safeNextPage} → auto-select agent=${soloOnNext}`,
-        );
+        logSessionEvent("single_agent_page_selected", { page: safeNextPage });
         return advanceFromAgentPicked(
           team!, soloOnNext, cachedTeams, compositeKey, sessionKey, userId,
           state, config, store, reqCtx, stripped, metadataClient, userKey, spaceId,
@@ -979,9 +968,10 @@ async function handleSessionInitInner(
       }
 
       await store.set(compositeKey, { ...state, agentPageIndex: safeNextPage });
-      console.log(
-        `[session-init:cc] session=${compositeKey} agent page ${currentPage} → ${safeNextPage}`,
-      );
+      logSessionEvent("agent_page_changed", {
+        previousPage: currentPage,
+        page: safeNextPage,
+      });
       const fd: FormData = {
         teams: cachedTeams,
         stage: "agent_select",
@@ -1005,7 +995,7 @@ async function handleSessionInitInner(
         bypassed: true,
       } as SessionInitState;
       await store.set(compositeKey, bypassState);
-      console.log(`[session-init:cc] session=${compositeKey} user chose skip-agent → bypass`);
+      console.log("[session-init:cc] session=<redacted> selection=skip_agent bypass=true");
       return { intercepted: false, messages: stripped as Record<string, unknown>[], bypassed: true, resetFlow: state?.resetFlow ?? false };
     }
 
@@ -1013,9 +1003,7 @@ async function handleSessionInitInner(
       const resolvedAgentId = resolveAgent(extracted.agent_id, cachedTeams, selectedTeamId);
       if (!team) {
         // Extremely unlikely (selectedTeamId set but not in cachedTeams).
-        console.warn(
-          `[session-init:cc] session=${compositeKey} team ${selectedTeamId} not in cache → bypass`,
-        );
+        warnSessionEvent("selected_team_not_cached", { bypassed: true });
         await store.set(compositeKey, { status: "initialized", bypassed: true } as SessionInitState);
         return { intercepted: false, bypassed: true, resetFlow: state?.resetFlow ?? false };
       }
@@ -1026,7 +1014,7 @@ async function handleSessionInitInner(
       );
     }
 
-    console.warn(`[session-init:cc] session=${compositeKey} agent-select unrecognized, bypassing`);
+    warnSessionEvent("agent_select_unrecognized", { bypassed: true });
     // bypass: 保留 form 对话原样, 不删。
     await store.set(compositeKey, { status: "initialized", bypassed: true } as SessionInitState);
     return { intercepted: false, messages: messages as Record<string, unknown>[], bypassed: true, resetFlow: state?.resetFlow ?? false };
@@ -1054,9 +1042,7 @@ async function handleSessionInitInner(
       // solo 末页；此处保留双保险。
       const soloTaskId = autoSelectSoloTask(team, safeNextPage);
       if (soloTaskId && state.selectedAgentId) {
-        console.log(
-          `[session-init:cc] session=${compositeKey} MORE landed on solo task page ${safeNextPage} → auto-select task=${soloTaskId}`,
-        );
+        logSessionEvent("single_task_page_selected", { page: safeNextPage });
         return completeRegistration(
           { agent_id: state.selectedAgentId, task_id: soloTaskId },
           state, cachedTeams, selectedTeamId, compositeKey, sessionKey, userId,
@@ -1065,9 +1051,10 @@ async function handleSessionInitInner(
       }
 
       await store.set(compositeKey, { ...state, agentPageIndex: safeNextPage });
-      console.log(
-        `[session-init:cc] session=${compositeKey} task page ${currentPage} → ${safeNextPage}`,
-      );
+      logSessionEvent("task_page_changed", {
+        previousPage: currentPage,
+        page: safeNextPage,
+      });
       const fd: FormData = {
         teams: cachedTeams,
         stage: "task_select",
@@ -1082,7 +1069,7 @@ async function handleSessionInitInner(
     // BYPASS_MARKER = declined / 兼容旧表单显式跳过；null = 有答复但匹配不到任何 task
     // 两者都视作 "未识别"，与其它阶段的行为对齐 → bypass 整个 session-init。
     if (extracted === BYPASS_MARKER || extracted === null) {
-      console.warn(`[session-init:cc] session=${compositeKey} task-select unrecognized, bypassing`);
+      warnSessionEvent("task_select_unrecognized", { bypassed: true });
       // bypass: 保留 form 对话原样, 不删。
       await store.set(compositeKey, { status: "initialized", bypassed: true } as SessionInitState);
       return {

@@ -18,6 +18,10 @@ import type Database from "better-sqlite3";
 
 import type { ContextBlock } from "../injection/types.js";
 import { getDb } from "./index.js";
+import {
+  legacyPersistedSessionIdentityKey,
+  persistedSessionIdentityKey,
+} from "./session-identity-key.js";
 
 export interface HookCacheEntry {
   hookId: string;
@@ -68,8 +72,19 @@ function compositeSid(
   agentSource: string,
   sessionId: string,
 ): string {
-  const sp = spaceId || "_default";
-  return `${sp}:${userId}:${agentSource}:${sessionId}`;
+  return persistedSessionIdentityKey(spaceId, userId, agentSource, sessionId);
+}
+
+function legacyCompositeSid(
+  spaceId: string,
+  userId: string,
+  agentSource: string,
+  sessionId: string,
+): string | null {
+  // An empty space used the same sentinel as the literal `_default` space,
+  // and hook rows carry no owner metadata with which to disambiguate it.
+  if (spaceId === "") return null;
+  return legacyPersistedSessionIdentityKey(spaceId, userId, agentSource, sessionId);
 }
 
 const UPSERT_SQL = `
@@ -85,6 +100,7 @@ class SqliteHookCacheRepo implements HookCacheRepo {
   private getStmt: Database.Statement;
   private getAllStmt: Database.Statement;
   private clearStmt: Database.Statement;
+  private hasSessionStmt: Database.Statement;
 
   constructor(private db: Database.Database) {
     this.putStmt = db.prepare(UPSERT_SQL);
@@ -95,6 +111,9 @@ class SqliteHookCacheRepo implements HookCacheRepo {
       "SELECT hook_id, blocks_json FROM hook_cache WHERE session_id = ?",
     );
     this.clearStmt = db.prepare("DELETE FROM hook_cache WHERE session_id = ?");
+    this.hasSessionStmt = db.prepare(
+      "SELECT 1 AS present FROM hook_cache WHERE session_id = ? LIMIT 1",
+    );
   }
 
   put(
@@ -112,11 +131,8 @@ class SqliteHookCacheRepo implements HookCacheRepo {
         JSON.stringify(blocks),
         Date.now(),
       );
-    } catch (err) {
-      console.warn(
-        `[hook-cache] put failed (space=${spaceId} user=${userId} agent=${agentSource} session=${sessionId} hook=${hookId}):`,
-        err instanceof Error ? err.message : String(err),
-      );
+    } catch {
+      console.warn("[hook-cache] put failed");
     }
   }
 
@@ -137,11 +153,8 @@ class SqliteHookCacheRepo implements HookCacheRepo {
         }
       });
       tx(entries);
-    } catch (err) {
-      console.warn(
-        `[hook-cache] putMany failed (space=${spaceId} user=${userId} agent=${agentSource} session=${sessionId} count=${entries.length}):`,
-        err instanceof Error ? err.message : String(err),
-      );
+    } catch {
+      console.warn("[hook-cache] putMany failed");
     }
   }
 
@@ -153,10 +166,21 @@ class SqliteHookCacheRepo implements HookCacheRepo {
     hookId: string,
   ): Promise<ContextBlock[] | null> {
     try {
-      const row = this.getStmt.get(
-        compositeSid(spaceId, userId, agentSource, sessionId),
-        hookId,
-      ) as { blocks_json: string } | undefined;
+      const currentId = compositeSid(spaceId, userId, agentSource, sessionId);
+      let row = this.getStmt.get(currentId, hookId) as
+        | { blocks_json: string }
+        | undefined;
+      if (!row) {
+        const hasCurrent = this.hasSessionStmt.get(currentId) as
+          | { present: number }
+          | undefined;
+        if (hasCurrent) return null;
+        const legacyId = legacyCompositeSid(spaceId, userId, agentSource, sessionId);
+        if (!legacyId) return null;
+        row = this.getStmt.get(legacyId, hookId) as
+          | { blocks_json: string }
+          | undefined;
+      }
       if (!row) return null;
       const parsed = JSON.parse(row.blocks_json) as ContextBlock[];
       return Array.isArray(parsed) ? parsed : null;
@@ -172,9 +196,19 @@ class SqliteHookCacheRepo implements HookCacheRepo {
     sessionId: string,
   ): Promise<HookCacheEntry[]> {
     try {
-      const rows = this.getAllStmt.all(
-        compositeSid(spaceId, userId, agentSource, sessionId),
-      ) as Array<{ hook_id: string; blocks_json: string }>;
+      const currentId = compositeSid(spaceId, userId, agentSource, sessionId);
+      let rows = this.getAllStmt.all(currentId) as Array<{
+        hook_id: string;
+        blocks_json: string;
+      }>;
+      if (rows.length === 0) {
+        const legacyId = legacyCompositeSid(spaceId, userId, agentSource, sessionId);
+        if (!legacyId) return [];
+        rows = this.getAllStmt.all(legacyId) as Array<{
+          hook_id: string;
+          blocks_json: string;
+        }>;
+      }
       const out: HookCacheEntry[] = [];
       for (const r of rows) {
         try {
@@ -200,6 +234,8 @@ class SqliteHookCacheRepo implements HookCacheRepo {
   ): void {
     try {
       this.clearStmt.run(compositeSid(spaceId, userId, agentSource, sessionId));
+      const legacyId = legacyCompositeSid(spaceId, userId, agentSource, sessionId);
+      if (legacyId) this.clearStmt.run(legacyId);
     } catch {
       /* ignore */
     }

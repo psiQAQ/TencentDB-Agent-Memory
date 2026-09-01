@@ -97,13 +97,13 @@ export interface AgentContextMetadata {
    */
   spaceId?: string;
   /**
-   * Session key (conversation isolation). Used by LangfuseInjectionObserver
-   * to derive the deterministic Langfuse turn-trace ID.
+   * Session key for in-process conversation isolation. Telemetry must not derive
+   * a stable external ID from this value.
    */
   sessionKey?: string;
   /**
-   * Turn sequence number within the session. Combined with sessionKey to
-   * derive the deterministic Langfuse turn-trace ID.
+   * In-process turn sequence number. Privacy-safe telemetry does not combine it
+   * with session identity for external correlation.
    */
   turnSeq?: number;
   /**

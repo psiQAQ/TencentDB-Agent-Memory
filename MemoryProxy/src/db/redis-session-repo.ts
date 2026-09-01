@@ -1,20 +1,35 @@
 /**
  * RedisSessionRepo — Redis-backed persistence for SessionInitState.
  *
- * Implements the SessionRepo interface. Key design:
- *   inj:sess:{spaceId}:{userId}:{agentSource}:{sessionId}  = SessionInitState JSON
- *
- * spaceId 是 P4 kernel-sts 新增的隔离段。老 caller 传空字符串时用 `_default` 兜底。
+ * New keys store one versioned, collision-safe encoded identity tuple under
+ * the `inj:sess:` prefix.
  *
  * 由于 sessionKey === sessionId 恒成立、by-sid 反查已在 SessionRepo 接口中
  * 删除（详见 `2026-07-10-cos-ttl-nottl-split-plan.md`），本实现也一并
  * 删除反向索引写入。
  *
- * All errors degrade silently — the in-memory Map is always authoritative.
+ * Writes degrade explicitly via `false`; read failures throw a fixed error so
+ * callers never confuse an outage with an authoritative miss.
  */
 import type { Redis } from "ioredis";
-import type { SessionRepo, HydratedSessionRow } from "./sessionRepo.js";
-import type { SessionInitState } from "../session/types.js";
+import {
+  SessionRepoReadError,
+  type SessionRepo,
+  type HydratedSessionRow,
+} from "./sessionRepo.js";
+import {
+  isLegacyPersistedSessionOwnershipProof,
+  isPersistedSessionInitState,
+  normalizePersistedSessionInitState,
+  type SessionInitState,
+} from "../session/types.js";
+import {
+  legacyPersistedSessionIdentityKey,
+  parsePersistedSessionIdentityKey,
+  persistedSessionIdentityKey,
+  persistedStateOwnsIdentity,
+  type PersistedSessionIdentity,
+} from "./session-identity-key.js";
 
 const KEY_PREFIX = "inj:sess:";
 const DEFAULT_TTL = 30 * 60; // 30 minutes
@@ -25,8 +40,16 @@ function compositeKey(
   agentSource: string,
   sessionId: string,
 ): string {
-  const sp = spaceId || "_default";
-  return `${sp}:${userId}:${agentSource}:${sessionId}`;
+  return persistedSessionIdentityKey(spaceId, userId, agentSource, sessionId);
+}
+
+function identityOf(
+  spaceId: string,
+  userId: string,
+  agentSource: string,
+  sessionId: string,
+): PersistedSessionIdentity {
+  return { spaceId, userId, agentSource, sessionId };
 }
 
 export class RedisSessionRepo implements SessionRepo {
@@ -36,7 +59,11 @@ export class RedisSessionRepo implements SessionRepo {
     private redis: Redis,
     ttlSeconds?: number,
   ) {
-    this.ttl = ttlSeconds ?? DEFAULT_TTL;
+    const ttl = ttlSeconds ?? DEFAULT_TTL;
+    if (!Number.isSafeInteger(ttl) || ttl <= 0) {
+      throw new Error("invalid Redis session TTL");
+    }
+    this.ttl = ttl;
   }
 
   async upsert(
@@ -45,15 +72,18 @@ export class RedisSessionRepo implements SessionRepo {
     agentSource: string,
     sessionId: string,
     state: SessionInitState,
-  ): Promise<void> {
+  ): Promise<boolean> {
     const key = KEY_PREFIX + compositeKey(spaceId, userId, agentSource, sessionId);
+    if (!isPersistedSessionInitState(state)) return false;
     // await write-through：多节点部署下 pod A 关流前 L2a 必须落盘，
     // 否则 pod B turn-2 会 L2a miss → tryHistoryScan bypass 直接透传 LLM。
     // 见 2026-07-13 修复；写失败仍静默降级（L1 依旧是权威 fast path）。
     try {
       await this.redis.setex(key, this.ttl, JSON.stringify(state));
+      return true;
     } catch {
       /* silent — L1 authoritative fast path 仍然生效 */
+      return false;
     }
   }
 
@@ -64,56 +94,95 @@ export class RedisSessionRepo implements SessionRepo {
     sessionId: string,
   ): Promise<SessionInitState | null> {
     try {
-      const raw = await this.redis.get(
-        KEY_PREFIX + compositeKey(spaceId, userId, agentSource, sessionId),
+      const identity = identityOf(spaceId, userId, agentSource, sessionId);
+      const currentKey = KEY_PREFIX + compositeKey(spaceId, userId, agentSource, sessionId);
+      const raw = await this.redis.get(currentKey);
+      if (raw !== null) {
+        const parsed = JSON.parse(raw) as unknown;
+        const current = normalizePersistedSessionInitState(parsed);
+        if (!current) throw new SessionRepoReadError();
+        if (!persistedStateOwnsIdentity(current, identity)) throw new SessionRepoReadError();
+        return current;
+      }
+
+      const legacyTail = legacyPersistedSessionIdentityKey(
+        spaceId,
+        userId,
+        agentSource,
+        sessionId,
       );
-      if (!raw) return null;
-      return JSON.parse(raw) as SessionInitState;
+      if (!legacyTail) return null;
+      const legacyKey = KEY_PREFIX + legacyTail;
+      const legacyRaw = await this.redis.get(legacyKey);
+      if (!legacyRaw) return null;
+      if (await this.redis.ttl(legacyKey) <= 0) return null;
+      const parsedLegacyState = JSON.parse(legacyRaw) as unknown;
+      const legacyState = normalizePersistedSessionInitState(parsedLegacyState);
+      if (!legacyState) throw new SessionRepoReadError();
+      if (!persistedStateOwnsIdentity(legacyState, identity, spaceId === "")) return null;
+      return legacyState;
     } catch {
-      return null;
+      throw new SessionRepoReadError();
     }
   }
 
-  deleteBySessionId(
+  async deleteBySessionId(
     spaceId: string,
     userId: string,
     agentSource: string,
     sessionId: string,
-  ): void {
-    this.redis
-      .del(KEY_PREFIX + compositeKey(spaceId, userId, agentSource, sessionId))
-      .catch(() => {});
+  ): Promise<boolean> {
+    const identity = identityOf(spaceId, userId, agentSource, sessionId);
+    const currentKey = KEY_PREFIX + compositeKey(spaceId, userId, agentSource, sessionId);
+    const legacyTail = legacyPersistedSessionIdentityKey(
+      spaceId,
+      userId,
+      agentSource,
+      sessionId,
+    );
+    try {
+      await this.redis.del(currentKey);
+      if (!legacyTail) return true;
+      const legacyKey = KEY_PREFIX + legacyTail;
+      const raw = await this.redis.get(legacyKey);
+      if (!raw) return true;
+      const state = JSON.parse(raw) as unknown;
+      if (!isLegacyPersistedSessionOwnershipProof(state)) return false;
+      if (persistedStateOwnsIdentity(state, identity, spaceId === "")) {
+        await this.redis.del(legacyKey);
+      }
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   async loadAllInitialized(): Promise<HydratedSessionRow[]> {
     try {
-      const keys = await this.scanKeys(KEY_PREFIX + "*");
+      const keys = await this.scanKeys(KEY_PREFIX + "v2:*");
       if (keys.length === 0) return [];
       const raws = await this.redis.mget(...keys);
       const result: HydratedSessionRow[] = [];
       for (let i = 0; i < keys.length; i++) {
-        if (!raws[i]) continue;
-        try {
-          const state = JSON.parse(raws[i]!) as SessionInitState;
-          if (state.status !== "initialized") continue;
-          const tail = keys[i].slice(KEY_PREFIX.length);
-          const parts = tail.split(":");
-          if (parts.length < 4) continue;
-          const [spaceId, userId, agentSource, ...rest] = parts;
-          result.push({
-            spaceId,
-            userId,
-            agentSource,
-            sessionId: rest.join(":"),
-            state,
-          });
-        } catch {
-          /* skip corrupt */
-        }
+        if (raws[i] === null) continue;
+        const parsedState = JSON.parse(raws[i]!) as unknown;
+        const state = normalizePersistedSessionInitState(parsedState);
+        const tail = keys[i].slice(KEY_PREFIX.length);
+        const identity = parsePersistedSessionIdentityKey(tail);
+        if (
+          !state
+          || !identity
+          || !persistedStateOwnsIdentity(state, identity)
+        ) throw new SessionRepoReadError();
+        if (state.status !== "initialized") continue;
+        result.push({
+          ...identity,
+          state,
+        });
       }
       return result;
     } catch {
-      return [];
+      throw new SessionRepoReadError();
     }
   }
 

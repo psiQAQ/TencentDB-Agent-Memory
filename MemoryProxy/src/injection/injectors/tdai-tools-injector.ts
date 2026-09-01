@@ -57,14 +57,18 @@ export function renderTdaiMemoryToolsBlock(
   proxyBaseUrl: string,
   sessionId?: string,
   spaceId?: string,
+  agentSource?: string,
 ): string {
   const base = proxyBaseUrl.replace(/\/$/, "");
   const bridge = `${base}/memory-bridge/v3`;
-  // gateway 需要 `x-tdai-service-id: <spaceId>` 才放行；`x-conversation-id`
-  // 让 proxy 复用 session 里的身份 (user_id / team_id / agent_id)。
+  // Bridge authenticates every request before reading session state. The
+  // credential stays in the client environment; only its variable reference
+  // is rendered into the cached prompt.
+  const credentialHeader = ` -H "x-api-key: \${TDAI_MEMORY_USER_KEY:?TDAI_MEMORY_USER_KEY is required}"`;
   const sessionHeader = sessionId ? ` -H 'x-conversation-id: ${sessionId}'` : "";
   const tenantHeader = spaceId ? ` -H 'x-tdai-service-id: ${spaceId}'` : "";
-  const authHeader = `${tenantHeader}${sessionHeader}`;
+  const sourceHeader = agentSource ? ` -H 'x-tdai-agent-source: ${agentSource}'` : "";
+  const authHeader = `${credentialHeader}${tenantHeader}${sourceHeader}${sessionHeader}`;
 
   const lines: string[] = [
     "<tdai_memory_tools>",
@@ -73,7 +77,7 @@ export function renderTdaiMemoryToolsBlock(
     "遇到用户问身份/历史/偏好/过往结论/项目约定时，必须先使用下面的 TDAI 记忆工具查询，再基于查询结果回答。",
     "禁止说\"我没有这个工具 / 需要 MCP / 只能查本地记忆\" —— 你有 TDAI 记忆工具，就用下面的 curl 命令。",
     "",
-    "调用方式：Bash 里执行 curl 命中 proxy 的 memory-bridge 路径。proxy 会自动注入身份鉴权（team_id/user_id/agent_id），body 只需业务字段。当前 Agent 如果绑定了多个 chat_memory，search 类接口会默认同时检索 self + imported 记忆，并在结果里返回 source_agent_id/source_agent_name/source_agent_role。",
+    "调用方式：Bash 里执行 curl 命中 proxy 的 memory-bridge 路径。客户端必须在 TDAI_MEMORY_USER_KEY 环境变量中保持自己的 Memory user key；proxy 验证它后从该用户的 session 注入 team_id/user_id/agent_id。body 只需业务字段。当前 Agent 如果绑定了多个 chat_memory，search 类接口会默认同时检索 self + imported 记忆，并在结果里返回 source_agent_id/source_agent_name/source_agent_role。",
     "",
     "覆盖范围：",
     "- L3（persona 长期画像）与 L2 场景索引（`<l2_scene_index>`）已直接注入 system，无需查询；",
@@ -123,8 +127,9 @@ export function renderTdaiMemoryToolsBlock(
     "- 每轮对话中，atomic_search + conversation_search **合计 ≤ 3 次**；",
     "  query / ls / read_scene 不计入上限，但同一 path 不要重复读。",
     "- 失败重试：HTTP 5xx 可一次性 retry；HTTP 4xx 不要重试。",
-    "- 所有 curl 必须带：" +
+    "- 所有 curl 必须带：x-api-key（值从 TDAI_MEMORY_USER_KEY 环境变量展开）、" +
       (spaceId ? `x-tdai-service-id: ${spaceId}、` : "x-tdai-service-id（当前 memory 实例，见示例）、") +
+      (agentSource ? `x-tdai-agent-source: ${agentSource}、` : "x-tdai-agent-source（当前 Agent 来源）、") +
       (sessionId ? `x-conversation-id: ${sessionId}` : "x-conversation-id（来自当前会话）") +
       "；Content-Type: application/json。",
     "",
@@ -161,18 +166,18 @@ export class TdaiMemoryToolsInjector implements InjectionHook {
       | Record<string, unknown>
       | undefined;
     const spaceId = typeof session?.space_id === "string" ? session.space_id : undefined;
-    return this.renderBlocks(identity.sessionId, spaceId);
+    return this.renderBlocks(identity.sessionId, spaceId, ctx.metadata.agentSource);
   }
 
   prewarm(input: PrewarmInput): ContextBlock[] {
     if (input.assetCapabilities?.chat_memory === false) return [];
-    return this.renderBlocks(input.sessionInfo.session_id, input.sessionInfo.space_id);
+    return this.renderBlocks(input.sessionInfo.session_id, input.sessionInfo.space_id, input.agentSource);
   }
 
-  private renderBlocks(sessionId: string, spaceId?: string): ContextBlock[] {
+  private renderBlocks(sessionId: string, spaceId?: string, agentSource?: string): ContextBlock[] {
     return [{
       type: "text",
-      content: renderTdaiMemoryToolsBlock(this.cfg.proxyBaseUrl, sessionId, spaceId),
+      content: renderTdaiMemoryToolsBlock(this.cfg.proxyBaseUrl, sessionId, spaceId, agentSource),
       metadata: {
         source: this.id,
         sessionId,

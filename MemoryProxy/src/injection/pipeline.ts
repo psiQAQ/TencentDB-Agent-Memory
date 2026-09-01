@@ -24,7 +24,7 @@ import {
 } from "./context.js";
 import type { HookCacheRepo } from "../db/hookCacheRepo.js";
 import type { InjectionObserver, HookResult } from "./observer.js";
-import { NoopInjectionObserver } from "./observer.js";
+import { NoopInjectionObserver, safeCacheStrategy } from "./observer.js";
 
 /** Optional pipeline behaviors (agent detection, etc.). */
 export interface InjectionPipelineOptions {
@@ -82,9 +82,10 @@ export class InjectionPipeline {
     metadata: AgentContextMetadata,
   ): Promise<Record<string, unknown>> {
     const pipelineStartMs = Date.now();
+    const observer = this.observer.forRequest?.() ?? this.observer;
 
     // ── Observer: pipeline start ─────────────────────────────────────────
-    safeCall(() => this.observer.onPipelineStart(metadata));
+    safeCall(() => observer.onPipelineStart(metadata));
 
     try {
       // 1. Get the appropriate adapter
@@ -128,20 +129,20 @@ export class InjectionPipeline {
       }
 
       // 3. Execute hooks at each injection point
-      const hookResults: HookResult[] = await this.executeHooks(ctx);
+      const hookResults: HookResult[] = await this.executeHooks(ctx, observer);
 
       // 4. Serialize → modified body
       const result = adapter.serialize(ctx);
 
       // ── Observer: pipeline end ──────────────────────────────────────────
       const durationMs = Date.now() - pipelineStartMs;
-      safeCall(() => this.observer.onPipelineEnd(metadata, durationMs, hookResults));
+      safeCall(() => observer.onPipelineEnd(metadata, durationMs, hookResults));
 
       return result;
     } catch (err) {
       // ── Observer: pipeline error ────────────────────────────────────────
       const error = err instanceof Error ? err : new Error(String(err));
-      safeCall(() => this.observer.onPipelineError(metadata, error));
+      safeCall(() => observer.onPipelineError(metadata, error));
       throw err; // re-throw so callers can handle it
     }
   }
@@ -161,7 +162,10 @@ export class InjectionPipeline {
    * `sessionId` in metadata, every hook falls back to `"none"` behavior to
    * preserve legacy semantics.
    */
-  private async executeHooks(ctx: AgentContext): Promise<HookResult[]> {
+  private async executeHooks(
+    ctx: AgentContext,
+    observer: InjectionObserver,
+  ): Promise<HookResult[]> {
     const executionOrder: InjectionPoint[] = [
       "system.prefix",
       "system.before_tools",
@@ -191,32 +195,23 @@ export class InjectionPipeline {
       for (const hook of hooks) {
         const hookStartMs = Date.now();
         // ── Observer: hook start ──────────────────────────────────────────
-        safeCall(() => this.observer.onHookStart(hook, point));
+        safeCall(() => observer.onHookStart(hook, point));
 
         try {
           const blocks = await this.resolveHookBlocks(hook, ctx, spaceId, userId, agentSource, sessionId);
           const durationMs = Date.now() - hookStartMs;
 
           if (blocks.length > 0) {
-            // 💡 显式打印注入成功的日志和文本前 120 字符预览，极大方便开发者排查和联调
             console.log(
-              `[injection] ✓ Hook "${hook.id}" successfully injected ${blocks.length} block(s) ` +
-              `at point "${point}" (cacheStrategy=${hook.cacheStrategy ?? "none"})`
+              `[injection] hook_done point=${point} blocks=${blocks.length} `
+                + `cacheStrategy=${safeCacheStrategy(hook.cacheStrategy ?? "none")}`,
             );
-            for (const b of blocks) {
-              if (b.type === "text") {
-                const preview = b.content.replace(/\s+/g, " ").slice(0, 120);
-                console.log(`[injection]   → text preview: "${preview}..."`);
-              } else if (b.type === "custom") {
-                console.log(`[injection]   → custom tool: "${b.metadata?.tool_name}"`);
-              }
-            }
             this.applyInjection(ctx, hook, point, blocks);
           }
 
           // ── Observer: hook done ─────────────────────────────────────────
           safeCall(() =>
-            this.observer.onHookDone(hook, point, blocks, durationMs, hook.cacheStrategy),
+            observer.onHookDone(hook, point, blocks, durationMs, hook.cacheStrategy),
           );
 
           results.push({
@@ -232,12 +227,11 @@ export class InjectionPipeline {
 
           // Hook failure is non-fatal — log and continue
           console.error(
-            `[injection] Hook "${hook.id}" failed at point "${point}":`,
-            error.message,
+            `[injection] hook_error point=${point} category=execution_failed`,
           );
 
           // ── Observer: hook error ────────────────────────────────────────
-          safeCall(() => this.observer.onHookError(hook, point, error, durationMs));
+          safeCall(() => observer.onHookError(hook, point, error, durationMs));
 
           results.push({
             hookId: hook.id,
@@ -284,7 +278,7 @@ export class InjectionPipeline {
     if (strategy === "session_init") {
       const cached = await this.hookCacheRepo.get(spaceId, userId, agentSource, sessionId, hook.id);
       if (cached !== null) {
-        console.log(`[hook-cache] session=${sessionId} hook=${hook.id} hit blocks=${cached.length}`);
+        console.log(`[hook-cache] lookup result=hit blocks=${cached.length}`);
         return cached;
       }
 
@@ -304,17 +298,14 @@ export class InjectionPipeline {
       if (fresh.length > 0 && !readOnly) {
         try {
           await this.hookCacheRepo.put(spaceId, userId, agentSource, sessionId, hook.id, fresh);
-          console.log(`[hook-cache] session=${sessionId} hook=${hook.id} miss → self-heal put (blocks=${fresh.length})`);
-        } catch (err) {
-          console.warn(
-            `[injection] session_init cache self-heal put failed (session=${sessionId} hook=${hook.id}):`,
-            err instanceof Error ? err.message : String(err),
-          );
+          console.log(`[hook-cache] self_healed blocks=${fresh.length}`);
+        } catch {
+          console.warn("[hook-cache] self_heal_failed category=storage_error");
         }
       } else if (readOnly) {
-        console.log(`[hook-cache] session=${sessionId} hook=${hook.id} miss (readOnly, no self-heal) blocks=${fresh.length}`);
+        console.log(`[hook-cache] lookup result=miss readOnly=true selfHeal=false blocks=${fresh.length}`);
       } else {
-        console.log(`[hook-cache] session=${sessionId} hook=${hook.id} miss + execute returned empty (no self-heal)`);
+        console.log("[hook-cache] lookup result=miss selfHeal=false blocks=0");
       }
       return fresh;
     }
@@ -369,10 +360,7 @@ export class InjectionPipeline {
           return; // anchor hit — done
         }
         // Slot unresolved / structure missing → fall through to `point` (warn).
-        console.warn(
-          `[injection] anchor slot "${hook.anchor.slot ?? hook.anchor.rawKey}" `
-            + `unresolved on agent "${profile.id}", fallback to point "${point}"`,
-        );
+        console.warn(`[injection] anchor_unresolved point=${point} fallback=true`);
       }
     }
 

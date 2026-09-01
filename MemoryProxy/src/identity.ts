@@ -83,15 +83,63 @@ export interface RequestInspection {
 const MAX_INSPECTIONS = 20;
 const recentInspections: RequestInspection[] = [];
 
+function present(value: string | null): string | null {
+  return value ? "present" : null;
+}
+
+function safeAgentSource(value: string): string {
+  return ["claude-code", "codebuddy", "opencode", "pi"].includes(value)
+    ? value
+    : "other";
+}
+
+function privacySafeIdentity(identity: ClientIdentity): ClientIdentity {
+  return {
+    ...identity,
+    userId: present(identity.userId),
+    keyId: identity.keyId === "unknown" ? "unknown" : "present",
+    apiKeyPrefix: null,
+    sessionId: present(identity.sessionId),
+    wechatWorkId: present(identity.wechatWorkId),
+    requestId: present(identity.requestId),
+    userAgent: present(identity.userAgent),
+    customHeaders: {},
+    userInfo: identity.userInfo
+      ? Object.fromEntries(
+          Object.keys(identity.userInfo).map((name) => [
+            name,
+            identity.userInfo?.[name as keyof UserInfoFromPrompt] ? "present" : null,
+          ]),
+        ) as unknown as UserInfoFromPrompt
+      : null,
+    proxyToken: present(identity.proxyToken),
+    agentSource: safeAgentSource(identity.agentSource),
+  };
+}
+
 export function recordInspection(inspection: RequestInspection): void {
-  recentInspections.push(inspection);
+  recentInspections.push({
+    ...inspection,
+    method: ["GET", "POST", "PUT", "PATCH", "DELETE"].includes(inspection.method)
+      ? inspection.method
+      : "OTHER",
+    path: "[redacted]",
+    identity: privacySafeIdentity(inspection.identity),
+    allHeaders: {},
+    bodyMeta: {
+      ...inspection.bodyMeta,
+      model: inspection.bodyMeta.model ? "present" : null,
+      systemPromptPreview: undefined,
+      systemPromptTail: undefined,
+    },
+  });
   if (recentInspections.length > MAX_INSPECTIONS) {
     recentInspections.shift();
   }
 }
 
 export function getRecentInspections(): RequestInspection[] {
-  return [...recentInspections];
+  return structuredClone(recentInspections);
 }
 
 // ── Identity extraction from headers ───────────────────────────────────────────
@@ -418,31 +466,14 @@ export function inspectAndRecord(
 
   // Also log to stderr for real-time visibility
   console.error(
-    `[identity] userId=${identity.userId ?? "?"} keyId=${identity.keyId} ` +
-    `sessionId=${identity.sessionId ?? "none"} ` +
-    `wechatId=${identity.wechatWorkId ?? "none"} ` +
-    `user=${identity.userInfo?.usernameFromPath ?? "?"} ` +
-    `ws=${identity.userInfo?.workspaceFolder ?? "?"} ` +
-    `proxyToken=${identity.proxyToken ? identity.proxyToken.slice(0, 12) + "***" : "none"}` +
-    (Object.keys(identity.customHeaders).length > 0
-      ? ` custom=[${Object.keys(identity.customHeaders).join(",")}]`
-      : ""),
+    `[identity] userId=${identity.userId ? "present" : "none"} keyId=${identity.keyId === "unknown" ? "none" : "present"} ` +
+    `sessionId=${identity.sessionId ? "present" : "none"} ` +
+    `wechatId=${identity.wechatWorkId ? "present" : "none"} ` +
+    `user=${identity.userInfo?.usernameFromPath ? "present" : "none"} ` +
+    `ws=${identity.userInfo?.workspaceFolder ? "present" : "none"} ` +
+    `proxyToken=${identity.proxyToken ? "present" : "none"}` +
+    ` customHeaderCount=${Object.keys(identity.customHeaders).length}`,
   );
-
-  // [DEBUG-CC-SESSION] 临时调试：打印 Claude Code SDK 注入的 session id 值，
-  // 用于验证「同一次 claude 启动多次请求同 id / 不同启动不同 id」。验证完即移除。
-  {
-    const ccSid =
-      identity.customHeaders["x-claude-code-session-id"] ??
-      identity.customHeaders["X-Claude-Code-Session-Id"];
-    const xApp =
-      identity.customHeaders["x-app"] ?? identity.customHeaders["X-App"];
-    if (ccSid || xApp) {
-      console.error(
-        `[debug-cc] x-claude-code-session-id=${ccSid ?? "none"} x-app=${xApp ?? "none"}`,
-      );
-    }
-  }
 
   return identity;
 }

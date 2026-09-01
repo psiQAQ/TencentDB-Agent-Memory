@@ -30,14 +30,20 @@ import { log } from "./report/log.js";
 import { verifyUserKey } from "./auth.js";
 import { matchSystemUserByUserId, hasSystemUsers } from "./systemUser.js";
 import { handleSystemUserPassthrough } from "./systemUserPassthrough.js";
-
-/** Hop-by-hop headers 与 host header：不能透传到 upstream。 */
-const SKIP_REQUEST_HEADERS = new Set([
-  "host",
-  "content-length",
-  "transfer-encoding",
-  "connection",
-]);
+import {
+  getAnthropicSourceBindingError,
+  isAnthropicMessageSource,
+  type AnthropicMessageSource,
+} from "./agent-adapters/anthropic-platform.js";
+import {
+  getOpenAISourceBindingError,
+  isOpenAIChatSource,
+  type OpenAIChatSource,
+} from "./agent-adapters/index.js";
+import {
+  buildSafeUpstreamHeaders,
+  MissingUpstreamCredentialError,
+} from "./upstream-headers.js";
 
 /** 响应头中不应回传给客户端的头（避免 stream 长度不一致等问题）。 */
 const SKIP_RESPONSE_HEADERS = new Set([
@@ -51,33 +57,19 @@ const SKIP_RESPONSE_HEADERS = new Set([
  * 构造转发到上游的请求头。
  *
  * 与主 handler 的差异：辅助端点不涉及路由的 auth override，只需按端点
- * 协议注入 `upstream.apiKey`：
+ * 协议注入服务端 per-agent key（未配置时回退 `upstream.apiKey`）：
  *  - `anthropic` → `x-api-key`（同时清除 `authorization`）
  *  - `openai`    → `Authorization: Bearer`
  */
 function buildAuxUpstreamHeaders(
   c: Context,
-  config: ProxyConfig,
+  upstreamApiKey: string,
   entry: WhitelistEndpoint,
 ): Record<string, string> {
-  const headers: Record<string, string> = {};
-  for (const [k, v] of c.req.raw.headers.entries()) {
-    if (!SKIP_REQUEST_HEADERS.has(k.toLowerCase())) {
-      headers[k] = v;
-    }
-  }
-  headers["content-type"] = headers["content-type"] ?? "application/json";
-
-  if (config.upstream.apiKey) {
-    if (entry.protocol === "anthropic") {
-      headers["x-api-key"] = config.upstream.apiKey;
-      delete headers["authorization"];
-    } else {
-      headers["authorization"] = `Bearer ${config.upstream.apiKey}`;
-      delete headers["x-api-key"];
-    }
-  }
-  return headers;
+  return buildSafeUpstreamHeaders(c.req.raw.headers, {
+    protocol: entry.protocol,
+    apiKey: upstreamApiKey,
+  });
 }
 
 /** 过滤响应头（剥离长度/编码相关字段），返回可直接下发的 Headers 对象。 */
@@ -160,16 +152,41 @@ function extractUsageFromResponse(
 export async function handleAuxiliaryEndpoint(
   c: Context,
   config: ProxyConfig,
+  boundAgentSource?: AnthropicMessageSource | OpenAIChatSource,
 ): Promise<Response> {
-  const traceId = uuidv7();
-  const startTime = new Date().toISOString();
-
   const entry = matchWhitelistEndpoint(c.req.path);
   if (!entry) {
     // Defensive: server.ts 应保证只有白名单路径路由到本 handler。
     // 若到达此处说明配置或路由不一致，返回 404 便于快速定位。
     return c.json({ error: "Unregistered endpoint" }, 404);
   }
+
+  const sourceBindingError = entry.protocol === "anthropic"
+    ? getAnthropicSourceBindingError(
+        c.req.path,
+        boundAgentSource && isAnthropicMessageSource(boundAgentSource)
+          ? boundAgentSource
+          : undefined,
+      )
+    : getOpenAISourceBindingError(
+        c.req.path,
+        boundAgentSource && isOpenAIChatSource(boundAgentSource)
+          ? boundAgentSource
+          : undefined,
+      );
+  const validForProtocol = entry.protocol === "anthropic"
+    ? Boolean(boundAgentSource && isAnthropicMessageSource(boundAgentSource))
+    : Boolean(boundAgentSource && isOpenAIChatSource(boundAgentSource));
+  const crossProtocolBinding = Boolean(boundAgentSource && !validForProtocol);
+  if (sourceBindingError === "unbound" && !crossProtocolBinding) {
+    return c.json({ error: `Unsupported ${entry.protocol} platform route` }, 404);
+  }
+  if (sourceBindingError === "conflict" || crossProtocolBinding) {
+    return c.json({ error: "Platform route binding mismatch" }, 400);
+  }
+
+  const traceId = uuidv7();
+  const startTime = new Date().toISOString();
 
   // 1. 鉴权（先做本地 keyId 解析，再走 auth 服务校验以与主 handler 对称）
   const apiKey =
@@ -211,10 +228,23 @@ export async function handleAuxiliaryEndpoint(
   const modelId = extractModelId(bodyText);
 
   // 3. 拼接 upstream URL（复用 joinUrl，天然消费白名单表）
-  const upstreamUrl = joinUrl(config.upstream.url, c.req.path);
+  const agentUpstream = boundAgentSource
+    ? config.upstream.agents?.[boundAgentSource]
+    : undefined;
+  const upstreamBaseUrl = agentUpstream?.url ?? config.upstream.url;
+  const upstreamApiKey = agentUpstream?.apiKey?.trim() || config.upstream.apiKey.trim();
+  const upstreamUrl = joinUrl(upstreamBaseUrl, c.req.path);
 
   // 4. 构造上游请求头（按端点协议注入鉴权）
-  const upstreamHeaders = buildAuxUpstreamHeaders(c, config, entry);
+  let upstreamHeaders: Record<string, string>;
+  try {
+    upstreamHeaders = buildAuxUpstreamHeaders(c, upstreamApiKey, entry);
+  } catch (err: unknown) {
+    if (err instanceof MissingUpstreamCredentialError) {
+      return c.json({ error: err.message }, 503);
+    }
+    throw err;
+  }
 
   // 5. Pipeline log（简化：只发关键事件）
   const pipe = createPipeline(config, traceId, modelId);
@@ -231,15 +261,20 @@ export async function handleAuxiliaryEndpoint(
       method: "POST",
       headers: upstreamHeaders,
       body: rawBody,
+      redirect: "manual",
     });
-  } catch (err: unknown) {
-    pipe.error("AUX_FORWARD", err instanceof Error ? err : new Error(String(err)));
+  } catch {
+    pipe.error("AUX_FORWARD", "transport_error");
     return c.json(
-      { error: "Upstream request failed", detail: err instanceof Error ? err.message : String(err) },
+      { error: "Upstream request failed", detail: "upstream_transport_error" },
       502,
     );
   }
   pipe.forwardDone(upstreamResp.status);
+  if (upstreamResp.status >= 300 && upstreamResp.status < 400) {
+    pipe.error("AUX_REDIRECT", "Upstream redirect rejected");
+    return c.json({ error: "Upstream redirect rejected" }, 502);
+  }
 
   // 7. 分流：stream vs non-stream
   const contentType = upstreamResp.headers.get("content-type") ?? "";
@@ -248,7 +283,10 @@ export async function handleAuxiliaryEndpoint(
   if (isStream) {
     // Stream 分支：直接 pipe，本期不做 SSE tap 提取 usage
     // （credit 会在客户端断开或 tap 逻辑二期补齐时再实现）
-    log.debug("aux.stream.passthrough", { path: c.req.path, upstreamUrl });
+    log.debug("aux.stream.passthrough", {
+      protocol: entry.protocol,
+      upstreamConfigured: upstreamUrl.length > 0,
+    });
     return new Response(upstreamResp.body, {
       status: upstreamResp.status,
       headers: filterResponseHeaders(upstreamResp.headers),
@@ -272,12 +310,11 @@ export async function handleAuxiliaryEndpoint(
         upstreamUrl,
         "usage",
       );
-    } catch (err: unknown) {
-      log.error(
-        "aux.credit_report_failed",
-        { path: c.req.path, upstreamUrl },
-        err instanceof Error ? err : new Error(String(err)),
-      );
+    } catch {
+      log.error("aux.credit_report_failed", {
+        category: "report_error",
+        protocol: entry.protocol,
+      });
     }
 
     // JSONL + ClickHouse usage 落表（复用主 handler 的路径）

@@ -19,10 +19,11 @@ source "$SCRIPT_DIR/_lib.sh"
 load_env
 require_vars \
   PROXY_IMAGE PROXY_PORT \
-  PROXY_UPSTREAM_URL PROXY_UPSTREAM_API_KEY PROXY_UPSTREAM_MODEL
+  PROXY_UPSTREAM_URL PROXY_UPSTREAM_API_KEY PROXY_UPSTREAM_MODEL \
+  MEMORY_CORE_GATEWAY_API_KEY
 
-# 与 memory-core 保持一致的 gateway 内部凭据（默认 local，仅本地体验）
-MEMORY_CORE_GATEWAY_API_KEY="${MEMORY_CORE_GATEWAY_API_KEY:-local}"
+# 与 memory-core 保持一致的 gateway 内部凭据。
+MEMORY_CORE_GATEWAY_API_KEY="${MEMORY_CORE_GATEWAY_API_KEY:?}"
 
 CONTAINER=tdai-proxy
 NETWORK=tdai-memory-stack
@@ -144,6 +145,7 @@ knowledge:
 auth:
   enabled: $(bool $PROXY_ENABLE_AUTH)
   url: "http://memory-core:8420"
+  serviceToken: "${MEMORY_CORE_GATEWAY_API_KEY}"
   timeoutMs: 5000
 
 sessionInit:

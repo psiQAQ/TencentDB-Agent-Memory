@@ -385,9 +385,9 @@ export interface SkillRuntimeConfig {
  *   │ in map, url + apiKey         │ agent.url  │ agent.apiKey            │
  *   └──────────────────────────────┴────────────┴──────────────────────────┘
  *
- * The presence of an entry cuts the global `upstream.apiKey` fallback —
- * this is intentional so an operator can run some agents on a server-side
- * key and others on the client's own key from a single proxy config.
+ * A same-origin URL-only entry inherits the global server credential. A
+ * cross-origin entry must provide its own server credential; client
+ * credentials are never forwarded upstream.
  *
  * Priority order (high → low):
  *   1. `costGuard`-provided `target.authHeaders`（cheap-model 兜底路由自带凭据）
@@ -406,9 +406,8 @@ export interface AgentUpstreamEntry {
    * Per-agent apiKey. When set (non-empty):
    *   - OpenAI: `Authorization: Bearer <apiKey>` is injected
    *   - Anthropic: `x-api-key: <apiKey>` is injected
-   * When absent / empty: the client's own auth header is passed through
-   * upstream untouched. This does NOT fall back to `upstream.apiKey` —
-   * that fallback only applies when this agent has no entry at all.
+   * When absent / empty, a same-origin target falls back to `upstream.apiKey`.
+   * A cross-origin target fails closed instead of forwarding client auth.
    */
   apiKey?: string;
 }
@@ -643,6 +642,8 @@ export interface AuthConfig {
   enabled: boolean;
   /** Auth service base URL (e.g. http://kernel.example.com:8420). */
   url: string;
+  /** Optional server credential sent to the auth service as Bearer authorization. */
+  serviceToken?: string;
   /** Request timeout in ms. Default: 5000. */
   timeoutMs: number;
 }
@@ -871,6 +872,7 @@ export interface RawYamlConfig {
   auth?: {
     enabled?: boolean;
     url?: string;
+    serviceToken?: string;
     timeoutMs?: number;
   };
   systemUsers?: Partial<SystemUserEntry>[];
@@ -898,6 +900,8 @@ export interface RawYamlConfig {
 export interface RequestLogEntry {
   timestamp: string;
   event: "request";
+  /** Request-scoped random trace id; never derived from a session or user. */
+  traceId?: string;
   modelId: string;
   keyId: string; // SHA-256(apiKey).slice(0, 8)
   sessionKey?: string; // conversationId || keyId — per-conversation isolation key

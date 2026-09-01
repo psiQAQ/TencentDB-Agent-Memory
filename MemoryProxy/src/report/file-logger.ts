@@ -66,9 +66,9 @@ export class FileLogger {
       this.flushTimer = setInterval(() => this.flush(), intervalMs);
       // Allow process to exit naturally
       this.flushTimer.unref();
-    } catch (err) {
+    } catch {
       this.disabled = true;
-      process.stderr.write(`[file-logger] init failed: ${err}\n`);
+      process.stderr.write("[file-logger] init failed category=filesystem_error\n");
     }
   }
 
@@ -179,8 +179,8 @@ export class FileLogger {
       highWaterMark: 64 * 1024,
     });
 
-    this.stream.on("error", (err) => {
-      process.stderr.write(`[file-logger] stream error: ${err.message}\n`);
+      this.stream.on("error", () => {
+        process.stderr.write("[file-logger] stream error category=filesystem_error\n");
       this.disabled = true;
     });
   }
@@ -214,8 +214,8 @@ export class FileLogger {
       // Reopen stream for new file
       this.currentSize = 0;
       this.openStream();
-    } catch (err) {
-      process.stderr.write(`[file-logger] rotate failed: ${err}\n`);
+    } catch {
+      process.stderr.write("[file-logger] rotate failed category=filesystem_error\n");
       this.disabled = true;
     }
   }

@@ -20,10 +20,10 @@ load_env
 require_vars \
   MEMORY_HUB_IMAGE PANEL_PORT KNOWLEDGE_PORT PANEL_VOLUME \
   MEMORY_LLM_BASE_URL MEMORY_LLM_API_KEY MEMORY_LLM_MODEL \
-  KNOWLEDGE_PUBLIC_BASE_URL
+  KNOWLEDGE_PUBLIC_BASE_URL MEMORY_CORE_GATEWAY_API_KEY
 
-# 与 memory-core 保持一致的 gateway 内部凭据（默认 local，仅本地体验）
-MEMORY_CORE_GATEWAY_API_KEY="${MEMORY_CORE_GATEWAY_API_KEY:-local}"
+# 与 memory-core 保持一致的 gateway 内部凭据。
+MEMORY_CORE_GATEWAY_API_KEY="${MEMORY_CORE_GATEWAY_API_KEY:?}"
 
 # Panel UI "客户端接入地址"卡片显示的 base URL（供 CodeBuddy / ClaudeCode 拷贝使用）。
 # 开源本地部署 core 和 proxy 分开跑，客户端要接的是 proxy，不是 core/gateway。

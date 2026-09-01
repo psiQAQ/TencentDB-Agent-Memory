@@ -175,27 +175,26 @@ export class CoreKnowledgeClient {
         body: JSON.stringify({ team_id: teamId, pagination: { limit: 200 } }),
         signal: AbortSignal.timeout(timeout),
       });
-    } catch (err) {
-      console.warn(`${TAG} listKnowledge fetch failed: ${(err as Error).message}`);
+    } catch {
+      console.warn(`${TAG} listKnowledge fetch failed category=network_error`);
       return null;
     }
 
     if (!resp.ok) {
-      const text = await resp.text().catch(() => "");
-      console.warn(`${TAG} listKnowledge HTTP ${resp.status}: ${text.slice(0, 200)}`);
+      console.warn(`${TAG} listKnowledge HTTP status=${resp.status}`);
       return null;
     }
 
     let env: CoreEnvelope<CoreKnowledgeListResult>;
     try {
       env = (await resp.json()) as CoreEnvelope<CoreKnowledgeListResult>;
-    } catch (err) {
-      console.warn(`${TAG} listKnowledge non-JSON response: ${(err as Error).message}`);
+    } catch {
+      console.warn(`${TAG} listKnowledge non-JSON response category=invalid_response`);
       return null;
     }
 
     if (env.code !== 0) {
-      console.warn(`${TAG} listKnowledge envelope error ${env.code}: ${env.message ?? ""}`);
+      console.warn(`${TAG} listKnowledge envelope error code=${env.code}`);
       return null;
     }
 
@@ -291,24 +290,23 @@ export class CoreKnowledgeClient {
         body: JSON.stringify(body),
         signal: AbortSignal.timeout(this.defaultTimeoutMs),
       });
-    } catch (err) {
-      console.warn(`${TAG} POST ${url} fetch failed: ${(err as Error).message}`);
+    } catch {
+      console.warn(`${TAG} POST fetch failed category=network_error`);
       return null;
     }
     if (!resp.ok) {
-      const text = await resp.text().catch(() => "");
-      console.warn(`${TAG} POST ${url} HTTP ${resp.status}: ${text.slice(0, 200)}`);
+      console.warn(`${TAG} POST HTTP status=${resp.status}`);
       return null;
     }
     try {
       const env = (await resp.json()) as CoreEnvelope<T>;
       if (env.code !== 0) {
-        console.warn(`${TAG} POST ${url} envelope error ${env.code}: ${env.message ?? ""}`);
+        console.warn(`${TAG} POST envelope error code=${env.code}`);
         return null;
       }
       return env;
-    } catch (err) {
-      console.warn(`${TAG} POST ${url} non-JSON: ${(err as Error).message}`);
+    } catch {
+      console.warn(`${TAG} POST non-JSON category=invalid_response`);
       return null;
     }
   }

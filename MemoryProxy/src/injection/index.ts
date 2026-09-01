@@ -161,16 +161,10 @@ export function tryActivateStorage(config: ProxyConfig): boolean {
     setHookCacheRepo(new KvHookCacheRepo(storage));
     const store = getSessionStore();
     store.setBindingRepo(new KvBindingRepo(storage));
-    const eff = getEffectiveBackend();
-    console.log(
-      `[injection] activated ProxyStorage (requested=${eff.requested}, effective=${eff.effective})`,
-    );
+    console.log("[injection] storage_activated backend=proxy_storage");
     return true;
-  } catch (err) {
-    console.warn(
-      "[injection] ProxyStorage init failed, falling back to Redis/SQLite:",
-      err instanceof Error ? err.message : String(err),
-    );
+  } catch {
+    console.warn("[injection] storage_init_failed backend=proxy_storage category=initialization_error fallback=true");
     return false;
   }
 }
@@ -187,10 +181,10 @@ export function tryActivateRedis(config: ProxyConfig): boolean {
     setHookCacheRepo(new RedisHookCacheRepo(redis, ttl));
     const store = getSessionStore();
     store.setBindingRepo(new RedisBindingRepo(redis));
-    console.log("[injection] activated Redis storage");
+    console.log("[injection] storage_activated backend=redis");
     return true;
-  } catch (err) {
-    console.warn("[injection] Redis unavailable, falling back to SQLite:", err instanceof Error ? err.message : String(err));
+  } catch {
+    console.warn("[injection] storage_init_failed backend=redis category=initialization_error fallback=true");
     return false;
   }
 }
@@ -235,11 +229,8 @@ export function ensureBindingRepoPersistent(config: ProxyConfig): void {
 function tryLoadHookCacheRepo(): HookCacheRepo | undefined {
   try {
     return getHookCacheRepo();
-  } catch (err) {
-    console.warn(
-      "[injection] hook-cache repo unavailable, hooks will run without caching:",
-      err instanceof Error ? err.message : String(err),
-    );
+  } catch {
+    console.warn("[injection] hook_cache_unavailable category=initialization_error caching=false");
     return undefined;
   }
 }
@@ -267,7 +258,7 @@ function buildPipelineBundle(config: ProxyConfig): PipelineBundle {
     const externalBase = config.injection?.externalGatewayUrl;
     if (externalBase && externalBase.length > 0) {
       proxyBaseUrl = externalBase.replace(/\/$/, "");
-      console.log(`[injection] proxyBaseUrl (from injection.externalGatewayUrl) = ${proxyBaseUrl}`);
+      console.log("[injection] gateway_config source=external present=true");
     } else {
       let hostIp = config.server.host;
       if (hostIp === "0.0.0.0" || hostIp === "127.0.0.1") {
@@ -287,12 +278,7 @@ function buildPipelineBundle(config: ProxyConfig): PipelineBundle {
         hostIp = foundIp || "127.0.0.1";
       }
       proxyBaseUrl = `http://${hostIp}:${config.server.port}`;
-      console.warn(
-        `[injection] injection.externalGatewayUrl not set — falling back to ` +
-        `${proxyBaseUrl}. This causes hook cache thrashing + upstream KV-cache misses ` +
-        `in multi-node deployments; set injection.externalGatewayUrl to the shared ` +
-        `gateway domain (e.g. https://gateway.example.com).`,
-      );
+      console.warn("[injection] gateway_config source=fallback present=true multi_node_safe=false");
     }
   }
 
@@ -478,11 +464,8 @@ export async function prewarmFromConfig(
   }
   try {
     return await prewarmAll(bundle.registry, bundle.hookCacheRepo, input, opts);
-  } catch (err) {
-    console.warn(
-      "[hook-cache] prewarmFromConfig swallowed error:",
-      err instanceof Error ? err.message : String(err),
-    );
+  } catch {
+    console.warn("[hook-cache] prewarm_failed category=unexpected_error");
     return { cachedHookIds: [], skipped: [], durationMs: 0 };
   }
 }

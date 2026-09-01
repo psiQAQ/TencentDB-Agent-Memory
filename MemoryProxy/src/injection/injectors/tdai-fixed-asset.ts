@@ -112,9 +112,9 @@ export async function resolveFixedAssetCtxs(
         ...items.slice(0, 2), // max 2 imported
       ];
     }
-  } catch (err) {
+  } catch {
     // Silently degrade: inject only self
-    console.warn("[fixed-asset] kernel error, injecting only self:", (err as Error).message);
+    console.warn("[fixed-asset] kernel error category=upstream_error fallback=self_only");
   }
 
   custom[CACHE_KEY] = result;

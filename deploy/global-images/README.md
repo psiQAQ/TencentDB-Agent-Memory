@@ -112,19 +112,17 @@ proxy 接到用户请求后转发到这组端点。
 ## 内部凭据（生产环境必看）
 
 三件套之间用 `MEMORY_CORE_GATEWAY_API_KEY` 互相认证，首次启动还会通过
-`init-admin` 建一个 `system_admin` 账户。为了**零配置本地体验**，脚本默认值是：
+`init-admin` 建一个 `system_admin` 账户。服务凭据没有默认值：
 
 | 变量 | 默认值 | 用途 |
 |---|---|---|
-| `MEMORY_CORE_GATEWAY_API_KEY` | `local` | memory-hub / proxy → memory-core 的 Bearer |
+| `MEMORY_CORE_GATEWAY_API_KEY` | 必填 | memory-hub / proxy → memory-core 的 Bearer |
 | `MEMORY_CORE_ADMIN_USERNAME` | `admin` | 初始化的 system_admin 用户名 |
-| `MEMORY_CORE_ADMIN_USER_KEY` | `admin` | 该 admin 用户的登录 key |
+| admin user key | 首启随机生成 | 客户端登录 key，保存到 `.admin-key` |
 
-> 这三个默认值只适合个人本地跑通流程。**生产/联调/公网暴露前必须替换成随机长串**，
-> 否则任何拿到端口的人都能拿到 system_admin 权限。
->
-> 在 `.env` 里取消对应三行的注释并覆盖即可（`_lib.sh` 会 `require_vars`
-> 校验其他必填项，但这三个变量因为有默认兜底，脚本会在启动时打 `[warn]` 提醒你换）。
+> 请为 `MEMORY_CORE_GATEWAY_API_KEY` 使用 32-byte 随机值。Proxy 的
+> `auth.serviceToken`、TDAI、Skill 和 Knowledge 内部客户端均使用该服务凭据；
+> 客户端 user key 只放在 auth/verify 请求体中。
 
 ## 独立使用每个组件
 

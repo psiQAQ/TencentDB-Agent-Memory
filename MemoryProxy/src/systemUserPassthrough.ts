@@ -13,9 +13,9 @@
  *
  * Observability, however, IS preserved — internal service traffic must still
  * be visible in dashboards:
- *  - Opik trace + LLM span (raw request / response, no flattening)
- *  - Langfuse generation under a deterministic turn trace
- *  - ClickHouse / JSONL usage row (attributed to systemUser.userId)
+ *  - Opik trace + LLM span with type/count summaries only
+ *  - Langfuse generation under the request-scoped random trace
+ *  - ClickHouse / JSONL aggregate usage row with fixed identity redaction
  *  - MemoryPlus credit report (spaceId = memory instance from path)
  *
  * ── Body forwarding ───────────────────────────────────────────────────────
@@ -33,12 +33,13 @@
  *     raw ArrayBuffer and forward it untouched. Aux endpoints do not go
  *     through the alias-gate today.
  *
- * The one header we rewrite in both paths is `Authorization`: the caller's
- * proxy-auth key is swapped for `config.upstream.apiKey` so TokenHub accepts
- * the request (see `buildPassthroughHeaders`). Trace payloads use whatever
- * we can JSON-parse from the raw body/response as-is; we do NOT flatten or
- * normalise message structure because that would be its own form of
- * "meddling".
+ * Caller `Authorization` / `x-api-key` values terminate at MemoryProxy and are
+ * never forwarded. `buildPassthroughHeaders` drops them with internal identity
+ * headers, then injects the global server-configured upstream key in the
+ * selected protocol's auth format; a missing server key fails closed. Trace
+ * payloads use whatever we can JSON-parse from the raw body/response as-is,
+ * then each exporter reduces it to fixed type/count summaries before data
+ * leaves the process.
  */
 
 import type { Context } from "hono";
@@ -65,14 +66,10 @@ import {
   isRateLimitExceededError,
   recordInputTokenUsage,
 } from "./rate-limit/guard.js";
-
-/** Hop-by-hop headers we must strip before forwarding to upstream. */
-const SKIP_REQUEST_HEADERS = new Set([
-  "host",
-  "content-length",
-  "transfer-encoding",
-  "connection",
-]);
+import {
+  buildSafeUpstreamHeaders,
+  MissingUpstreamCredentialError,
+} from "./upstream-headers.js";
 
 /** Response headers that would confuse the client if forwarded verbatim. */
 const SKIP_RESPONSE_HEADERS = new Set([
@@ -83,30 +80,22 @@ const SKIP_RESPONSE_HEADERS = new Set([
 ]);
 
 /**
- * Build upstream headers by cloning inbound headers minus hop-by-hop entries.
+ * Build upstream headers from the same protocol allowlist as normal requests.
  *
  * The caller's inbound key (`Authorization` / `x-api-key`) is a proxy-layer
  * auth credential — the sk-mem-xxx that `verifyUserKey` resolves against the
  * auth service. It is NOT a credential TokenHub (`config.upstream.url`) would
- * accept. So, exactly like the standard handler paths do, we replace it with
- * `config.upstream.apiKey` before forwarding. `x-api-key` is dropped to avoid
- * shipping two conflicting auth headers upstream.
+ * accept. It is dropped with every internal identity/session header, then the
+ * configured upstream key is added in the selected protocol's auth format.
  */
 function buildPassthroughHeaders(c: Context, config: ProxyConfig): Record<string, string> {
-  const headers: Record<string, string> = {};
-  for (const [k, v] of c.req.raw.headers.entries()) {
-    if (!SKIP_REQUEST_HEADERS.has(k.toLowerCase())) {
-      headers[k] = v;
-    }
-  }
-  if (config.upstream.apiKey) {
-    for (const k of Object.keys(headers)) {
-      const lower = k.toLowerCase();
-      if (lower === "authorization" || lower === "x-api-key") delete headers[k];
-    }
-    headers["authorization"] = `Bearer ${config.upstream.apiKey}`;
-  }
-  return headers;
+  const protocol = /\/v1\/messages(?:\/count_tokens)?$/.test(c.req.path)
+    ? "anthropic"
+    : "openai";
+  return buildSafeUpstreamHeaders(c.req.raw.headers, {
+    protocol,
+    apiKey: config.upstream.apiKey,
+  });
 }
 
 /** Copy upstream response headers minus length/encoding fields. */
@@ -169,14 +158,12 @@ function extractNonStreamUsage(
 /**
  * Common trace/usage recorder for both stream and non-stream paths.
  *
- * Attribution is deliberately identical across branches:
- *   - keyId       = systemUser.userId  (dashboards see WHICH internal service)
- *   - spaceId     = memory instance id from the request path
- *   - sessionKey  = spaceId (internal users multiplex one instance;
- *                   no per-conversation isolation is needed)
+ * In-process attribution is identical across branches so classification and
+ * credit math remain correct. Final exporters redact keyId/spaceId/sessionKey,
+ * so dashboards expose totals/categories only.
  *
- * `traceInput` / `traceOutput` are handed to opik/langfuse raw — parsed JSON
- * when possible, otherwise the string body. No message flattening.
+ * `traceInput` / `traceOutput` retain their parsed shape in-process; Opik and
+ * Langfuse store only type/count summaries.
  */
 async function recordTracesAndUsage(params: {
   config: ProxyConfig;
@@ -235,10 +222,9 @@ async function recordTracesAndUsage(params: {
         spaceId: spaceId || undefined,
         upstreamRequestId,
       });
-    } catch (err: unknown) {
+    } catch {
       log.warn("systemUser.usage_log_failed", {
-        systemUser: match.name,
-        error: err instanceof Error ? err.message : String(err),
+        systemUser: true,
       });
     }
   }
@@ -256,23 +242,22 @@ async function recordTracesAndUsage(params: {
     );
     if (outcome.attempted && !outcome.ok) {
       log.warn("systemUser.credit_report_failed", {
-        systemUser: match.name,
-        error: outcome.errorMessage ?? "unknown",
+        systemUser: true,
+        attempted: true,
       });
     }
-  } catch (err: unknown) {
+  } catch {
     log.warn("systemUser.credit_report_error", {
-      systemUser: match.name,
-      error: err instanceof Error ? err.message : String(err),
+      systemUser: true,
     });
   }
 
-  // ── Opik: create trace + LLM span (raw payloads, no flattening) ─────────
+  // ── Opik: create trace + LLM span (privacy-safe summaries only) ─────────
   //
   // We wrap `requestPayload` in `{ messages: ... }` when it happens to be a
   // parsed object with a `messages` array (matches the shape the main
-  // handler produces for OpenAI/Anthropic requests), otherwise we just
-  // stringify — opik accepts `input` as an arbitrary object.
+  // handler produces for OpenAI/Anthropic requests); the exporter records
+  // only fixed type/count summaries from either shape.
   const opikInput = normaliseForOpikInput(requestPayload);
   const forkTraceId = opikCreateTrace(config, {
     traceId,
@@ -330,20 +315,17 @@ async function recordTracesAndUsage(params: {
         systemUser: match.name,
       },
     });
-  } catch (err: unknown) {
+  } catch {
     log.warn("systemUser.opik_report_failed", {
-      systemUser: match.name,
-      error: err instanceof Error ? err.message : String(err),
+      systemUser: true,
     });
   }
 
-  // ── Langfuse: generation under a deterministic turn trace ────────────────
-  //
-  // We use turnSeq=0 because internal users don't have a session-init or
-  // per-turn counter — one request = one trace = one generation. `sessionId`
-  // is the memory instance id, so Langfuse groups all requests for the same
-  // memory under one session view.
-  const lfTraceId = langfuseTurnTraceId(sessionKey, 0);
+  // ── Langfuse: one random request trace per proxy call ────────────────────
+  // Raw user/session/model fields remain available only for in-process
+  // attribution; the exporter emits redacted identities and total/category
+  // metrics, with no deterministic cross-request grouping.
+  const lfTraceId = langfuseTurnTraceId(traceId);
   try {
     if (status >= 200 && status < 400) {
       langfuseReportGeneration({
@@ -394,10 +376,9 @@ async function recordTracesAndUsage(params: {
         observationMetadata: { stream, upstreamRequestId, systemUser: match.name },
       });
     }
-  } catch (err: unknown) {
+  } catch {
     log.warn("systemUser.langfuse_report_failed", {
-      systemUser: match.name,
-      error: err instanceof Error ? err.message : String(err),
+      systemUser: true,
     });
   }
 }
@@ -499,15 +480,20 @@ export async function handleSystemUserPassthrough(
   const requestPayload: unknown = bodyObj ?? bodyTextForTrace;
 
   log.info("systemUser.passthrough", {
-    systemUser: match.name,
-    userId: match.userId,
-    memoryId: spaceId || "(none)",
-    path,
-    upstreamUrl,
-    modelId,
+    systemUser: true,
+    memoryIdPresent: spaceId.length > 0,
+    modelConfigured: modelId.length > 0,
   });
 
-  const headers = buildPassthroughHeaders(c, config);
+  let headers: Record<string, string>;
+  try {
+    headers = buildPassthroughHeaders(c, config);
+  } catch (err: unknown) {
+    if (err instanceof MissingUpstreamCredentialError) {
+      return c.json({ error: err.message }, 503);
+    }
+    throw err;
+  }
   const forwardTimeoutMs = config.server.forwardTimeoutMs ?? 600_000;
 
   let upstreamResp: Response;
@@ -526,6 +512,7 @@ export async function handleSystemUserPassthrough(
       method: "POST",
       headers,
       body: rawBody,
+      redirect: "manual",
     };
     if (forwardTimeoutMs > 0) {
       fetchOpts.signal = AbortSignal.timeout(forwardTimeoutMs);
@@ -537,28 +524,29 @@ export async function handleSystemUserPassthrough(
     }
     const endTime = new Date().toISOString();
     const isTimeout = err instanceof DOMException && err.name === "TimeoutError";
-    const message = isTimeout
-      ? `timeout after ${forwardTimeoutMs}ms`
-      : err instanceof Error
-        ? err.message
-        : String(err);
+    const failureCategory = isTimeout ? "timeout" : "transport_error";
+    const failureDetail = isTimeout ? "upstream_timeout" : "upstream_transport_error";
     log.error(
       "systemUser.forward_failed",
-      { systemUser: match.name, upstreamUrl, path },
-      err instanceof Error ? err : new Error(String(err)),
+      { systemUser: true, timeout: isTimeout, category: failureCategory },
     );
 
-    // Best-effort failure trace so dashboards see the outage.
+    // Best-effort failure trace so aggregate dashboards see the outage.
     recordTracesAndUsage({
       config, match, path, upstreamUrl, modelId, startTime, endTime,
       stream: false, traceId,
       requestPayload,
-      responsePayload: { error: message },
+      responsePayload: { error: failureDetail },
       usage: null,
       status: 502,
     }).catch(() => { /* best-effort */ });
 
-    return c.json({ error: "Upstream request failed", detail: message }, 502);
+    return c.json({ error: "Upstream request failed", detail: failureDetail }, 502);
+  }
+
+  if (upstreamResp.status >= 300 && upstreamResp.status < 400) {
+    log.warn("systemUser.redirect_rejected", { status: upstreamResp.status });
+    return c.json({ error: "Upstream redirect rejected" }, 502);
   }
 
   const upstreamRequestId = upstreamResp.headers.get("x-request-id") ?? undefined;
@@ -576,10 +564,9 @@ export async function handleSystemUserPassthrough(
       const [a, b] = upstreamResp.body.tee();
       clientStream = a;
       tapStream = b;
-    } catch (err: unknown) {
+    } catch {
       log.warn("systemUser.stream_tee_failed", {
-        systemUser: match.name,
-        error: err instanceof Error ? err.message : String(err),
+        systemUser: true,
       });
       clientStream = upstreamResp.body;
     }
@@ -592,18 +579,16 @@ export async function handleSystemUserPassthrough(
             config, match, path, upstreamUrl, modelId,
             startTime, endTime, stream: true, traceId,
             requestPayload,
-            // For streams we hand the raw SSE text through — opik/langfuse
-            // will store it as a string blob under `{raw: ...}`.
+            // Exporters reduce the raw SSE text to a type/length summary.
             responsePayload: rawText,
             usage,
             upstreamRequestId,
             status,
           });
         })
-        .catch((err: unknown) => {
+        .catch(() => {
           log.warn("systemUser.stream_consume_failed", {
-            systemUser: match.name,
-            error: err instanceof Error ? err.message : String(err),
+            systemUser: true,
           });
         });
     }
@@ -639,9 +624,9 @@ export async function handleSystemUserPassthrough(
  * Consume a stream and return both the raw text (for trace payload) and
  * extracted usage (Anthropic message_start/delta OR OpenAI final usage).
  *
- * Text is capped at 512 KiB — enough to see the shape of a response in
- * dashboards without unbounded memory growth. Usage extraction always
- * uses the full stream regardless of the cap.
+ * Text is capped at 512 KiB before in-process summary generation to avoid
+ * unbounded memory growth. Exporters retain only type/count summaries. Usage
+ * extraction always uses the full stream regardless of the cap.
  */
 async function consumeStream(
   stream: ReadableStream<Uint8Array>,

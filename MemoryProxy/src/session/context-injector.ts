@@ -147,7 +147,7 @@ function warnOnce(sessionKey: string, kind: "agent" | "task"): void {
   const section = kind === "agent" ? "[Agent]" : "[Task]";
   // eslint-disable-next-line no-console
   console.log(
-    `[session-init] session=${sessionKey} ${flag}=false — ${section} section suppressed`,
+    `[session-init] session=<redacted> ${flag}=false — ${section} section suppressed`,
   );
 }
 

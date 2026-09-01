@@ -52,8 +52,8 @@ export function initLogger(config: LogConfig, customBackend?: ILogBackend): void
         rotateSizeBytes: config.rotate.maxSizeBytes,
         rotateBackupLimit: config.rotate.backupLimit,
       });
-    } catch (err) {
-      process.stderr.write(`[log] failed to init file logger: ${err}\n`);
+    } catch {
+      process.stderr.write("[log] failed to init file logger category=filesystem_error\n");
     }
   }
 
@@ -129,6 +129,46 @@ export const log = {
 
 // ─── Internal ────────────────────────────────────────────────────────────────
 
+const SAFE_STRING_FIELDS = new Set([
+  "backend",
+  "category",
+  "effective",
+  "event",
+  "level",
+  "protocol",
+  "requested",
+  "source",
+  "stage",
+  "status",
+]);
+
+function sanitizeLogAttrs(data?: Record<string, unknown>, err?: Error): LogAttrs {
+  const attrs: LogAttrs = {};
+  for (const [key, value] of Object.entries(data ?? {})) {
+    if (value === null || value === undefined) continue;
+    if (typeof value === "number" && Number.isFinite(value)) {
+      attrs[key] = value;
+    } else if (typeof value === "boolean") {
+      attrs[key] = value;
+    } else if (
+      typeof value === "string"
+      && SAFE_STRING_FIELDS.has(key)
+      && value.length <= 64
+      && /^[A-Za-z0-9_.:-]+$/.test(value)
+    ) {
+      attrs[key] = value;
+    } else if (typeof value === "string") {
+      attrs[key] = "[redacted]";
+    } else if (Array.isArray(value)) {
+      attrs[`${key}.count`] = value.length;
+    } else if (typeof value === "object") {
+      attrs[`${key}.fieldCount`] = Object.keys(value as Record<string, unknown>).length;
+    }
+  }
+  if (err) attrs.errorCategory = "error";
+  return attrs;
+}
+
 function emit(
   level: LogLevel,
   event: string,
@@ -139,32 +179,10 @@ function emit(
   if (LOG_LEVEL_PRIORITY[level] < LOG_LEVEL_PRIORITY[minLevel]) return;
 
   try {
-    // Build safe attributes (filter non-primitive values)
-    const attrs: LogAttrs = {};
-    if (data) {
-      for (const [key, value] of Object.entries(data)) {
-        if (value === null || value === undefined) continue;
-        if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
-          attrs[key] = value;
-        } else {
-          // 复杂类型（对象/数组）→ 优先 JSON 序列化保留结构，失败时（如循环引用、
-          // BigInt、Symbol）再退回 String() 兜底，避免出现 "[object Object]" 丢失字段。
-          // 上限 2000 字符防止单条日志膨胀。
-          try {
-            attrs[key] = JSON.stringify(value).slice(0, 2000);
-          } catch {
-            attrs[key] = String(value).slice(0, 200);
-          }
-        }
-      }
-    }
-    if (err) {
-      attrs["error.message"] = err.message;
-      attrs["error.name"] = err.name;
-    }
+    const attrs = sanitizeLogAttrs(data, err);
 
     // Dual-write: local file + backend
-    fileLogger?.write(level.toUpperCase(), event, data);
+    fileLogger?.write(level.toUpperCase(), event, attrs);
 
     switch (level) {
       case "debug":
@@ -177,7 +195,7 @@ function emit(
         backend.warn(event, attrs);
         break;
       case "error":
-        backend.error(event, attrs, err);
+        backend.error(event, attrs);
         break;
     }
   } catch {

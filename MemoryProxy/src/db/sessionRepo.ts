@@ -24,7 +24,19 @@
 import type Database from "better-sqlite3";
 
 import { getDb } from "./index.js";
-import type { SessionInitState } from "../session/types.js";
+import {
+  isLegacyPersistedSessionOwnershipProof,
+  isPersistedSessionInitState,
+  normalizePersistedSessionInitState,
+  type SessionInitState,
+} from "../session/types.js";
+import {
+  legacyPersistedSessionIdentityKey,
+  parsePersistedSessionIdentityKey,
+  persistedSessionIdentityKey,
+  persistedStateOwnsIdentity,
+  type PersistedSessionIdentity,
+} from "./session-identity-key.js";
 
 export interface PersistedSessionRow {
   session_id: string;
@@ -43,11 +55,8 @@ export interface PersistedSessionRow {
 }
 
 /**
- * Stable id used in the `sessions` table for a given state.
- *
- * 复合键：`${spaceId}:${userId}:${agentSource}:${sessionId}` —— spaceId 段是
- * P4 新增，用于 kernel-sts 模式下按 space 隔离。空 spaceId 用 `_default` 兜底
- * 段（老部署继续能跑）。Sqlite schema 不变，只是主键字符串多一段。
+ * Collision-safe, versioned id used in the `sessions` table for a state.
+ * The raw identity fields are kept inside one canonical encoded tuple.
  */
 export function sessionRowId(
   spaceId: string,
@@ -55,8 +64,7 @@ export function sessionRowId(
   agentSource: string,
   sessionId: string,
 ): string {
-  const sp = spaceId || "_default";
-  return `${sp}:${userId}:${agentSource}:${sessionId}`;
+  return persistedSessionIdentityKey(spaceId, userId, agentSource, sessionId);
 }
 
 function jsonOrNull<T>(v: T | null | undefined): string | null {
@@ -93,32 +101,43 @@ function rowFromState(
   };
 }
 
-function safeParse<T>(s: string | null | undefined): T | null {
-  if (!s) return null;
+function parseState(
+  s: string | null | undefined,
+): SessionInitState {
   try {
-    return JSON.parse(s) as T;
+    const parsed = JSON.parse(s ?? "") as unknown;
+    const normalized = normalizePersistedSessionInitState(parsed);
+    if (!normalized) throw new SessionRepoReadError();
+    return normalized;
   } catch {
-    return null;
+    throw new SessionRepoReadError();
   }
 }
 
-function rowToState(row: PersistedSessionRow): SessionInitState | null {
-  const parsed = safeParse<SessionInitState>(row.state_json);
-  return parsed;
+function rowToState(row: PersistedSessionRow): SessionInitState {
+  const state = parseState(row.state_json);
+  if (row.status !== state.status) throw new SessionRepoReadError();
+  return state;
 }
 
-/**
- * 从复合主键反解出 (spaceId, userId, agentSource, sessionId)。
- * 复合主键格式：`{spaceId}:{userId}:{agentSource}:{sessionId}`。
- * spaceId 段为 `_default` 表示老 caller 缺失 spaceId 上下文。
- */
-function parseSessionRowId(
-  id: string,
-): { spaceId: string; userId: string; agentSource: string; sessionId: string } | null {
-  const parts = id.split(":");
-  if (parts.length < 4) return null;
-  const [spaceId, userId, agentSource, ...rest] = parts;
-  return { spaceId, userId, agentSource, sessionId: rest.join(":") };
+function rowToLegacyOwnershipProof(row: PersistedSessionRow): SessionInitState {
+  try {
+    const parsed = JSON.parse(row.state_json ?? "") as unknown;
+    if (!isLegacyPersistedSessionOwnershipProof(parsed)) throw new SessionRepoReadError();
+    if (row.status !== parsed.status) throw new SessionRepoReadError();
+    return parsed;
+  } catch {
+    throw new SessionRepoReadError();
+  }
+}
+
+function identityOf(
+  spaceId: string,
+  userId: string,
+  agentSource: string,
+  sessionId: string,
+): PersistedSessionIdentity {
+  return { spaceId, userId, agentSource, sessionId };
 }
 
 const UPSERT_SQL = `
@@ -158,6 +177,14 @@ export interface HydratedSessionRow {
   state: SessionInitState;
 }
 
+/** Fixed, non-sensitive signal that a durable session read failed. */
+export class SessionRepoReadError extends Error {
+  constructor() {
+    super("session repository read failed");
+    this.name = "SessionRepoReadError";
+  }
+}
+
 export interface SessionRepo {
   /**
    * Write-through 语义：await 完成时 L2a 已落盘（或失败已被静默降级）。
@@ -167,7 +194,7 @@ export interface SessionRepo {
    * `tryHistoryScan` 兜底 → bypass → 请求透传 LLM，session 状态机被跳过。
    *
    * 实现细节：写失败不 throw（保留"L1 是权威、L2a 是持久化备份"的降级契约），
-   * 但要 await 完成，因为跨节点场景下 L2a 才是真正的共享状态。
+   * 但必须返回明确 durability result；只有 true 可作为跨 identity owner proof。
    */
   upsert(
     spaceId: string,
@@ -175,7 +202,8 @@ export interface SessionRepo {
     agentSource: string,
     sessionId: string,
     state: SessionInitState,
-  ): Promise<void>;
+  ): Promise<boolean>;
+  /** `null` is an authoritative miss; backend failures reject with a fixed read error. */
   getBySessionId(
     spaceId: string,
     userId: string,
@@ -187,7 +215,7 @@ export interface SessionRepo {
     userId: string,
     agentSource: string,
     sessionId: string,
-  ): void;
+  ): Promise<boolean>;
   loadAllInitialized(): Promise<HydratedSessionRow[]>;
 }
 
@@ -200,18 +228,21 @@ class SqliteSessionRepo implements SessionRepo {
     agentSource: string,
     sessionId: string,
     state: SessionInitState,
-  ): Promise<void> {
+  ): Promise<boolean> {
     // better-sqlite3 是同步 API；包 async 只是为了对齐 SessionRepo 契约，
     // 让 store 侧的 await 语义统一（跨节点部署走 KvSessionRepo/RedisSessionRepo
     // 都是真异步）。
+    if (!isPersistedSessionInitState(state)) return false;
     try {
       const row = rowFromState(spaceId, userId, agentSource, sessionId, state);
       this.db.prepare(UPSERT_SQL).run(row);
+      return true;
     } catch (err) {
       console.warn(
         "[session-db] upsert failed:",
         err instanceof Error ? err.message : String(err),
       );
+      return false;
     }
   }
 
@@ -222,62 +253,101 @@ class SqliteSessionRepo implements SessionRepo {
     sessionId: string,
   ): Promise<SessionInitState | null> {
     try {
-      const row = this.db
-        .prepare("SELECT * FROM sessions WHERE session_id = ?")
-        .get(sessionRowId(spaceId, userId, agentSource, sessionId)) as
+      const select = this.db.prepare("SELECT * FROM sessions WHERE session_id = ?");
+      const identity = identityOf(spaceId, userId, agentSource, sessionId);
+      const row = select.get(sessionRowId(spaceId, userId, agentSource, sessionId)) as
         | PersistedSessionRow
         | undefined;
-      return row ? rowToState(row) : null;
+      if (row) {
+        const state = rowToState(row);
+        if (!persistedStateOwnsIdentity(state, identity)) throw new SessionRepoReadError();
+        return state;
+      }
+
+      const legacyId = legacyPersistedSessionIdentityKey(
+        spaceId,
+        userId,
+        agentSource,
+        sessionId,
+      );
+      if (!legacyId) return null;
+      const legacyRow = select.get(legacyId) as PersistedSessionRow | undefined;
+      const legacyState = legacyRow ? rowToState(legacyRow) : null;
+      if (
+        !legacyRow
+        || legacyRow.session_key !== sessionId
+        || !legacyState
+        || !persistedStateOwnsIdentity(legacyState, identity, spaceId === "")
+      ) return null;
+      return legacyState;
     } catch {
-      return null;
+      throw new SessionRepoReadError();
     }
   }
 
-  deleteBySessionId(
+  async deleteBySessionId(
     spaceId: string,
     userId: string,
     agentSource: string,
     sessionId: string,
-  ): void {
+  ): Promise<boolean> {
     try {
-      this.db
-        .prepare("DELETE FROM sessions WHERE session_id = ?")
-        .run(sessionRowId(spaceId, userId, agentSource, sessionId));
-    } catch (err) {
-      console.warn(
-        "[session-db] delete failed:",
-        err instanceof Error ? err.message : String(err),
+      const select = this.db.prepare("SELECT * FROM sessions WHERE session_id = ?");
+      const remove = this.db.prepare("DELETE FROM sessions WHERE session_id = ?");
+      remove.run(sessionRowId(spaceId, userId, agentSource, sessionId));
+
+      const legacyId = legacyPersistedSessionIdentityKey(
+        spaceId,
+        userId,
+        agentSource,
+        sessionId,
       );
+      if (!legacyId) return true;
+      const legacyRow = select.get(legacyId) as PersistedSessionRow | undefined;
+      const legacyState = legacyRow ? rowToLegacyOwnershipProof(legacyRow) : null;
+      if (
+        legacyRow?.session_key === sessionId
+        && legacyState
+        && persistedStateOwnsIdentity(
+          legacyState,
+          identityOf(spaceId, userId, agentSource, sessionId),
+          spaceId === "",
+        )
+      ) remove.run(legacyId);
+      return true;
+    } catch {
+      console.warn("[session-db] delete failed");
+      return false;
     }
   }
 
   async loadAllInitialized(): Promise<HydratedSessionRow[]> {
     try {
-      const rows = this.db
-        .prepare("SELECT * FROM sessions WHERE status = 'initialized'")
-        .all() as PersistedSessionRow[];
+      const rows = this.db.prepare("SELECT * FROM sessions").all() as PersistedSessionRow[];
       const out: HydratedSessionRow[] = [];
       for (const r of rows) {
+        if (!r.session_id.startsWith("v2:")) continue;
+        const parsed = parsePersistedSessionIdentityKey(r.session_id);
+        if (!parsed) throw new SessionRepoReadError();
         const s = rowToState(r);
-        if (!s) continue;
-        const parsed = parseSessionRowId(r.session_id);
-        if (!parsed) continue;
+        if (!persistedStateOwnsIdentity(s, parsed)) throw new SessionRepoReadError();
+        if (s.status !== "initialized") continue;
         out.push({ ...parsed, state: s });
       }
       return out;
     } catch {
-      return [];
+      throw new SessionRepoReadError();
     }
   }
 }
 
 /** Null repo used when SQLite init fails — silently no-ops on writes. */
 class NullSessionRepo implements SessionRepo {
-  async upsert(): Promise<void> {}
+  async upsert(): Promise<boolean> { return false; }
   async getBySessionId(): Promise<SessionInitState | null> {
     return null;
   }
-  deleteBySessionId(): void {}
+  async deleteBySessionId(): Promise<boolean> { return true; }
   async loadAllInitialized(): Promise<HydratedSessionRow[]> {
     return [];
   }

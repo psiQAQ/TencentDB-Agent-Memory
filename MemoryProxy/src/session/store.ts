@@ -9,11 +9,12 @@
  * See docs/design/2026-07-10-cos-ttl-nottl-split-plan.md §4.3.
  *
  * ── Identity binding ──────────────────────────────────────────────────────
- * Public API keeps a single `keyId: string` as the L1 map key
- * (historically `${agentSource}:${sessionKey}` from handler.ts). Repo calls
- * however now require `(userId, agentSource, sessionId)`. To avoid rippling
- * that tuple through every `store.set(...)` call site in the session-init
- * state machine, the store maintains a keyId → identity map (`identities`):
+ * Public API keeps a single `keyId: string` as the L1 map key. The key is a
+ * collision-safe serialization of `(spaceId, userId, agentSource, sessionId)`;
+ * the raw session id remains in `SessionInitState.keyId` and external APIs.
+ * Repo calls require the same identity tuple. To avoid rippling it through
+ * every `store.set(...)` call site in the session-init state machine, the
+ * store maintains a keyId → identity map (`identities`):
  * callers invoke `bind(keyId, identity)` **once** when they have identity in
  * hand, and subsequent `set` / `delete` / `getOrRecover` pull the identity
  * back out. When no identity has been bound (e.g. anonymous / systemUser
@@ -23,12 +24,18 @@
  * entry point on every turn, so binding-through-that-path is guaranteed.
  */
 
-import type { SessionInitState, SessionInitStatus, SessionInfo, AgentDetail, TaskDetail } from "./types.js";
+import {
+  persistedSessionNeedsMigration,
+  type SessionInitState,
+  type SessionInitStatus,
+  type SessionInfo,
+  type AgentDetail,
+  type TaskDetail,
+} from "./types.js";
 import { getSessionRepo, type SessionRepo } from "../db/sessionRepo.js";
 import type { BindingRepo, SessionBinding } from "../db/binding-repo.js";
 import type { MetadataClient } from "../meta/client.js";
-import { isDshRuntimeContextSnapshot } from "../common/user-query-extractor.js";
-import type { PresetIdentity } from "./preset.js";
+import { withoutPersistedCredential } from "./state-sanitize.js";
 
 const DEFAULT_TTL_MS = 30 * 60 * 1000; // 30 minutes
 
@@ -43,6 +50,377 @@ export interface SessionIdentity {
   agentSource: string;
   sessionId: string;
   spaceId?: string;
+  teamId?: string;
+  agentId?: string;
+  taskId?: string;
+}
+
+export class SessionIdentityConflictError extends Error {
+  constructor() {
+    super("session_identity_conflict");
+    this.name = "SessionIdentityConflictError";
+  }
+}
+
+export class SessionContextUnavailableError extends Error {
+  constructor() {
+    super("session_context_unavailable");
+    this.name = "SessionContextUnavailableError";
+  }
+}
+
+export class SessionStoreUnavailableError extends Error {
+  constructor() {
+    super("session_store_unavailable");
+    this.name = "SessionStoreUnavailableError";
+  }
+}
+
+function compatibleOptionalIdentity(left?: string, right?: string): boolean {
+  return !left || !right || left === right;
+}
+
+function mergeOptionalIdentity(bound?: string, incoming?: string): string | undefined {
+  if (bound && incoming && bound !== incoming) {
+    throw new SessionIdentityConflictError();
+  }
+  return bound || incoming;
+}
+
+function mergeIdentityValues(...values: Array<string | undefined>): string | undefined {
+  return values.reduce<string | undefined>(
+    (merged, value) => mergeOptionalIdentity(merged, value),
+    undefined,
+  );
+}
+
+function mergeIdentityClaim(
+  bound: SessionIdentity | undefined,
+  incoming: SessionIdentity,
+): SessionIdentity {
+  if (!bound) return { ...incoming };
+  if (
+    bound.userId !== incoming.userId
+    || bound.agentSource !== incoming.agentSource
+    || bound.sessionId !== incoming.sessionId
+    || spaceOf(bound) !== spaceOf(incoming)
+  ) {
+    throw new SessionIdentityConflictError();
+  }
+  return {
+    ...bound,
+    teamId: mergeOptionalIdentity(bound.teamId, incoming.teamId),
+    agentId: mergeOptionalIdentity(bound.agentId, incoming.agentId),
+    taskId: mergeOptionalIdentity(bound.taskId, incoming.taskId),
+  };
+}
+
+function boundIdentityMatchesIdentity(
+  bound: SessionIdentity,
+  incoming: SessionIdentity,
+): boolean {
+  return bound.userId === incoming.userId
+    && bound.agentSource === incoming.agentSource
+    && bound.sessionId === incoming.sessionId
+    && spaceOf(bound) === spaceOf(incoming)
+    && compatibleOptionalIdentity(bound.teamId, incoming.teamId)
+    && compatibleOptionalIdentity(bound.agentId, incoming.agentId)
+    && compatibleOptionalIdentity(bound.taskId, incoming.taskId);
+}
+
+function claimedIdentityMatchesStored(claimed?: string, stored?: string): boolean {
+  return !claimed || claimed === stored;
+}
+
+/** Collision-safe L1 key; never expose this internal serialization to clients. */
+export function sessionStoreKey(identity: SessionIdentity): string {
+  return JSON.stringify([
+    spaceOf(identity),
+    identity.userId,
+    identity.agentSource,
+    identity.sessionId,
+  ]);
+}
+
+function assertIdentityScopedKey(keyId: string, identity: SessionIdentity): void {
+  if (keyId !== sessionStoreKey(identity)) {
+    throw new SessionIdentityConflictError();
+  }
+}
+
+/** Validate every identity field available on a recovered state. */
+export function persistedStateMatchesIdentity(
+  state: SessionInitState,
+  identity: SessionIdentity,
+): boolean {
+  const session = state.sessionInfo;
+  if (state.userId && state.userId !== identity.userId) return false;
+  // Older recovery-only states used `${source}:${session}` here. Accept that
+  // exact identity-bound representation during read, then normalize it before
+  // promoting to L1; arbitrary or cross-source keys still fail closed.
+  if (
+    state.keyId
+    && state.keyId !== identity.sessionId
+    && state.keyId !== `${identity.agentSource}:${identity.sessionId}`
+  ) return false;
+  if (session?.user_id && session.user_id !== identity.userId) return false;
+  if (session?.session_id && session.session_id !== identity.sessionId) return false;
+  if (session?.space_id && identity.spaceId && session.space_id !== identity.spaceId) return false;
+
+  let storedTeamId: string | undefined;
+  let storedAgentId: string | undefined;
+  let storedTaskId: string | undefined;
+  try {
+    storedTeamId = mergeIdentityValues(
+      state.identityClaim?.teamId,
+      session?.team_id,
+      state.selectedTeamId,
+    );
+    storedAgentId = mergeIdentityValues(
+      state.identityClaim?.agentId,
+      session?.agent_id,
+      state.selectedAgentId,
+      state.agentDetail?.id,
+    );
+    storedTaskId = mergeIdentityValues(
+      state.identityClaim?.taskId,
+      session?.task_id,
+      state.taskDetail?.id,
+    );
+  } catch {
+    return false;
+  }
+  // A legacy bypass state has no injectable team/agent/task context. Its
+  // authenticated user/space/source/session tuple remains strict, while a
+  // missing optional value is compatible with the same caller claims used to
+  // accept its binding. Initialized states must still prove every claim.
+  const optionalClaimMatches = state.bypassed
+    ? compatibleOptionalIdentity
+    : claimedIdentityMatchesStored;
+  return optionalClaimMatches(identity.teamId, storedTeamId)
+    && optionalClaimMatches(identity.agentId, storedAgentId)
+    && optionalClaimMatches(identity.taskId, storedTaskId);
+}
+
+function bindingMatchesIdentity(binding: SessionBinding, identity: SessionIdentity): boolean {
+  // Legacy bindings may omit fields. Their repository key is already scoped by
+  // authenticated user/space/source/session. A bypass binding carries no
+  // injectable team/agent/task context, so missing legacy fields remain safe;
+  // initialized bindings must prove every explicit optional claim before Core.
+  const optionalClaimMatches = binding.outcome === "bypassed"
+    ? compatibleOptionalIdentity
+    : claimedIdentityMatchesStored;
+  return compatibleOptionalIdentity(identity.userId, binding.userId)
+    && optionalClaimMatches(identity.teamId, binding.teamId)
+    && optionalClaimMatches(identity.agentId, binding.agentId)
+    && optionalClaimMatches(identity.taskId, binding.taskId);
+}
+
+function identityClaimFromBinding(
+  identity: SessionIdentity,
+  binding: SessionBinding,
+): SessionIdentity {
+  if (binding.userId && binding.userId !== identity.userId) {
+    throw new SessionIdentityConflictError();
+  }
+  return {
+    ...identity,
+    teamId: mergeIdentityValues(identity.teamId, binding.teamId),
+    agentId: mergeIdentityValues(identity.agentId, binding.agentId),
+    taskId: mergeIdentityValues(identity.taskId, binding.taskId),
+  };
+}
+
+/** Merge every identity field proved by a state before it can enter L1. */
+function identityClaimFromState(
+  identity: SessionIdentity,
+  state: SessionInitState,
+): SessionIdentity {
+  const session = state.sessionInfo;
+  if (
+    (state.userId && state.userId !== identity.userId)
+    || (
+      state.keyId
+      && state.keyId !== identity.sessionId
+      && state.keyId !== `${identity.agentSource}:${identity.sessionId}`
+    )
+    || (session?.user_id && session.user_id !== identity.userId)
+    || (session?.session_id && session.session_id !== identity.sessionId)
+    || (session?.space_id && session.space_id !== spaceOf(identity))
+  ) {
+    throw new SessionIdentityConflictError();
+  }
+  return {
+    ...identity,
+    teamId: mergeIdentityValues(
+      identity.teamId,
+      state.identityClaim?.teamId,
+      session?.team_id,
+      state.selectedTeamId,
+    ),
+    agentId: mergeIdentityValues(
+      identity.agentId,
+      state.identityClaim?.agentId,
+      session?.agent_id,
+      state.selectedAgentId,
+      state.agentDetail?.id,
+    ),
+    taskId: mergeIdentityValues(
+      identity.taskId,
+      state.identityClaim?.taskId,
+      session?.task_id,
+      state.taskDetail?.id,
+    ),
+  };
+}
+
+function sameIdentityClaim(left: SessionIdentity, right: SessionIdentity): boolean {
+  return left.userId === right.userId
+    && left.agentSource === right.agentSource
+    && left.sessionId === right.sessionId
+    && spaceOf(left) === spaceOf(right)
+    && left.teamId === right.teamId
+    && left.agentId === right.agentId
+    && left.taskId === right.taskId;
+}
+
+type DurableClaimLayers = NonNullable<SessionInitState["identityClaimPending"]>;
+
+function mergeDurableClaimLayers(
+  left?: DurableClaimLayers,
+  right?: DurableClaimLayers,
+): DurableClaimLayers | undefined {
+  const merged: DurableClaimLayers = {
+    l2a: left?.l2a || right?.l2a || undefined,
+    l2b: left?.l2b || right?.l2b || undefined,
+  };
+  return merged.l2a || merged.l2b ? merged : undefined;
+}
+
+function bypassClaimNeedsPersistence(
+  state: SessionInitState,
+  identity: SessionIdentity,
+): boolean {
+  return Boolean(
+    state.bypassed
+    && (
+      !state.identityClaim
+      || state.identityClaimPending
+      || (identity.teamId && state.identityClaim?.teamId !== identity.teamId)
+      || (identity.agentId && state.identityClaim?.agentId !== identity.agentId)
+      || (identity.taskId && state.identityClaim?.taskId !== identity.taskId)
+    )
+  );
+}
+
+function hasWeakBypassClaim(state: SessionInitState): boolean {
+  if (!state.bypassed) return false;
+  const claim = state.identityClaim;
+  return !claim?.teamId || !claim.agentId || !claim.taskId;
+}
+
+function hasPromotedPendingBypassClaim(current: SessionInitState): boolean {
+  if (
+    !current.bypassed
+    || !current.identityClaimPending
+    || !current.identityClaim
+  ) return false;
+  return current.identityClaim.teamId !== undefined
+    || current.identityClaim.agentId !== undefined
+    || current.identityClaim.taskId !== undefined;
+}
+
+function bypassBindingNeedsPersistence(
+  binding: SessionBinding,
+  identity: SessionIdentity,
+): boolean {
+  return binding.outcome === "bypassed"
+    && Boolean(
+      (identity.teamId && binding.teamId !== identity.teamId)
+      || (identity.agentId && binding.agentId !== identity.agentId)
+      || (identity.taskId && binding.taskId !== identity.taskId)
+    );
+}
+
+function withDurableBypassIdentity(
+  state: SessionInitState,
+  identity: SessionIdentity,
+  pending?: DurableClaimLayers,
+): SessionInitState {
+  if (!state.bypassed) return state;
+  const claim = {
+    teamId: identity.teamId,
+    agentId: identity.agentId,
+    taskId: identity.taskId,
+  };
+  const nextPending = mergeDurableClaimLayers(state.identityClaimPending, pending);
+  if (
+    state.identityClaim
+    && state.identityClaim.teamId === claim.teamId
+    && state.identityClaim?.agentId === claim.agentId
+    && state.identityClaim?.taskId === claim.taskId
+    && state.identityClaimPending?.l2a === nextPending?.l2a
+    && state.identityClaimPending?.l2b === nextPending?.l2b
+  ) return state;
+  return { ...state, identityClaim: claim, identityClaimPending: nextPending };
+}
+
+function canonicalStateForIdentity(
+  state: SessionInitState,
+  identity: SessionIdentity,
+): SessionInitState {
+  const normalized: SessionInitState = {
+    ...state,
+    keyId: identity.sessionId,
+    userId: identity.userId,
+    startedAt: Number.isFinite(state.startedAt) ? state.startedAt : Date.now(),
+    attemptCount: Number.isSafeInteger(state.attemptCount) && state.attemptCount >= 0
+      ? state.attemptCount
+      : 0,
+  };
+  if (!normalized.bypassed) return normalized;
+  return {
+    ...normalized,
+    sessionInfo: null,
+    agentDetail: null,
+    taskDetail: null,
+  };
+}
+
+function terminalBinding(
+  state: SessionInitState,
+  identity: SessionIdentity,
+): SessionBinding | undefined {
+  if (state.status !== "initialized") return undefined;
+  return {
+    outcome: state.bypassed ? "bypassed" : "initialized",
+    userId: identity.userId,
+    teamId: identity.teamId,
+    agentId: identity.agentId,
+    taskId: identity.taskId,
+  };
+}
+
+function recoveryIdentityKey(
+  keyId: string,
+  identity: SessionIdentity,
+  bindingClaim: RawSessionClaim,
+): string {
+  return JSON.stringify([
+    keyId,
+    identity.userId,
+    identity.agentSource,
+    identity.sessionId,
+    identity.spaceId ?? "",
+    identity.teamId ?? "",
+    identity.agentId ?? "",
+    identity.taskId ?? "",
+    bindingClaim,
+  ]);
+}
+
+function rawSessionKey(identity: SessionIdentity): string {
+  return JSON.stringify([identity.agentSource, identity.sessionId]);
 }
 
 /** Extract spaceId from identity, defaulting to `""` for repo helpers. */
@@ -56,23 +434,62 @@ export interface RecoveryContext {
   metadataClient?: MetadataClient;
   /** Full message history for fallback recovery via form-envelope scan. */
   messages?: Record<string, unknown>[];
-  /**
-   * Identity pre-parsed from request headers (x-team-id/x-agent-id/x-task-id).
-   * When present, history-scan is skipped: header-identity agents (e.g. Pi)
-   * carry no interactive form markers, so scanning would unconditionally bypass
-   * them. Instead we defer to handleSessionInit (the headerAutoSelect path).
-   */
-  presetIdentity?: PresetIdentity;
+  /** Optional preset identity is already incorporated into SessionIdentity by callers. */
+  presetIdentity?: import("./preset.js").PresetIdentity;
+}
+
+interface L2aProbeResult {
+  state?: SessionInitState;
+  needsMigration?: boolean;
+  readFailed?: boolean;
+}
+
+interface StateSnapshot {
+  generation: number;
+  deleteEpoch: number;
+  state?: SessionInitState;
+}
+
+interface AwaitedStateResult {
+  changed: boolean;
+  state?: SessionInitState;
+}
+
+type RawSessionClaim = "exclusive" | "persisted";
+
+interface ClaimMutationSnapshot {
+  state?: SessionInitState;
+  identity?: SessionIdentity;
+  rawKey: string;
+  rawClaim?: RawSessionClaim;
+  durableLayers?: DurableClaimLayers;
+  deleteEpoch: number;
+  deleteIntent?: number;
+  blockedDeleteIntent?: number;
+  pendingDeleteReplacement?: number;
 }
 
 export class SessionStore {
   private states = new Map<string, SessionInitState>();
+  private stateGenerations = new Map<string, number>();
+  private operationEpochs = new Map<string, number>();
+  private deleteEpochs = new Map<string, number>();
+  private deleteIntents = new Map<string, number>();
+  /** Durable delete failed; this identity stays fail-closed until a full replacement persists. */
+  private blockedDeleteIntents = new Map<string, number>();
+  /** A newer L1 state is waiting behind this delete and is not authoritative yet. */
+  private pendingDeleteReplacements = new Map<string, number>();
+  private mutatedKeys = new Set<string>();
+  private durableLayersByKey = new Map<string, DurableClaimLayers>();
   /** keyId → identity map — populated via {@link bind} to keep repo/binding writes user-namespaced. */
   private identities = new Map<string, SessionIdentity>();
+  /** Raw source/session ownership: new sessions are exclusive; persisted owners may coexist. */
+  private rawSessionClaims = new Map<string, Map<string, RawSessionClaim>>();
   private ttlMs: number;
   private repo?: SessionRepo;
   private bindingRepo?: BindingRepo;
   private recoveryInFlight = new Map<string, Promise<SessionInitState | undefined>>();
+  private persistenceTails = new Map<string, Promise<void>>();
 
   constructor(
     ttlMs: number = DEFAULT_TTL_MS,
@@ -89,12 +506,7 @@ export class SessionStore {
     this.bindingRepo = repo;
   }
 
-  /**
-   * 让 skill/memory bridge 拿到同一份 BindingRepo 实例。
-   *
-   * bridge L2 fallthrough 从这里拿 —— 保证 injection pipeline 装配时的 Kv/Redis
-   * 实例、单元测试注入的 mock 都能被 bridge 直接读到,不用重新构造。
-   */
+  /** Expose the active binding repository to authenticated bridge adapters. */
   getBindingRepo(): BindingRepo | undefined {
     return this.bindingRepo;
   }
@@ -110,7 +522,11 @@ export class SessionStore {
    * silently degrades to memory-only for such keys.
    */
   bind(keyId: string, identity: SessionIdentity): void {
-    this.identities.set(keyId, identity);
+    const current = this.states.get(keyId);
+    const claim = current && !this.isExpired(current)
+      ? identityClaimFromState(identity, current)
+      : identity;
+    this.claimIdentity(keyId, claim, "exclusive");
   }
 
   /** Test-only helper: expose the identity map for assertions. */
@@ -118,14 +534,244 @@ export class SessionStore {
     return this.identities.get(keyId);
   }
 
+  private snapshotState(keyId: string): StateSnapshot {
+    return {
+      generation: this.stateGenerations.get(keyId) ?? 0,
+      deleteEpoch: this.deleteEpochs.get(keyId) ?? 0,
+      state: this.states.get(keyId),
+    };
+  }
+
+  private snapshotClaimMutation(
+    keyId: string,
+    identity: SessionIdentity,
+  ): ClaimMutationSnapshot {
+    const rawKey = rawSessionKey(identity);
+    const rawClaims = this.rawSessionClaims.get(rawKey);
+    return {
+      state: this.states.get(keyId),
+      identity: this.identities.get(keyId),
+      rawKey,
+      rawClaim: rawClaims?.get(keyId),
+      durableLayers: this.durableLayersByKey.get(keyId),
+      deleteEpoch: this.deleteEpochs.get(keyId) ?? 0,
+      deleteIntent: this.deleteIntents.get(keyId),
+      blockedDeleteIntent: this.blockedDeleteIntents.get(keyId),
+      pendingDeleteReplacement: this.pendingDeleteReplacements.get(keyId),
+    };
+  }
+
+  private restoreClaimMutation(
+    keyId: string,
+    snapshot: ClaimMutationSnapshot,
+    expectedState: SessionInitState,
+    expectedGeneration: number,
+    expectedOperationEpoch: number,
+  ): void {
+    if (
+      !this.isCurrentState(keyId, expectedGeneration, expectedState)
+      || (this.operationEpochs.get(keyId) ?? 0) !== expectedOperationEpoch
+      || (this.deleteEpochs.get(keyId) ?? 0) !== snapshot.deleteEpoch
+    ) return;
+    if (snapshot.state) this.commitState(keyId, snapshot.state);
+    else this.removeState(keyId);
+    if (snapshot.identity) this.identities.set(keyId, snapshot.identity);
+    else this.identities.delete(keyId);
+    // Restore only this key's claim. Other full identities may have acquired or
+    // released ownership while the durable write was awaiting I/O.
+    const rawClaims = new Map(this.rawSessionClaims.get(snapshot.rawKey));
+    if (snapshot.rawClaim) rawClaims.set(keyId, snapshot.rawClaim);
+    else rawClaims.delete(keyId);
+    if (rawClaims.size > 0) this.rawSessionClaims.set(snapshot.rawKey, rawClaims);
+    else this.rawSessionClaims.delete(snapshot.rawKey);
+    if (snapshot.durableLayers) {
+      this.durableLayersByKey.set(keyId, snapshot.durableLayers);
+    } else {
+      this.durableLayersByKey.delete(keyId);
+    }
+    const failedDuringMutation = snapshot.deleteIntent !== undefined
+      && this.blockedDeleteIntents.get(keyId) === snapshot.deleteIntent;
+    const blockedDeleteIntent = snapshot.blockedDeleteIntent
+      ?? (failedDuringMutation ? snapshot.deleteIntent : undefined);
+    if (blockedDeleteIntent !== undefined) {
+      this.deleteIntents.set(keyId, blockedDeleteIntent);
+      this.blockedDeleteIntents.set(keyId, blockedDeleteIntent);
+    } else {
+      this.deleteIntents.delete(keyId);
+      this.blockedDeleteIntents.delete(keyId);
+    }
+    if (snapshot.pendingDeleteReplacement !== undefined) {
+      this.pendingDeleteReplacements.set(keyId, snapshot.pendingDeleteReplacement);
+    } else {
+      this.pendingDeleteReplacements.delete(keyId);
+    }
+  }
+
+  private markMutation(keyId: string): void {
+    this.mutatedKeys.add(keyId);
+  }
+
+  private bumpOperation(keyId: string): number {
+    const next = (this.operationEpochs.get(keyId) ?? 0) + 1;
+    this.operationEpochs.set(keyId, next);
+    return next;
+  }
+
+  private bumpDeleteEpoch(keyId: string): number {
+    const next = (this.deleteEpochs.get(keyId) ?? 0) + 1;
+    this.deleteEpochs.set(keyId, next);
+    this.bumpOperation(keyId);
+    return next;
+  }
+
+  private markDurableLayer(keyId: string, layer: keyof DurableClaimLayers): void {
+    const added: DurableClaimLayers = layer === "l2a" ? { l2a: true } : { l2b: true };
+    this.durableLayersByKey.set(
+      keyId,
+      mergeDurableClaimLayers(this.durableLayersByKey.get(keyId), added)!,
+    );
+    this.bumpOperation(keyId);
+  }
+
+  private commitState(keyId: string, state: SessionInitState): number {
+    const generation = (this.stateGenerations.get(keyId) ?? 0) + 1;
+    this.states.set(keyId, state);
+    this.stateGenerations.set(keyId, generation);
+    this.markMutation(keyId);
+    this.bumpOperation(keyId);
+    return generation;
+  }
+
+  private isCurrentState(
+    keyId: string,
+    generation: number,
+    state: SessionInitState,
+  ): boolean {
+    return this.stateGenerations.get(keyId) === generation && this.states.get(keyId) === state;
+  }
+
+  private removeState(keyId: string, expected?: SessionInitState): boolean {
+    const current = this.states.get(keyId);
+    if (expected && current !== expected) return false;
+    if (current) this.states.delete(keyId);
+    this.stateGenerations.set(keyId, (this.stateGenerations.get(keyId) ?? 0) + 1);
+    this.markMutation(keyId);
+    this.bumpOperation(keyId);
+    return true;
+  }
+
+  private stateAfterAwait(
+    keyId: string,
+    before: StateSnapshot,
+    identity: SessionIdentity,
+  ): AwaitedStateResult {
+    if (this.pendingDeleteReplacements.has(keyId)) {
+      throw new SessionIdentityConflictError();
+    }
+    if (this.deleteIntents.has(keyId)) return { changed: true };
+    if (
+      (this.stateGenerations.get(keyId) ?? 0) === before.generation
+      && (this.deleteEpochs.get(keyId) ?? 0) === before.deleteEpoch
+    ) {
+      return { changed: false };
+    }
+    const current = this.states.get(keyId);
+    if (!current || this.isExpired(current)) return { changed: true };
+    const merged = identityClaimFromState(this.previewIdentityClaim(keyId, identity), current);
+    if (bypassClaimNeedsPersistence(current, merged)) {
+      throw new SessionIdentityConflictError();
+    }
+    // A concurrent L1 winner is not itself durable proof. Preserve an existing
+    // persisted claim, but do not upgrade an exclusive claim until its writer
+    // completes a SessionRepo or BindingRepo operation successfully.
+    this.claimIdentity(keyId, merged, "exclusive");
+    return { changed: true, state: current };
+  }
+
+  private enqueuePersistence<T>(keyId: string, work: () => Promise<T>): Promise<T> {
+    const previous = this.persistenceTails.get(keyId) ?? Promise.resolve();
+    const current = previous.then(work);
+    const tail = current.then(() => undefined, () => undefined);
+    this.persistenceTails.set(keyId, tail);
+    void tail.then(() => {
+      if (this.persistenceTails.get(keyId) === tail) this.persistenceTails.delete(keyId);
+    });
+    return current;
+  }
+
+  private previewIdentityClaim(keyId: string, identity: SessionIdentity): SessionIdentity {
+    assertIdentityScopedKey(keyId, identity);
+    return mergeIdentityClaim(this.identities.get(keyId), identity);
+  }
+
+  /**
+   * Synchronously claim the scoped identity and raw conversation ownership.
+   * Every validation completes before either map is mutated, so no competing
+   * request can observe a partial claim between JavaScript turns.
+   */
+  private claimIdentity(
+    keyId: string,
+    identity: SessionIdentity,
+    requestedRawClaim: RawSessionClaim,
+  ): SessionIdentity {
+    const merged = this.previewIdentityClaim(keyId, identity);
+    const rawKey = rawSessionKey(merged);
+    const nextRawClaims = new Map(this.rawSessionClaims.get(rawKey));
+
+    // An expired exclusive owner no longer blocks reuse. Do not evict its L1
+    // state here: rejected claim checks must remain side-effect free.
+    for (const [ownerKey, claim] of nextRawClaims) {
+      const ownerState = this.states.get(ownerKey);
+      if (claim === "exclusive" && ownerState && this.isExpired(ownerState)) {
+        nextRawClaims.delete(ownerKey);
+      }
+    }
+
+    const existingClaim = nextRawClaims.get(keyId);
+    const effectiveClaim = existingClaim === "persisted" ? "persisted" : requestedRawClaim;
+    for (const [ownerKey, claim] of nextRawClaims) {
+      if (ownerKey === keyId) continue;
+      if (effectiveClaim === "exclusive" || claim === "exclusive") {
+        throw new SessionIdentityConflictError();
+      }
+    }
+    if (effectiveClaim === "exclusive" && this.hasRawSessionConflict(keyId, merged)) {
+      throw new SessionIdentityConflictError();
+    }
+
+    nextRawClaims.set(keyId, effectiveClaim);
+    this.identities.set(keyId, merged);
+    this.rawSessionClaims.set(rawKey, nextRawClaims);
+    this.markMutation(keyId);
+    this.bumpOperation(keyId);
+    return merged;
+  }
+
+  private releaseRawSessionClaim(keyId: string): void {
+    const identity = this.identities.get(keyId);
+    if (!identity) return;
+    const rawKey = rawSessionKey(identity);
+    const claims = this.rawSessionClaims.get(rawKey);
+    if (!claims?.delete(keyId)) return;
+    if (claims.size === 0) this.rawSessionClaims.delete(rawKey);
+    this.markMutation(keyId);
+    this.bumpOperation(keyId);
+  }
+
   get(keyId: string): SessionInitState | undefined {
+    // Replacement state is provisional until the queued durable write settles.
+    // Direct consumers must observe the same fail-closed fence as recovery.
+    if (
+      this.blockedDeleteIntents.has(keyId)
+      || this.pendingDeleteReplacements.has(keyId)
+    ) {
+      return undefined;
+    }
     const state = this.states.get(keyId);
     if (!state) return undefined;
 
-    if (state.status !== "initialized" && Date.now() - state.startedAt > this.ttlMs) {
-      this.states.delete(keyId);
-      const id = this.identities.get(keyId);
-      if (id) this.repo?.deleteBySessionId(spaceOf(id), id.userId, id.agentSource, id.sessionId);
+    if (this.isExpired(state)) {
+      this.discardExpiredState(keyId, state);
       return undefined;
     }
 
@@ -133,145 +779,397 @@ export class SessionStore {
   }
 
   /**
-   * 把 recovery source 挂到 state 的**非可枚举**字段上——handler 侧读取
-   * `state.__recoverySource` 语义不变，但 `deepEqual` / `JSON.stringify` /
-   * `Object.keys` 都不会看到这一枚 transient marker，避免测试断言"恢复后
-   * state 与原 state 完全等价"因新增字段挂掉。
-   */
-  private tagRecoverySource<T extends SessionInitState>(
-    state: T,
-    src: NonNullable<SessionInitState["__recoverySource"]>,
-  ): T {
-    const copy = { ...state } as T;
-    Object.defineProperty(copy, "__recoverySource", {
-      value: src,
-      enumerable: false,
-      writable: true,
-      configurable: true,
-    });
-    return copy;
-  }
-
-  /**
-   * L1 write + L2a await write-through + L2b fire-and-forget binding。
+   * L1 write plus serialized L2a/L2b write-through.
    *
    * ⚠ 契约：`await store.set(...)` 完成时，L2a repo 已被 await（成功或静默失败）。
    * 见 2026-07-13 修复：原来 fire-and-forget 语义在多节点部署下会让 pod A
    * 关流时 COS PUT 还在飞，pod B 的 turn-2 因 L2a miss 直接掉进 tryHistoryScan
    * 兜底 → bypass → 请求透传 LLM。
    *
-   * L2b binding 仍是 fire-and-forget —— 只在 `initialized` 状态写入，属于
-   * "小纸条"型持久化，用于长睡对话唤醒；写延迟不影响 pending 状态跨节点恢复。
+   * L2a/L2b writes for one full identity are serialized in invocation order,
+   * so an older await cannot become the final durable writer after a newer L1.
    */
-  async set(keyId: string, state: SessionInitState): Promise<void> {
-    // `__recoverySource` is a transient hint produced by getOrRecover() only,
-    // and must not leak into L1/L2a/L2b persistence. Strip it defensively here
-    // so future callers who forward a getOrRecover() result into set() don't
-    // pollute the repo (业务 caller 目前都从 store.get() 拿 state，本身没有该
-    // 字段；这里是最后一道兜底).
-    if (state.__recoverySource !== undefined) {
-      const { __recoverySource: _drop, ...clean } = state;
-      void _drop;
-      state = clean as SessionInitState;
+  async set(
+    keyId: string,
+    state: SessionInitState,
+    claimSnapshot?: ClaimMutationSnapshot,
+  ): Promise<void> {
+    const credentialSafeState = withoutPersistedCredential(state);
+    let id = this.identities.get(keyId);
+    const rollbackSnapshot = claimSnapshot
+      ?? (id ? this.snapshotClaimMutation(keyId, id) : undefined);
+    const replacementDeleteIntent = rollbackSnapshot?.deleteIntent;
+    if (id) {
+      id = this.claimIdentity(
+        keyId,
+        identityClaimFromState(id, credentialSafeState),
+        "exclusive",
+      );
     }
-    // resetFlow / resetEpoch 自动继承 —— pre-hook 写入这两个字段后,form 流程会
-    // 经过多次 state 转换（pending_asset_confirm → pending_team_select → ...）,
-    // 每次转换点若手工 new 一个 state 对象很容易漏掉这俩字段,导致 completeRegistration
-    // 拿到 resetFlow=undefined,handler 侧就无法识别"这是 reset 引导的完成回合"→
-    // 请求被透传给 LLM 产生幻觉响应。
-    // 保守做法：只在新 state 未显式声明这俩字段（值为 undefined）时,从旧 state
-    // 继承一次。显式传 false / 具体值的 caller 不会被覆盖。
-    const prev = this.states.get(keyId);
-    if (prev) {
-      if (state.resetFlow === undefined && prev.resetFlow !== undefined) {
-        state = { ...state, resetFlow: prev.resetFlow };
-      }
-      if (state.resetEpoch === undefined && prev.resetEpoch !== undefined) {
-        state = { ...state, resetEpoch: prev.resetEpoch };
-      }
+    const normalizedState = id
+      ? withDurableBypassIdentity(
+          canonicalStateForIdentity(credentialSafeState, id),
+          id,
+        )
+      : credentialSafeState;
+    // Only a validated state commit supersedes an in-flight delete. Clearing
+    // the token before identity validation would let a rejected set cancel it.
+    if (replacementDeleteIntent !== undefined) {
+      this.pendingDeleteReplacements.set(keyId, replacementDeleteIntent);
+    } else {
+      this.deleteIntents.delete(keyId);
+      this.blockedDeleteIntents.delete(keyId);
+      this.pendingDeleteReplacements.delete(keyId);
     }
-    this.states.set(keyId, state);
-    const id = this.identities.get(keyId);
+    const writeGeneration = this.commitState(keyId, normalizedState);
+    let rollbackState = normalizedState;
+    let rollbackGeneration = writeGeneration;
+    let rollbackOperationEpoch = this.operationEpochs.get(keyId) ?? 0;
+    let promotedClaimPersisted = false;
     if (!id) {
       // No identity bound → this keyId is L1-only (anonymous session, tests
       // that bypass bind, etc.). Skip repo/binding persistence rather than
       // fabricating a partial identity.
       return;
     }
-    // L2a write-through —— MUST await；见方法头注释。
-    // 二次防御性 catch：契约要求实现方（KvSessionRepo / RedisSessionRepo /
-    // SqliteSessionRepo）内部静默降级不抛，但接口层再兜一层，保证任何后来
-    // 新增的 repo 或 test-mock 都不会把异常泄给 44 处 `await store.set(...)`
-    // caller —— L1 已成功写入，主流程不因 L2a 写失败挂掉。
-    if (this.repo) {
-      try {
-        await this.repo.upsert(spaceOf(id), id.userId, id.agentSource, id.sessionId, state);
-      } catch (err) {
-        console.warn(
-          `[session] L2a upsert failed for ${keyId}: ` +
-            (err instanceof Error ? err.message : String(err)),
-        );
-      }
-    }
-    // L2b: only write binding on terminal states
-    // await 而非 fire-and-forget，保持与 L2a 一致的契约：
-    // `await store.set(...)` return 时，L1 / L2a / L2b 三层都已 durable。
-    // 每个 session 只会在初始化终态触发一次，成本可控。
-    if (state.status === "initialized" && this.bindingRepo) {
-      // agentSource / userKey 现在存进 binding 内部字段(不再在 key 里),
-      // 让 bridge 只凭 (spaceId, sessionId) 就能反查回完整身份。
-      // 见 docs/design/2026-08-03-binding-flatten.md。
-      const binding: SessionBinding = state.bypassed
-        ? {
-            outcome: "bypassed",
-            userId: state.userId,
-            teamId: state.sessionInfo?.team_id,
-            agentId: state.sessionInfo?.agent_id,
-            taskId: state.sessionInfo?.task_id,
-            agentSource: id.agentSource,
-            userKey: state.sessionInfo?.user_key,
+    // L2b is written only for terminal states. `await store.set(...)` returns
+    // after every configured write reports success or failure; bypass identity
+    // promotion fails closed unless each previously durable layer accepts it.
+    const initialIdentity = id;
+    const writesBinding = normalizedState.status === "initialized" && Boolean(this.bindingRepo);
+    // A replacement installed while delete is active must settle behind that
+    // delete even when it has no durable write of its own.  Otherwise the
+    // pending marker survives a vacuously successful delete forever.
+    if (!this.repo && !writesBinding && replacementDeleteIntent === undefined) return;
+
+    // Serialize every state-backed durable write for this full identity. L1 is
+    // still updated synchronously, while L2 observes the same invocation order.
+    try {
+      await this.enqueuePersistence(keyId, async () => {
+        let currentState = normalizedState;
+        let currentGeneration = writeGeneration;
+        let requiredLayers = normalizedState.identityClaimPending;
+        while (this.isCurrentState(keyId, currentGeneration, currentState)) {
+          const durableIdentity = this.previewIdentityClaim(keyId, initialIdentity);
+          const claimedState = withDurableBypassIdentity(
+            currentState,
+            durableIdentity,
+            requiredLayers,
+          );
+          if (claimedState !== currentState) {
+            currentState = claimedState;
+            currentGeneration = this.commitState(keyId, currentState);
+            rollbackState = currentState;
+            rollbackGeneration = currentGeneration;
+            rollbackOperationEpoch = this.operationEpochs.get(keyId) ?? 0;
           }
-        : {
-            outcome: "initialized",
-            userId: state.sessionInfo?.user_id || state.userId,
-            teamId: state.sessionInfo?.team_id,
-            agentId: state.sessionInfo?.agent_id,
-            taskId: state.sessionInfo?.task_id,
-            agentSource: id.agentSource,
-            userKey: state.sessionInfo?.user_key,
-          };
-      try {
-        await this.bindingRepo.putBinding(spaceOf(id), id.sessionId, binding);
-      } catch (err) {
-        console.warn(
-          `[session] L2b binding write failed for ${keyId}: ` +
-            (err instanceof Error ? err.message : String(err)),
+
+          let l2aPersisted = false;
+          if (this.repo) {
+            try {
+              l2aPersisted = await this.repo.upsert(
+                spaceOf(durableIdentity),
+                durableIdentity.userId,
+                durableIdentity.agentSource,
+                durableIdentity.sessionId,
+                currentState,
+              );
+            } catch {
+              console.warn("[session] L2a upsert failed");
+            }
+            if (!this.isCurrentState(keyId, currentGeneration, currentState)) return;
+            if (l2aPersisted) {
+              promotedClaimPersisted ||= hasPromotedPendingBypassClaim(currentState);
+              this.markDurableLayer(keyId, "l2a");
+              rollbackOperationEpoch = this.operationEpochs.get(keyId) ?? 0;
+            }
+            const latestIdentity = this.previewIdentityClaim(keyId, durableIdentity);
+            if (!sameIdentityClaim(durableIdentity, latestIdentity)) {
+              if (l2aPersisted) {
+                requiredLayers = mergeDurableClaimLayers(requiredLayers, { l2a: true });
+              }
+              currentState = withDurableBypassIdentity(
+                currentState,
+                latestIdentity,
+                requiredLayers,
+              );
+              currentGeneration = this.commitState(keyId, currentState);
+              rollbackState = currentState;
+              rollbackGeneration = currentGeneration;
+              rollbackOperationEpoch = this.operationEpochs.get(keyId) ?? 0;
+              continue;
+            }
+          }
+
+          let l2bPersisted = false;
+          const binding = writesBinding
+            ? terminalBinding(currentState, durableIdentity)
+            : undefined;
+          if (binding && this.bindingRepo) {
+            try {
+              l2bPersisted = await this.bindingRepo.putBinding(
+                spaceOf(durableIdentity),
+                durableIdentity.userId,
+                durableIdentity.agentSource,
+                durableIdentity.sessionId,
+                binding,
+              );
+            } catch {
+              console.warn("[session] L2b binding write failed");
+            }
+            if (!this.isCurrentState(keyId, currentGeneration, currentState)) return;
+            if (l2bPersisted) {
+              promotedClaimPersisted ||= hasPromotedPendingBypassClaim(currentState);
+              this.markDurableLayer(keyId, "l2b");
+              rollbackOperationEpoch = this.operationEpochs.get(keyId) ?? 0;
+            }
+            const latestIdentity = this.previewIdentityClaim(keyId, durableIdentity);
+            if (!sameIdentityClaim(durableIdentity, latestIdentity)) {
+              if (l2aPersisted) {
+                requiredLayers = mergeDurableClaimLayers(requiredLayers, { l2a: true });
+              }
+              if (l2bPersisted) {
+                requiredLayers = mergeDurableClaimLayers(requiredLayers, { l2b: true });
+              }
+              currentState = withDurableBypassIdentity(
+                currentState,
+                latestIdentity,
+                requiredLayers,
+              );
+              currentGeneration = this.commitState(keyId, currentState);
+              rollbackState = currentState;
+              rollbackGeneration = currentGeneration;
+              rollbackOperationEpoch = this.operationEpochs.get(keyId) ?? 0;
+              continue;
+            }
+          }
+
+          requiredLayers = mergeDurableClaimLayers(
+            requiredLayers,
+            currentState.identityClaimPending,
+          );
+          if (
+            (requiredLayers?.l2a && !l2aPersisted)
+            || (requiredLayers?.l2b && !l2bPersisted)
+          ) {
+            throw new SessionStoreUnavailableError();
+          }
+          if (
+            replacementDeleteIntent !== undefined
+            && this.blockedDeleteIntents.get(keyId) === replacementDeleteIntent
+            && (
+              (Boolean(this.repo) && !l2aPersisted)
+              || (Boolean(this.bindingRepo) && (!writesBinding || !l2bPersisted))
+            )
+          ) {
+            throw new SessionStoreUnavailableError();
+          }
+
+          if (requiredLayers) {
+            const settledState: SessionInitState = {
+              ...currentState,
+              identityClaimPending: undefined,
+            };
+            if (l2aPersisted && this.repo) {
+              let settledPersisted = false;
+              try {
+                settledPersisted = await this.repo.upsert(
+                  spaceOf(durableIdentity),
+                  durableIdentity.userId,
+                  durableIdentity.agentSource,
+                  durableIdentity.sessionId,
+                  settledState,
+                );
+              } catch {
+                console.warn("[session] L2a upsert failed");
+              }
+              if (!this.isCurrentState(keyId, currentGeneration, currentState)) return;
+              if (!settledPersisted) throw new SessionStoreUnavailableError();
+              this.markDurableLayer(keyId, "l2a");
+              rollbackOperationEpoch = this.operationEpochs.get(keyId) ?? 0;
+              const latestIdentity = this.previewIdentityClaim(keyId, durableIdentity);
+              if (!sameIdentityClaim(durableIdentity, latestIdentity)) {
+                requiredLayers = mergeDurableClaimLayers(requiredLayers, {
+                  l2a: true,
+                  l2b: l2bPersisted || undefined,
+                });
+                currentState = withDurableBypassIdentity(
+                  currentState,
+                  latestIdentity,
+                  requiredLayers,
+                );
+                currentGeneration = this.commitState(keyId, currentState);
+                rollbackState = currentState;
+                rollbackGeneration = currentGeneration;
+                rollbackOperationEpoch = this.operationEpochs.get(keyId) ?? 0;
+                continue;
+              }
+            }
+            currentState = settledState;
+            currentGeneration = this.commitState(keyId, currentState);
+            rollbackState = currentState;
+            rollbackGeneration = currentGeneration;
+            rollbackOperationEpoch = this.operationEpochs.get(keyId) ?? 0;
+          }
+
+          if (l2aPersisted || l2bPersisted) {
+            this.claimIdentity(keyId, durableIdentity, "persisted");
+          }
+          if (replacementDeleteIntent !== undefined) {
+            if (this.pendingDeleteReplacements.get(keyId) !== replacementDeleteIntent) return;
+            if (this.blockedDeleteIntents.get(keyId) === replacementDeleteIntent) {
+              if (this.deleteIntents.get(keyId) !== replacementDeleteIntent) return;
+              this.deleteIntents.delete(keyId);
+              this.blockedDeleteIntents.delete(keyId);
+            }
+            this.pendingDeleteReplacements.delete(keyId);
+            this.bumpDeleteEpoch(keyId);
+          }
+          return;
+        }
+      });
+    } catch (error) {
+      const keepsPromotedClaim = Boolean(
+        rollbackSnapshot
+        && rollbackSnapshot.blockedDeleteIntent === undefined
+        && (
+          rollbackSnapshot.deleteIntent === undefined
+          || this.blockedDeleteIntents.get(keyId) !== rollbackSnapshot.deleteIntent
+        )
+        && promotedClaimPersisted
+        && hasPromotedPendingBypassClaim(rollbackState),
+      );
+      if (rollbackSnapshot && !keepsPromotedClaim) {
+        this.restoreClaimMutation(
+          keyId,
+          rollbackSnapshot,
+          rollbackState,
+          rollbackGeneration,
+          rollbackOperationEpoch,
         );
       }
+      throw error;
     }
   }
 
   delete(keyId: string): void {
-    this.states.delete(keyId);
+    const previousDeleteIntent = this.deleteIntents.get(keyId);
+    const wasBlocked = previousDeleteIntent !== undefined
+      && this.blockedDeleteIntents.get(keyId) === previousDeleteIntent;
+    const deleteToken = this.bumpDeleteEpoch(keyId);
+    this.deleteIntents.set(keyId, deleteToken);
+    this.pendingDeleteReplacements.delete(keyId);
+    if (wasBlocked) this.blockedDeleteIntents.set(keyId, deleteToken);
+    else this.blockedDeleteIntents.delete(keyId);
+    this.removeState(keyId);
+    this.durableLayersByKey.delete(keyId);
     const id = this.identities.get(keyId);
-    if (!id) return;
-    this.repo?.deleteBySessionId(spaceOf(id), id.userId, id.agentSource, id.sessionId);
-    void this.bindingRepo
-      ?.deleteBinding(spaceOf(id), id.sessionId)
-      .catch(() => {});
+    if (!id) {
+      this.deleteIntents.delete(keyId);
+      this.blockedDeleteIntents.delete(keyId);
+      this.pendingDeleteReplacements.delete(keyId);
+      this.bumpDeleteEpoch(keyId);
+      return;
+    }
+    this.releaseRawSessionClaim(keyId);
+    void this.enqueuePersistence(keyId, async () => {
+      let l2aDeleted = !this.repo;
+      try {
+        if (this.repo) {
+          l2aDeleted = await this.repo.deleteBySessionId(
+            spaceOf(id),
+            id.userId,
+            id.agentSource,
+            id.sessionId,
+          );
+        }
+      } catch {
+        l2aDeleted = false;
+      }
+      let l2bDeleted = !this.bindingRepo;
+      try {
+        if (this.bindingRepo) {
+          l2bDeleted = await this.bindingRepo.deleteBinding(
+            spaceOf(id),
+            id.userId,
+            id.agentSource,
+            id.sessionId,
+          );
+        }
+      } catch {
+        l2bDeleted = false;
+      }
+      if (this.deleteIntents.get(keyId) !== deleteToken) return;
+      const hasPendingReplacement = this.pendingDeleteReplacements.get(keyId) === deleteToken;
+      // A stale L2 read may have completed before the durable delete. Remove it
+      // unless a queued replacement owns this token and remains fail-closed.
+      if (!hasPendingReplacement) {
+        this.removeState(keyId);
+        this.durableLayersByKey.delete(keyId);
+        this.releaseRawSessionClaim(keyId);
+      }
+      if (!l2aDeleted || !l2bDeleted) {
+        this.blockedDeleteIntents.set(keyId, deleteToken);
+        return;
+      }
+      this.deleteIntents.delete(keyId);
+      this.blockedDeleteIntents.delete(keyId);
+      if (!hasPendingReplacement) this.bumpDeleteEpoch(keyId);
+    }).catch(() => {});
   }
 
   getStatus(keyId: string): SessionInitStatus {
     return this.get(keyId)?.status ?? "uninitialized";
   }
 
+  /**
+   * Detect an already-live raw conversation owned by a different user/space.
+   * A persisted row for the incoming full identity may still prove that the
+   * collision is legitimate, so callers use this only after their own L2
+   * probes miss.
+   */
+  private hasRawSessionConflict(keyId: string, identity: SessionIdentity): boolean {
+    for (const [otherKey, state] of this.states) {
+      if (otherKey === keyId || this.isExpired(state)) continue;
+      const other = this.identities.get(otherKey);
+      if (
+        other
+        && other.agentSource === identity.agentSource
+        && other.sessionId === identity.sessionId
+      ) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  private isExpired(state: SessionInitState): boolean {
+    return state.status !== "initialized" && Date.now() - state.startedAt > this.ttlMs;
+  }
+
+  private discardExpiredState(keyId: string, state: SessionInitState): void {
+    // Recovery can await L2 reads before reaching this point. Do not delete a
+    // newer state installed by another request while those reads were in flight.
+    if (this.states.get(keyId) !== state || !this.isExpired(state)) return;
+    this.removeState(keyId, state);
+    this.releaseRawSessionClaim(keyId);
+  }
+
+  private discardExpiredRecovery(
+    keyId: string,
+    cachedState: SessionInitState | undefined,
+  ): void {
+    if (cachedState) {
+      this.discardExpiredState(keyId, cachedState);
+    }
+  }
+
   cleanup(): void {
     const now = Date.now();
     for (const [keyId, state] of this.states) {
       if (state.status !== "initialized" && now - state.startedAt > this.ttlMs) {
-        this.states.delete(keyId);
-        const id = this.identities.get(keyId);
-        if (id) this.repo?.deleteBySessionId(spaceOf(id), id.userId, id.agentSource, id.sessionId);
+        this.removeState(keyId, state);
+        this.releaseRawSessionClaim(keyId);
       }
     }
   }
@@ -282,19 +1180,76 @@ export class SessionStore {
       const rows = await this.repo.loadAllInitialized();
       let loaded = 0;
       for (const row of rows) {
-        // L1 key convention matches handler.ts / init.ts entry sites:
-        //   `${agentSource}:${sessionId}`
+        // L1 keys use the same full identity tuple as handler/init entry sites.
         // Also bind full identity so subsequent set() persists back through
         // the correct (userId, agentSource, sessionId) key path.
-        const keyId = `${row.agentSource}:${row.sessionId}`;
-        if (!this.states.has(keyId)) {
-          this.states.set(keyId, row.state);
-          this.identities.set(keyId, {
-            userId: row.userId,
-            agentSource: row.agentSource,
-            sessionId: row.sessionId,
-            spaceId: row.spaceId || undefined,
-          });
+        const adapterNormalized = persistedSessionNeedsMigration(row.state);
+        const safeState = withoutPersistedCredential(row.state);
+        const normalizedState = safeState.keyId === row.sessionId
+          ? safeState
+          : { ...safeState, keyId: row.sessionId };
+        const identity: SessionIdentity = {
+          userId: row.userId,
+          agentSource: row.agentSource,
+          sessionId: row.sessionId,
+          spaceId: row.spaceId || undefined,
+          teamId: normalizedState.identityClaim?.teamId
+            ?? normalizedState.sessionInfo?.team_id
+            ?? normalizedState.selectedTeamId,
+          agentId: normalizedState.identityClaim?.agentId
+            ?? normalizedState.sessionInfo?.agent_id
+            ?? normalizedState.selectedAgentId
+            ?? normalizedState.agentDetail?.id,
+          taskId: normalizedState.identityClaim?.taskId
+            ?? normalizedState.sessionInfo?.task_id
+            ?? normalizedState.taskDetail?.id,
+        };
+        if (!persistedStateMatchesIdentity(row.state, identity)) {
+          console.warn("[session-db] skipped session with identity conflict");
+          continue;
+        }
+        const keyId = sessionStoreKey(identity);
+        // A legacy bypass with an incomplete optional owner is not sufficient
+        // startup authority: a stronger L2b binding may already own the tuple.
+        // Leave it out of L1 so the first request performs normal L2a/L2b
+        // corroboration before any claim or durable rewrite.
+        if (hasWeakBypassClaim(normalizedState)) {
+          if (
+            !this.mutatedKeys.has(keyId)
+            && !this.states.has(keyId)
+            && (adapterNormalized || normalizedState !== row.state)
+          ) {
+            try {
+              await this.enqueuePersistence(keyId, () => {
+                if (this.mutatedKeys.has(keyId) || this.states.has(keyId)) {
+                  return Promise.resolve(false);
+                }
+                return this.repo!.upsert(
+                  row.spaceId, row.userId, row.agentSource, row.sessionId, normalizedState,
+                );
+              });
+            } catch {
+              // Best-effort schema rewrite; weak identity remains out of L1.
+            }
+          }
+          continue;
+        }
+        if (
+          !this.mutatedKeys.has(keyId)
+          && !this.states.has(keyId)
+        ) {
+          this.claimIdentity(keyId, identity, "persisted");
+          this.commitState(keyId, normalizedState);
+          this.markDurableLayer(keyId, "l2a");
+          if (adapterNormalized || normalizedState !== row.state) {
+            try {
+              await this.enqueuePersistence(keyId, () => this.repo!.upsert(
+                row.spaceId, row.userId, row.agentSource, row.sessionId, normalizedState,
+              ));
+            } catch {
+              // Best-effort lazy migration; L1 is already credential-free.
+            }
+          }
           loaded++;
         }
       }
@@ -302,11 +1257,8 @@ export class SessionStore {
         console.log(`[session-db] hydrated ${loaded} initialized session(s) from disk`);
       }
       return loaded;
-    } catch (err) {
-      console.warn(
-        "[session-db] hydrateFromDb failed:",
-        err instanceof Error ? err.message : String(err),
-      );
+    } catch {
+      console.warn("[session-db] hydrateFromDb failed");
       return 0;
     }
   }
@@ -326,9 +1278,14 @@ export class SessionStore {
     identity: SessionIdentity,
     ctx: RecoveryContext,
   ): Promise<SessionInitState | undefined> {
-    // Bind identity for downstream set()/delete()/probeL2a callchain.
-    this.identities.set(keyId, identity);
-
+    // Validate before any L1 read or identity binding. Reusing a raw
+    // source/session key here would let one authenticated user receive another
+    // user's terminal state and would redirect later write-through persistence.
+    assertIdentityScopedKey(keyId, identity);
+    if (
+      this.blockedDeleteIntents.has(keyId)
+      || this.pendingDeleteReplacements.has(keyId)
+    ) throw new SessionContextUnavailableError();
     // Step 1: L1
     //
     // ⚠ Terminal 状态（`initialized`，含 `bypassed`）L1 才权威 —— 一旦定型
@@ -344,16 +1301,45 @@ export class SessionStore {
     //                       unrecognized → session bypass → 请求原样透传给
     //                       LLM（用户观感：不选 task 就走了）。
     //
-    // 修法：pending_* 无论 L1 是否命中，都必须走 probeL2a 拿权威值；probeL2a
-    // 内部会 promote 覆盖 L1，之后 init.ts 的 `store.get(compositeKey)` 就能
+    // 修法：pending_* 无论 L1 是否命中，都必须走 probeL2a 拿权威值；caller
+    // 在同步 identity claim 后 promote 覆盖 L1，之后 init.ts 的 `store.get(compositeKey)` 就能
     // 读到最新状态。L1 pending 命中作为 L2a 失败/miss 时的 last-resort fallback
     // 保留（见 Step 2 后的分支），保证同 pod 场景下 L2a 尚未落盘时不倒退。
     //
-    // 代价：每轮多一次 storage GET（~50ms COS）。
-    // 多节点无状态设计：L1 仅作为 L2a miss 时的降级 fallback（COS 抖动），
-    // 不作为权威源。session-reset 可能在任意 pod 执行，L1 initialized 不可信。
-    const l1 = this.get(keyId);
-    // 不对 initialized 做 L1 短路 —— 一律走 L2a 拿权威状态。
+    // 代价：pending_* 每轮多一次 storage GET（~1-2ms Redis / ~50ms COS）。
+    // pending 轮次只在初始化 form 阶段出现，每个 session 顶多 2-4 次，可接受；
+    // initialized 快路径仍是纯内存零 IO。
+    const initialSnapshot = this.snapshotState(keyId);
+    const cachedState = initialSnapshot.state;
+    const boundIdentity = this.identities.get(keyId);
+    if (
+      (boundIdentity && !boundIdentityMatchesIdentity(boundIdentity, identity))
+      || (cachedState && !persistedStateMatchesIdentity(cachedState, identity))
+    ) {
+      throw new SessionIdentityConflictError();
+    }
+    // Inspect expiry without deleting anything. A later raw/L2 binding conflict
+    // must reject without letting the caller mutate this or another identity's
+    // cache entry as a side effect of the conflict check.
+    const l1 = cachedState && !this.isExpired(cachedState) ? cachedState : undefined;
+    if (l1 && l1.status === "initialized") {
+      const claimSnapshot = this.snapshotClaimMutation(keyId, identity);
+      const merged = identityClaimFromState(this.previewIdentityClaim(keyId, identity), l1);
+      if (!persistedStateMatchesIdentity(l1, merged)) {
+        throw new SessionIdentityConflictError();
+      }
+      const claimed = this.claimIdentity(keyId, merged, "exclusive");
+      const pendingLayers = bypassClaimNeedsPersistence(l1, claimed)
+        ? this.durableLayersByKey.get(keyId)
+        : undefined;
+      const durableState = withDurableBypassIdentity(l1, claimed, pendingLayers);
+      if (durableState !== l1 || durableState.identityClaimPending) {
+        await this.set(keyId, durableState, claimSnapshot);
+        return this.states.get(keyId);
+      }
+      console.log("[cache] session=<redacted> L1 hit (terminal)");
+      return l1;
+    }
 
     // Step 2: L2a SessionRepo (Redis / SQLite / ProxyStorage) — full SessionInitState.
     // Startup `hydrateFromDb()` covers the single-node case, but in multi-node
@@ -363,95 +1349,193 @@ export class SessionStore {
     // agentDetail/taskDetail is sitting in the storage layer. Pending 状态也
     // 必须命中就返回 —— 见上面 Step 1 的多节点陈旧 L1 注释。
     if (this.repo) {
-      const l2a = await this.probeL2a(keyId, identity);
-      if (l2a) {
-        // 只有 L1 存在**且**status 不同才算真"override stale L1"。相同 status
-        // 只是 L2a 权威读回来复核一遍，属正常路径（pending_* 每轮都会走 L2a
-        // probe），日志里没必要拉警报，之前的无条件 "override stale L1" 会误
-        // 导观察者以为有一致性问题。
-        const stale = l1 && l1.status !== l2a.status ? " (override stale L1)" : "";
-        console.log(`[cache] session=${keyId} L2a hit → promote L1${stale}`);
-        return this.tagRecoverySource(l2a, "l2a");
+      const beforeL2a = this.snapshotState(keyId);
+      const l2a = await this.probeL2a(identity);
+      const afterL2a = this.stateAfterAwait(keyId, beforeL2a, identity);
+      if (afterL2a.changed) return afterL2a.state;
+      if (l2a.readFailed) throw new SessionStoreUnavailableError();
+      if (l2a.state) {
+        let merged = identityClaimFromState(
+          this.previewIdentityClaim(keyId, identity),
+          l2a.state,
+        );
+        if (!persistedStateMatchesIdentity(l2a.state, merged)) {
+          throw new SessionIdentityConflictError();
+        }
+        const needsClaimPersistence = hasWeakBypassClaim(l2a.state)
+          || bypassClaimNeedsPersistence(l2a.state, merged);
+        let corroboratingBinding: SessionBinding | null = null;
+        if (needsClaimPersistence && this.bindingRepo) {
+          const beforeCorroboration = this.snapshotState(keyId);
+          try {
+            corroboratingBinding = await this.bindingRepo.getBinding(
+              spaceOf(merged),
+              merged.userId,
+              merged.agentSource,
+              merged.sessionId,
+            );
+          } catch {
+            throw new SessionStoreUnavailableError();
+          }
+          const afterCorroboration = this.stateAfterAwait(
+            keyId,
+            beforeCorroboration,
+            merged,
+          );
+          if (afterCorroboration.changed) return afterCorroboration.state;
+          if (corroboratingBinding) {
+            if (!bindingMatchesIdentity(corroboratingBinding, merged)) {
+              throw new SessionIdentityConflictError();
+            }
+            merged = identityClaimFromBinding(merged, corroboratingBinding);
+          }
+        }
+        const claimSnapshot = this.snapshotClaimMutation(keyId, identity);
+        const claimed = this.claimIdentity(keyId, merged, "persisted");
+        this.markDurableLayer(keyId, "l2a");
+        if (corroboratingBinding) this.markDurableLayer(keyId, "l2b");
+        const bindingNeedsPersistence = corroboratingBinding
+          ? bypassBindingNeedsPersistence(corroboratingBinding, claimed)
+          : false;
+        const pendingLayers = needsClaimPersistence || bindingNeedsPersistence
+          ? {
+              l2a: true as const,
+              l2b: corroboratingBinding ? true as const : undefined,
+            }
+          : undefined;
+        const durableState = withDurableBypassIdentity(l2a.state, claimed, pendingLayers);
+        if (
+          l2a.needsMigration
+          || durableState !== l2a.state
+          || durableState.identityClaimPending
+        ) {
+          await this.set(keyId, durableState, claimSnapshot);
+          return this.states.get(keyId);
+        }
+        this.commitState(keyId, l2a.state);
+        console.log(`[cache] session=<redacted> L2a hit → promote L1${l1 ? " (override stale L1)" : ""}`);
+        return l2a.state;
       }
     }
 
-    // Step 2.5: L2a miss 时的 L1 降级兜底。
+    // Step 2.5: L1 pending 命中 + L2a miss 的兜底。
     //
-    // L2a(COS) 抖动 / 短暂不可用时，继续走 L2b 只能拿到 binding（只在
+    // 触发路径：同 pod 内 pending_* 轮次之间 —— L2a 已经在上一轮 `set()` 里
+    // await 落盘，probeL2a 应该命中；但若 L2a 真的 miss（storage 抖动 / 后端
+    // 短暂不可用 / 极端时序），继续走 L2b 只会拿到 undefined（binding 只在
     // initialized 写），最终 `tryHistoryScan` 无条件 bypass —— 反而更糟。
-    // 这里回退到 L1 是 "宁可用略旧但可用的状态" 的 graceful degradation。
+    // 这里回退到 L1 pending 是 "宁可用略旧但合理的状态" 的取舍。
     //
     // zombie / user-mismatch 已在 `this.get()` 与 `probeL2a` 内部各自 invalidate，
     // 走到这里的 l1 一定是 fresh + user 匹配的。
     if (l1) {
-      console.log(`[cache] session=${keyId} L1 fallback (L2a miss, status=${l1.status})`);
-      return this.tagRecoverySource(l1, "l1");
+      const merged = identityClaimFromState(this.previewIdentityClaim(keyId, identity), l1);
+      if (!persistedStateMatchesIdentity(l1, merged)) {
+        throw new SessionIdentityConflictError();
+      }
+      this.claimIdentity(keyId, merged, "exclusive");
+      console.log("[cache] session=<redacted> L1 hit (pending, L2a miss fallback)");
+      return l1;
     }
 
     // Step 3: L2b Binding
     if (!this.bindingRepo) {
-      console.log(`[cache] session=${keyId} miss (no bindingRepo) → history-scan`);
-      const scanned = await this.tryHistoryScan(keyId, identity, ctx);
-      return scanned ? this.tagRecoverySource(scanned, "history-scan") : undefined;
+      let claimed = this.claimIdentity(keyId, identity, "exclusive");
+      this.discardExpiredRecovery(keyId, cachedState);
+      claimed = this.claimIdentity(keyId, claimed, "exclusive");
+      console.log("[cache] session=<redacted> miss (no bindingRepo) → history-scan");
+      return this.tryHistoryScan(keyId, claimed, ctx);
     }
+    const stateBeforeBinding = this.snapshotState(keyId);
     let binding: SessionBinding | null;
     try {
-      binding = await this.bindingRepo.getBinding(spaceOf(identity), identity.sessionId);
+      binding = await this.bindingRepo.getBinding(
+        spaceOf(identity),
+        identity.userId,
+        identity.agentSource,
+        identity.sessionId,
+      );
     } catch {
-      binding = null;
+      throw new SessionStoreUnavailableError();
     }
+    const stateAfterBinding = this.stateAfterAwait(keyId, stateBeforeBinding, identity);
+    if (stateAfterBinding.changed) return stateAfterBinding.state;
     if (!binding) {
-      console.log(`[cache] session=${keyId} miss (no binding) → history-scan`);
-      const scanned = await this.tryHistoryScan(keyId, identity, ctx);
-      return scanned ? this.tagRecoverySource(scanned, "history-scan") : undefined;
+      let claimed = this.claimIdentity(keyId, identity, "exclusive");
+      this.discardExpiredRecovery(keyId, this.states.get(keyId));
+      claimed = this.claimIdentity(keyId, claimed, "exclusive");
+      console.log("[cache] session=<redacted> miss (no binding) → history-scan");
+      return this.tryHistoryScan(keyId, claimed, ctx);
     }
-    console.log(`[cache] session=${keyId} L2b binding hit outcome=${binding.outcome} → rebuild`);
+    const merged = this.previewIdentityClaim(keyId, identity);
+    if (!bindingMatchesIdentity(binding, merged)) {
+      throw new SessionIdentityConflictError();
+    }
+    const claimSnapshot = this.snapshotClaimMutation(keyId, identity);
+    let claimed = this.claimIdentity(
+      keyId,
+      identityClaimFromBinding(merged, binding),
+      "persisted",
+    );
+    this.discardExpiredRecovery(keyId, this.states.get(keyId));
+    claimed = this.claimIdentity(keyId, claimed, "persisted");
+    this.markDurableLayer(keyId, "l2b");
+    // Bind only after all applicable L1, L2a, raw-session and L2b identity
+    // checks pass. A rejected caller must never poison a later recovery.
+    console.log(`[cache] session=<redacted> L2b binding hit outcome=${binding.outcome} → rebuild`);
 
     // Async touch (refresh 30d TTL, don't await)
-    void this.bindingRepo
-      .touchLastSeen(spaceOf(identity), identity.sessionId)
-      .catch(() => {});
-
     // Step 3.1: bypassed outcome → construct bypass state
     if (binding.outcome === "bypassed") {
+      const pendingLayers = bypassBindingNeedsPersistence(binding, claimed)
+        ? { l2b: true as const }
+        : undefined;
       const state: SessionInitState = {
         status: "initialized",
-        keyId,
+        keyId: claimed.sessionId,
         startedAt: Date.now(),
         attemptCount: 0,
+        userId: claimed.userId,
         bypassed: true,
         sessionInfo: null,
         agentDetail: null,
         taskDetail: null,
+        identityClaimPending: pendingLayers,
       };
-      await this.set(keyId, state);
-      return this.tagRecoverySource(state, "l2b");
+      await this.set(keyId, state, claimSnapshot);
+      void this.bindingRepo
+        .touchLastSeen(spaceOf(claimed), claimed.userId, claimed.agentSource, claimed.sessionId)
+        .catch(() => {});
+      return this.states.get(keyId);
     }
 
     // Step 3.2: initialized outcome → rebuild via kernel
-    const rebuilt = await this.rebuildFromBinding(keyId, identity, binding, ctx);
-    return rebuilt ? this.tagRecoverySource(rebuilt, "l2b") : undefined;
+    void this.bindingRepo
+      .touchLastSeen(spaceOf(claimed), claimed.userId, claimed.agentSource, claimed.sessionId)
+      .catch(() => {});
+    return this.rebuildFromBinding(keyId, claimed, binding, "persisted", ctx);
   }
 
   /**
-   * L2a probe: read the full SessionInitState (agentDetail / taskDetail
-   * included) from `SessionRepo` and, if valid, promote it back to L1.
+   * L2a probe: read and validate the full SessionInitState (agentDetail /
+   * taskDetail included). Promotion and migration happen only after the caller
+   * synchronously claims identity ownership.
    *
    * Returns undefined (caller should fall through to L2b) when:
    *   - the repo has no row for this key,
    *   - the stored userId disagrees with the current caller (cached identity
    *     no longer applies — same policy as L2b invalidation; row is dropped),
    *   - the row is a stale pending state past ttl (zombie session from a
-   *     crashed node),
-   *   - the underlying storage errored (degrade silently, same as elsewhere).
+   *     crashed node; ignored here because passive recovery has no repo CAS),
+   *   - the underlying storage errored (reported as `readFailed` so recovery
+   *     can fail closed before consulting a weaker layer).
    *
    * Non-terminal statuses (`pending_*`) are ALSO returned so a form flow
    * started on node A can continue on node B.
    */
   private async probeL2a(
-    keyId: string,
     identity: SessionIdentity,
-  ): Promise<SessionInitState | undefined> {
+  ): Promise<L2aProbeResult> {
     let row: SessionInitState | null;
     try {
       row = await this.repo!.getBySessionId(
@@ -460,19 +1544,16 @@ export class SessionStore {
         identity.agentSource,
         identity.sessionId,
       );
-    } catch (err) {
-      // 诊断: probeL2a 报错时也 log，之前静默吞掉导致多节点 L2 miss 无迹可循
-      console.log(
-        `[cache] session=${keyId} L2a probe error space=${spaceOf(identity)} user=${identity.userId} src=${identity.agentSource} sid=${identity.sessionId}: ${(err as Error).message}`,
-      );
-      return undefined;
+    } catch {
+      return { readFailed: true };
     }
-    if (!row) {
-      // 诊断: 打出实际用来查的 4 段, 方便对着 COS 里的 key 手工比对
-      console.log(
-        `[cache] session=${keyId} L2a miss space=${spaceOf(identity)} user=${identity.userId} src=${identity.agentSource} sid=${identity.sessionId}`,
-      );
-      return undefined;
+    if (!row) return {};
+    const persistedRow = row;
+    const adapterNormalized = persistedSessionNeedsMigration(persistedRow);
+    row = withoutPersistedCredential(row);
+
+    if (!persistedStateMatchesIdentity(row, identity)) {
+      throw new SessionIdentityConflictError();
     }
 
     // Zombie guard: pending forms past ttl are dropped (mirrors get()'s
@@ -483,35 +1564,22 @@ export class SessionStore {
       Date.now() - row.startedAt > this.ttlMs
     ) {
       console.log(
-        `[session-recover] ${keyId} L2a pending expired (status=${row.status}, age=${Date.now() - row.startedAt}ms), invalidating`,
+        `[session-recover] session=<redacted> L2a pending expired (status=${row.status}), deferring invalidation`,
       );
-      try {
-        this.repo!.deleteBySessionId(spaceOf(identity), identity.userId, identity.agentSource, identity.sessionId);
-      } catch {
-        /* best-effort */
-      }
-      return undefined;
-    }
-
-    const storedUserId = row.userId ?? row.sessionInfo?.user_id;
-    if (storedUserId && identity.userId && storedUserId !== identity.userId) {
-      console.log(
-        `[session-recover] ${keyId} L2a user mismatch (stored=${storedUserId}, current=${identity.userId}), invalidating`,
-      );
-      try {
-        this.repo!.deleteBySessionId(spaceOf(identity), identity.userId, identity.agentSource, identity.sessionId);
-      } catch {
-        /* best-effort */
-      }
-      return undefined;
+      return {};
     }
 
     // Promote back to L1 so subsequent turns don't hit the repo at all.
-    this.states.set(keyId, row);
+    const normalizedRow = row.keyId === identity.sessionId
+      ? row
+      : { ...row, keyId: identity.sessionId };
     console.log(
-      `[session-recover] ${keyId} L2a hit status=${row.status} (agent=${row.sessionInfo?.agent_id ?? "-"}, task=${row.sessionInfo?.task_id ?? "-"})`,
+      `[session-recover] session=<redacted> L2a hit status=${row.status} agent=${row.sessionInfo?.agent_id ? "present" : "none"} task=${row.sessionInfo?.task_id ? "present" : "none"}`,
     );
-    return row;
+    return {
+      state: normalizedRow,
+      needsMigration: adapterNormalized || normalizedRow !== persistedRow,
+    };
   }
 
   /** In-flight promise deduplication: same keyId → same rebuild promise. */
@@ -519,13 +1587,15 @@ export class SessionStore {
     keyId: string,
     identity: SessionIdentity,
     binding: SessionBinding,
+    bindingClaim: RawSessionClaim,
     ctx: RecoveryContext,
   ): Promise<SessionInitState | undefined> {
-    const inFlight = this.recoveryInFlight.get(keyId);
+    const inFlightKey = recoveryIdentityKey(keyId, identity, bindingClaim);
+    const inFlight = this.recoveryInFlight.get(inFlightKey);
     if (inFlight) return inFlight;
-    const p = this.doRebuild(keyId, identity, binding, ctx)
-      .finally(() => this.recoveryInFlight.delete(keyId));
-    this.recoveryInFlight.set(keyId, p);
+    const p = this.doRebuild(keyId, identity, binding, bindingClaim, ctx)
+      .finally(() => this.recoveryInFlight.delete(inFlightKey));
+    this.recoveryInFlight.set(inFlightKey, p);
     return p;
   }
 
@@ -533,30 +1603,62 @@ export class SessionStore {
     keyId: string,
     identity: SessionIdentity,
     binding: SessionBinding,
+    bindingClaim: RawSessionClaim,
     ctx: RecoveryContext,
   ): Promise<SessionInitState | undefined> {
-    // Step 4.1: user mismatch → invalidate binding
-    if (binding.userId && identity.userId && binding.userId !== identity.userId) {
-      console.log(`[session-recover] ${keyId} user mismatch (bound=${binding.userId}, current=${identity.userId}), invalidating`);
-      await this.bindingRepo?.deleteBinding(spaceOf(identity), identity.sessionId);
-      return undefined;
+    // Step 4.1: never rebuild a binding under a conflicting caller identity.
+    let claimed = this.previewIdentityClaim(keyId, identity);
+    if (!bindingMatchesIdentity(binding, claimed)) {
+      throw new SessionIdentityConflictError();
+    }
+    claimed = this.claimIdentity(
+      keyId,
+      identityClaimFromBinding(claimed, binding),
+      bindingClaim,
+    );
+
+    if (!claimed.teamId || !claimed.agentId) {
+      console.warn("[session-recover] incomplete identity, one-shot bypass");
+      return {
+        status: "initialized",
+        keyId: claimed.sessionId,
+        startedAt: Date.now(),
+        attemptCount: 0,
+        userId: claimed.userId,
+        bypassed: true,
+        sessionInfo: null,
+        agentDetail: null,
+        taskDetail: null,
+      };
     }
 
     if (!ctx.metadataClient) {
       // No client → can't recover, degrade to one-shot bypass
-      console.warn(`[session-recover] ${keyId} no metadataClient, one-shot bypass`);
+      console.warn("[session-recover] session=<redacted> no metadataClient, one-shot bypass");
       return {
-        status: "initialized", keyId, startedAt: Date.now(),
+        status: "initialized", keyId: claimed.sessionId, startedAt: Date.now(),
         attemptCount: 0, bypassed: true,
         sessionInfo: null, agentDetail: null, taskDetail: null,
       };
     }
 
     // Step 4.2: fetch details in parallel
+    const beforeMetadata = this.snapshotState(keyId);
     const [agentR, taskR] = await Promise.allSettled([
       binding.agentId ? ctx.metadataClient.getAgent(binding.agentId) : Promise.resolve(null),
       binding.taskId ? ctx.metadataClient.getTask(binding.taskId) : Promise.resolve(null),
     ]);
+    const stateAfterMetadata = this.stateAfterAwait(keyId, beforeMetadata, claimed);
+    if (stateAfterMetadata.changed) return stateAfterMetadata.state;
+    claimed = this.previewIdentityClaim(keyId, claimed);
+    if (!bindingMatchesIdentity(binding, claimed)) {
+      throw new SessionIdentityConflictError();
+    }
+    claimed = this.claimIdentity(
+      keyId,
+      identityClaimFromBinding(claimed, binding),
+      bindingClaim,
+    );
 
     const isNotFound = (e: unknown): boolean =>
       typeof e === "object" && e !== null && (e as { notFound?: boolean }).notFound === true;
@@ -575,7 +1677,7 @@ export class SessionStore {
           description: agentR.value.description ?? undefined,
           prompt: agentR.value.prompt ?? undefined,
         };
-      }
+      } else if (binding.agentId) agentNotFound = true;
     } else {
       if (isNotFound(agentR.reason)) agentNotFound = true;
       else anyKernelError = true;
@@ -587,7 +1689,7 @@ export class SessionStore {
           name: taskR.value.title,
           description: taskR.value.description ?? undefined,
         };
-      }
+      } else if (binding.taskId) taskNotFound = true;
     } else {
       if (isNotFound(taskR.reason)) taskNotFound = true;
       else anyKernelError = true;
@@ -595,75 +1697,70 @@ export class SessionStore {
 
     // Step 4.3: dispatch
     if (agentNotFound) {
-      console.log(`[session-recover] ${keyId} agent ${binding.agentId} not found, deleting binding`);
-      await this.bindingRepo?.deleteBinding(spaceOf(identity), identity.sessionId);
-      return undefined;
+      console.log("[session-recover] session=<redacted> agent not found, retaining identity without context");
+      agentDetail = null;
+      taskDetail = null;
     }
-    if (anyKernelError) {
-      console.warn(`[session-recover] ${keyId} kernel unavailable, one-shot bypass`);
+    if (anyKernelError && !agentNotFound && !taskNotFound) {
+      console.warn("[session-recover] session=<redacted> kernel unavailable, one-shot bypass");
       // Don't delete binding; return one-shot bypass to serve this request
       return {
-        status: "initialized", keyId, startedAt: Date.now(),
+        status: "initialized", keyId: claimed.sessionId, startedAt: Date.now(),
         attemptCount: 0, bypassed: true,
         sessionInfo: null, agentDetail: null, taskDetail: null,
       };
     }
     if (taskNotFound) {
-      console.log(`[session-recover] ${keyId} task ${binding.taskId} not found, keeping agent`);
-      // Update binding to drop taskId
-      await this.bindingRepo?.putBinding(
-        spaceOf(identity),
-        identity.sessionId,
-        { ...binding, taskId: undefined },
-      );
+      console.log("[session-recover] session=<redacted> task not found, retaining identity without task context");
       taskDetail = null;
     }
 
     // Step 4.4: construct rebuilt state
-    // user_key / space_id 从 binding 恢复(2 段拍平后 binding 里也存了),
-    // 让 bridge L2 fallthrough 恢复出的 SessionInfo 字段完整,memory-bridge
-    // 恢复 chat_memory 检索时不再降级为 self-only。
     const sessionInfo: SessionInfo = {
-      session_id: identity.sessionId,
-      user_id: binding.userId || identity.userId,
-      team_id: binding.teamId || "",
-      agent_id: binding.agentId || "",
-      task_id: taskDetail ? binding.taskId : undefined,
-      user_key: binding.userKey,
-      space_id: identity.spaceId,
+      session_id: claimed.sessionId,
+      user_id: binding.userId || claimed.userId,
+      team_id: binding.teamId || claimed.teamId || "",
+      agent_id: binding.agentId || claimed.agentId || "",
+      task_id: binding.taskId || claimed.taskId,
+      space_id: claimed.spaceId,
       created_at: new Date().toISOString(),
     };
 
     const rebuilt: SessionInitState = {
       status: "initialized",
-      keyId,
+      keyId: claimed.sessionId,
       startedAt: Date.now(),
       attemptCount: 0,
       bypassed: false,
       sessionInfo,
-      userId: binding.userId,
+      userId: claimed.userId,
       agentDetail,
       taskDetail,
+      ...(agentNotFound || taskNotFound ? { contextSuppressed: true } : {}),
     };
 
     // Step 4.5: write back to L1 + L2a
-    this.states.set(keyId, rebuilt);
+    this.commitState(keyId, rebuilt);
     // await write-through 与 SessionStore.set 保持一致契约（见其头注释）：
     // 让恢复出的 rebuilt 状态在返回前已落 L2a，避免同 session 后续轮次
     // 若又打到别的 pod 时再走一次 rebuildFromBinding 的开销。
     // 防御性 catch 见 `set()` 头注释。
     if (this.repo) {
+      const beforePersist = this.snapshotState(keyId);
+      let statePersisted = false;
       try {
-        await this.repo.upsert(spaceOf(identity), identity.userId, identity.agentSource, identity.sessionId, rebuilt);
-      } catch (err) {
-        console.warn(
-          `[session-recover] L2a upsert failed for ${keyId} during rebuild: ` +
-            (err instanceof Error ? err.message : String(err)),
-        );
+        statePersisted = await this.enqueuePersistence(keyId, () => this.repo!.upsert(
+          spaceOf(claimed), claimed.userId, claimed.agentSource, claimed.sessionId, rebuilt,
+        ));
+      } catch {
+        console.warn("[session-recover] L2a upsert failed during rebuild");
       }
+      const stateAfterPersist = this.stateAfterAwait(keyId, beforePersist, claimed);
+      if (stateAfterPersist.changed) return stateAfterPersist.state;
+      if (statePersisted) this.claimIdentity(keyId, claimed, "persisted");
     }
 
-    console.log(`[session-recover] ${keyId} rebuilt from binding (agent=${binding.agentId}, task=${binding.taskId ?? "-"})`);
+    console.log(`[session-recover] session=<redacted> rebuilt from binding agent=${binding.agentId ? "present" : "none"} task=${binding.taskId ? "present" : "none"}`);
 
     return rebuilt;
   }
@@ -682,50 +1779,16 @@ export class SessionStore {
     identity: SessionIdentity,
     ctx: RecoveryContext,
   ): Promise<SessionInitState | undefined> {
-    // Header-identity agents (e.g. Pi) carry identity in request headers, not
-    // interactive picker forms — so their history has no form markers and the
-    // scan below would unconditionally bypass them. When the caller already
-    // parsed a preset identity from headers, defer to handleSessionInit (the
-    // headerAutoSelect path) by returning undefined instead of bypassing.
-    if (ctx.presetIdentity) {
-      console.log(
-        `[session-recover] ${keyId} preset identity present → defer to handleSessionInit (skip history-scan)`,
-      );
-      return undefined;
-    }
     const messages = ctx.messages ?? [];
     if (messages.length === 0) return undefined;
 
-    // Count user messages and check for assistant/tool existence.
-    // dsh (deepseek-harness) 首帧 body 里塞 3 条**非用户输入**的 role=user 元数据:
-    //   - <system-reminder> 工作区指令
-    //   - "Current runtime context." 快照
-    //   - <available_skills> 列表
-    // 若原样计数 userCount>1 会把 dsh 首帧误判为"有历史",触发 markerless
-    // one-shot bypass,session-init form 永远不弹。这里跳过 dsh 元数据 user 消息,
-    // 只计"真用户输入"。见 docs/dsh-recon/2026-08-14-dsh-capture-analysis.md §2.3。
+    // Count user messages and check for assistant/tool existence
     let userCount = 0;
     let hasAssistantOrTool = false;
     for (const m of messages) {
       const role = (m.role as string) ?? "";
-      if (role === "assistant" || role === "tool") {
-        hasAssistantOrTool = true;
-        continue;
-      }
-      if (role !== "user") continue;
-      // dsh 元数据签名:content 是 str 且以已知锚点开头(dsh 内部固定文本)。
-      // 只在有明确签名时跳过,避免误伤客户端真用户输入。
-      const c = (m as { content?: unknown }).content;
-      if (typeof c === "string") {
-        if (
-          c.startsWith("<system-reminder>") ||
-          isDshRuntimeContextSnapshot(c) ||
-          c.startsWith("<system-reminder>\nA skill is a reusable")
-        ) {
-          continue;
-        }
-      }
-      userCount++;
+      if (role === "user") userCount++;
+      if (role === "assistant" || role === "tool") hasAssistantOrTool = true;
     }
 
     // Truly fresh: only one user message, no conversation yet
@@ -782,23 +1845,48 @@ export class SessionStore {
       }
     }
 
+    if (foundBypass && !foundAgentId) {
+      // User chose bypass: construct bypass state
+      const state: SessionInitState = {
+        status: "initialized",
+        keyId: identity.sessionId,
+        startedAt: Date.now(),
+        attemptCount: 0,
+        bypassed: true,
+        sessionInfo: null,
+        agentDetail: null,
+        taskDetail: null,
+      };
+      this.commitState(keyId, state);
+      console.log("[session-recover] session=<redacted> history scan → bypass (form found, no agent selected)");
+      return state;
+    }
+
     if (!foundAgentId) {
-      // 无论是"历史里选了否"还是"完全没有 form marker"，只要无法恢复 agent
-      // 身份就视为未初始化 → 返回 undefined 让上层走 session-init 弹表单。
-      // 与 mem:session-reset 语义对齐：session 未 initialized = 必须 init。
-      console.log(`[session-recover] ${keyId} history scan → no agent marker, treating as uninitialized`);
-      return undefined;
+      // Has history but can't extract anything → one-shot bypass, don't re-pop form
+      console.log("[session-recover] session=<redacted> history scan → one-shot bypass (conversation exists but no form markers found)");
+      const state: SessionInitState = {
+        status: "initialized",
+        keyId: identity.sessionId,
+        startedAt: Date.now(),
+        attemptCount: 0,
+        bypassed: true,
+        sessionInfo: null,
+        agentDetail: null,
+        taskDetail: null,
+      };
+      return state;
     }
 
     // Found agent_id in history — try kernel rebuild (same as L2b hit path)
-    console.log(`[session-recover] ${keyId} history scan → agent=${foundAgentId} found in form, attempting rebuild`);
+    console.log("[session-recover] session=<redacted> history scan → agent=present, attempting rebuild");
     const binding: SessionBinding = {
       outcome: "initialized",
       userId: identity.userId,
       agentId: foundAgentId,
       taskId: foundTaskId,
     };
-    return this.rebuildFromBinding(keyId, identity, binding, ctx);
+    return this.rebuildFromBinding(keyId, identity, binding, "exclusive", ctx);
   }
 }
 
@@ -810,11 +1898,8 @@ export function getSessionStore(): SessionStore {
     let repo: SessionRepo | undefined;
     try {
       repo = getSessionRepo();
-    } catch (err) {
-      console.warn(
-        "[session-db] session repo unavailable, running memory-only:",
-        err instanceof Error ? err.message : String(err),
-      );
+    } catch {
+      console.warn("[session-db] session repo unavailable, running memory-only");
     }
     _store = new SessionStore(DEFAULT_TTL_MS, repo);
     void _store.hydrateFromDb();

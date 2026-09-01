@@ -8,7 +8,6 @@
  */
 
 import type { Context } from "hono";
-import { createHash } from "node:crypto";
 import { writeLog, createPipeline } from "./logger.js";
 import {
   apiKeyToKeyId,
@@ -26,7 +25,6 @@ import { countHumanTurns } from "./turnSeq.js";
 import type { ProxyConfig } from "./types.js";
 import {
   resolveForwardTarget,
-  resolveSessionKey,
   resolveLatestUserQuery,
   reportAnalyzerTrace,
   type ForwardTarget,
@@ -53,19 +51,27 @@ import type { CcRequestKind } from "./common/cc-request-classifier.js";
 import { buildRequestDebugMetadata } from "./common/langfuse-debug.js";
 import { resolveAgentAdapter } from "./agent-adapters/index.js";
 import {
+  getAnthropicSourceBindingError,
+  isValidSessionId,
+  type AnthropicMessageSource,
+} from "./agent-adapters/anthropic-platform.js";
+import { resolveConversationId } from "./session/session-key.js";
+import {
   enforceRateLimit,
   isRateLimitExceededError,
   recordInputTokenUsage,
 } from "./rate-limit/guard.js";
-
-const SKIP_REQUEST_HEADERS = new Set([
-  "host",
-  "content-length",
-  "transfer-encoding",
-  "connection",
-  // 内部身份头只给 proxy/session-init 使用，不能透传给上游模型服务。
-  "x-tdai-user-key",
-]);
+import {
+  buildSafeUpstreamHeaders,
+  MissingUpstreamCredentialError,
+  sameOrigin,
+} from "./upstream-headers.js";
+import {
+  SessionContextUnavailableError,
+  SessionIdentityConflictError,
+  SessionStoreUnavailableError,
+  sessionStoreKey,
+} from "./session/store.js";
 
 const SKIP_RESPONSE_HEADERS = new Set([
   "content-encoding",
@@ -326,46 +332,40 @@ function buildUpstreamBody(
   return { body: sanitized.body, sanitizedCount: sanitized.removed };
 }
 
-/**
- * Build upstream headers from request headers + cost guard auth overrides.
- */
+/** Build upstream headers without letting an extension redirect configured credentials. */
 function buildUpstreamHeaders(
   c: Context,
-  _config: ProxyConfig,
   target: ForwardTarget,
-  sessionKey?: string,
+  credentialOrigin: string,
   effectiveApiKey?: string,
 ): Record<string, string> {
-  const headers: Record<string, string> = {};
-  for (const [k, v] of c.req.raw.headers.entries()) {
-    if (!SKIP_REQUEST_HEADERS.has(k.toLowerCase())) {
-      headers[k] = v;
-    }
-  }
-  headers["content-type"] = "application/json";
+  const originBoundApiKey = target.authHeaders === null
+    && sameOrigin(target.url, credentialOrigin)
+    ? effectiveApiKey
+    : undefined;
+  return buildSafeUpstreamHeaders(c.req.raw.headers, {
+    protocol: "anthropic",
+    apiKey: originBoundApiKey,
+    authHeaders: target.authHeaders,
+  });
+}
 
-  // `effectiveApiKey` is pre-resolved by the caller according to the
-  // per-agent fallback rule (see the resolveEffectiveApiKey call site).
-  //   - non-empty string → inject as server-side key, drop client's own
-  //   - empty/undefined  → passthrough: keep whatever the client sent
-  // The cost-guard extension can still fully override via target.authHeaders.
-  if (effectiveApiKey && !target.authHeaders) {
-    headers["x-api-key"] = effectiveApiKey;
-    delete headers["authorization"];
+function buildRetryUpstreamHeaders(
+  c: Context,
+  target: ForwardTarget,
+  primaryHeaders: Record<string, string>,
+): Record<string, string> | null {
+  if (!target.retryTarget) return null;
+  if (target.retryTarget.authHeaders !== null) {
+    return buildSafeUpstreamHeaders(c.req.raw.headers, {
+      protocol: "anthropic",
+      authHeaders: target.retryTarget.authHeaders,
+    });
   }
-
-  if (target.authHeaders) {
-    for (const [k, v] of Object.entries(target.authHeaders)) {
-      headers[k] = v;
-      if (k === "x-api-key") delete headers["authorization"];
-      if (k === "authorization") delete headers["x-api-key"];
-    }
+  if (sameOrigin(target.url, target.retryTarget.url)) {
+    return { ...primaryHeaders };
   }
-
-  if (sessionKey) {
-    headers["x-vertex-ai-session-id"] = sessionKey;
-  }
-  return headers;
+  throw new MissingUpstreamCredentialError();
 }
 
 /**
@@ -374,29 +374,20 @@ function buildUpstreamHeaders(
 async function forwardWithRetry(
   target: ForwardTarget,
   upstreamHeaders: Record<string, string>,
+  retryHeaders: Record<string, string> | null,
   upstreamBody: Record<string, unknown>,
   originalBody: Record<string, unknown>,
-  originalHeaders: Record<string, string>,
   pipe: ReturnType<typeof createPipeline>,
   forwardTimeoutMs: number,
-  sessionKeyForDebug?: string,
   rateLimitContext?: { config: ProxyConfig; instanceId?: string },
 ): Promise<{ resp: Response; retried: boolean }> {
   let upstreamResp: Response | undefined;
   let forwardFailed = false;
 
-  // ── Optional outbound body md5 debug log ───────────────────────────────
-  // 用于长稳观测：Anthropic KV cache 命中的必要条件是"从 body 头 → cache_control
-  // anchor 之前所有 bytes 完全一致"。所以要分开算三段 md5：
-  //   1. sysFullMd5    — md5(JSON.stringify(body.system))  全 system 序列化
-  //   2. sysStrMd5     — md5(body.system 拉平成字符串)    仅文本内容（对比用）
-  //   3. msgsPrefixMd5 — 找到 messages 里最后一个带 cache_control 的位置 N，
-  //                      md5(JSON.stringify(messages[0..N]))，即真正的 cache 前缀
-  //   4. msgsAnchorIdx — 上面那个 N（帮助定位命中长度）
-  //
-  // 任何一个 md5 变了都意味着 Anthropic 会 cache miss。
-  //
-  // 开启：PROXY_DEBUG_DUMP_OUTBOUND_MD5=1 node ...
+  // ── Optional outbound shape debug log ───────────────────────────────
+  // Legacy flag name retained for compatibility. Output contains only byte
+  // counts and the cache anchor index; it never emits a content-derived digest.
+  // Enable with PROXY_DEBUG_DUMP_OUTBOUND_MD5=1.
   if (process.env.PROXY_DEBUG_DUMP_OUTBOUND_MD5) {
     try {
       const sys = (upstreamBody as { system?: unknown }).system;
@@ -422,18 +413,14 @@ async function forwardWithRetry(
       const prefixEnd = anchorIdx >= 0 ? anchorIdx + 1 : msgs.length;
       const msgsPrefixStr = JSON.stringify(msgs.slice(0, prefixEnd));
 
-      const sysFullMd5 = createHash("md5").update(sysFullStr).digest("hex").slice(0, 12);
-      const sysTextMd5 = createHash("md5").update(sysTextStr).digest("hex").slice(0, 12);
-      const msgsPrefixMd5 = createHash("md5").update(msgsPrefixStr).digest("hex").slice(0, 12);
-
       // eslint-disable-next-line no-console
       console.log(
-        `[outbound-md5] session=${sessionKeyForDebug ?? "?"} sysBytes=${sysFullStr.length} sysFullMd5=${sysFullMd5} sysTextMd5=${sysTextMd5} msgsCount=${msgs.length} msgsAnchorIdx=${anchorIdx} msgsPrefixBytes=${msgsPrefixStr.length} msgsPrefixMd5=${msgsPrefixMd5}`,
+        `[outbound-summary] protocol=anthropic system_present=${sys !== undefined} sysBytes=${sysFullStr.length} sysTextBytes=${sysTextStr.length} msgsCount=${msgs.length} msgsAnchorIdx=${anchorIdx} msgsPrefixBytes=${msgsPrefixStr.length}`,
       );
-    } catch (e) {
+    } catch {
       // best-effort；不应因 debug 崩流程
       // eslint-disable-next-line no-console
-      console.log(`[outbound-md5] session=${sessionKeyForDebug ?? "?"} <error: ${(e as Error).message}>`);
+      console.log("[outbound-summary] protocol=anthropic failed");
     }
   }
 
@@ -450,6 +437,7 @@ async function forwardWithRetry(
       method: "POST",
       headers: upstreamHeaders,
       body: JSON.stringify(upstreamBody),
+      redirect: "manual",
       signal: AbortSignal.timeout(forwardTimeoutMs),
     });
   } catch (err: unknown) {
@@ -459,6 +447,12 @@ async function forwardWithRetry(
       pipe.error("FORWARD", err);
     }
     forwardFailed = true;
+  }
+
+  if (upstreamResp && upstreamResp.status >= 300 && upstreamResp.status < 400) {
+    pipe.forwardDone(upstreamResp.status);
+    pipe.error("FORWARD_REDIRECT", "Upstream redirect rejected");
+    throw new Error("Upstream redirect rejected");
   }
 
   if (upstreamResp) {
@@ -472,12 +466,6 @@ async function forwardWithRetry(
     const reason = forwardFailed ? "timeout/error" : `${upstreamResp!.status}`;
     pipe.info("RETRY", `Routed model failed (${reason}), retrying with ${target.retryTarget.model}`);
 
-    const retryHeaders: Record<string, string> = { ...originalHeaders };
-    retryHeaders["content-type"] = "application/json";
-    if (sessionKeyForDebug) {
-      retryHeaders["x-vertex-ai-session-id"] = sessionKeyForDebug;
-    }
-
     try {
       if (rateLimitContext) {
         await enforceRateLimit({
@@ -489,10 +477,14 @@ async function forwardWithRetry(
       }
       upstreamResp = await fetch(target.retryTarget.url, {
         method: "POST",
-        headers: retryHeaders,
+        headers: retryHeaders!,
         body: JSON.stringify(originalBody),
+        redirect: "manual",
         signal: AbortSignal.timeout(forwardTimeoutMs),
       });
+      if (upstreamResp.status >= 300 && upstreamResp.status < 400) {
+        throw new Error("Upstream redirect rejected");
+      }
       if (upstreamResp.ok) {
         pipe.info("RETRY_SUCCESS", `Retry returned ${upstreamResp.status}`);
       } else {
@@ -525,7 +517,31 @@ async function forwardWithRetry(
 export async function handleAnthropicMessages(
   c: Context,
   config: ProxyConfig,
+  boundAgentSource?: AnthropicMessageSource,
 ): Promise<Response> {
+  // Platform and session identity are trust-boundary inputs. Validate them
+  // before auth, body parsing, storage/Core access, logging, or upstream fetch.
+  const sourceBindingError = getAnthropicSourceBindingError(c.req.path, boundAgentSource);
+  if (sourceBindingError === "unbound") {
+    return c.json(
+      { type: "error", error: { type: "not_found_error", message: "Unsupported Anthropic platform route" } },
+      404,
+    );
+  }
+  if (sourceBindingError === "conflict") {
+    return c.json(
+      { type: "error", error: { type: "invalid_request_error", message: "Platform route binding mismatch" } },
+      400,
+    );
+  }
+  const conversationId = resolveConversationId(c);
+  if (!conversationId || !isValidSessionId(conversationId)) {
+    return c.json(
+      { type: "error", error: { type: "invalid_request_error", message: "A valid session identifier is required" } },
+      400,
+    );
+  }
+  const agentSource = boundAgentSource!;
   const startTime = new Date().toISOString();
   const traceId = uuidv7();
 
@@ -559,13 +575,12 @@ export async function handleAnthropicMessages(
   //
   // 关闭 ccRequestRouting.enabled 时强制视为 main，走完全等价现状的老链路。
   // 详见 docs/design/2026-07-30-cc-request-routing-plan.md
-  const _pathPartsEarly = c.req.path.split("/").filter(Boolean);
-  const _agentFromPathEarly = _pathPartsEarly[0]
-    && !["v1", "proxy", "skill-bridge", "memory-bridge"].includes(_pathPartsEarly[0])
-    ? _pathPartsEarly[0] : undefined;
-  const agentAdapter = resolveAgentAdapter(_agentFromPathEarly ?? "claude-code");
+  const agentAdapter = resolveAgentAdapter(agentSource);
   const ccRoutingEnabled = config.ccRequestRouting?.enabled === true;
-  const requestKind: CcRequestKind = ccRoutingEnabled ? agentAdapter.classifyRequest(body) : "main";
+  const classifiedRequestKind = ccRoutingEnabled ? agentAdapter.classifyRequest(body) : "main";
+  const requestKind: CcRequestKind = classifiedRequestKind === "auxiliary"
+    ? "main"
+    : classifiedRequestKind;
 
   // ── Model gate: reject requests whose `model` is not a registered display name ──
   // 价目表已配置时，客户端 `model` 必须匹配某条 entry 的 `modelName`（展示名，
@@ -573,8 +588,8 @@ export async function handleAnthropicMessages(
   // 400，避免请求转发成功却因无定价而漏计费。价目表为空时跳过（向后兼容）。
   //
   // 内部/外部用户一视同仁 —— internal callers must also request by
-  // `modelName`, ensuring upstream ids and billing/observability keys align
-  // across all traffic.
+  // `modelName`, keeping upstream IDs and in-process pricing lookup aligned.
+  // Privacy-safe telemetry exports do not retain the model identity.
   const requestedModel = typeof body.model === "string" ? body.model : "unknown";
   if (!isModelInPricing(config.creditPricing, requestedModel)) {
     return c.json(
@@ -620,10 +635,7 @@ export async function handleAnthropicMessages(
   let hasTools = Array.isArray(body.tools) && body.tools.length > 0;
 
   // ── Resolve agent source from URL path (e.g. /claude-code/v1/messages) ──
-  const pathParts = c.req.path.split("/").filter(Boolean);
-  const agentFromPath = pathParts[0] && !["v1", "proxy", "skill-bridge", "memory-bridge"].includes(pathParts[0])
-    ? pathParts[0] : undefined;
-  const agentSource = agentFromPath ?? "claude-code";
+  const agentFromPath = agentSource;
 
   // ── Identity inspection ──────────────────────────────────────────────────
   const reqHeaders: Record<string, string> = {};
@@ -643,9 +655,7 @@ export async function handleAnthropicMessages(
   }
 
 // ── Session key: prefer conversation header, fallback to agent profile ───────────
-  const { resolveConversationId } = await import("./session/session-key.js");
-  const conversationId = resolveConversationId(c);
-  const sessionKey = conversationId ?? resolveSessionKey(config, lcHeaders, c.req.path, body, keyId);
+  const sessionKey = conversationId;
 
   // ── Auth verification (user_key → user_id) ──────────────────────────────────────
   // Reuse the early verify result — it ran before body parse to decide the
@@ -678,7 +688,12 @@ export async function handleAnthropicMessages(
       if (memCmd && isMemCommandAllowed(config.memCommand, memCmd.command)) {
         const { getSessionStore } = await import("./session/store.js");
         const store = getSessionStore();
-        const compositeKey = `${agentSource}:${sessionKey}`;
+        const compositeKey = sessionStoreKey({
+          userId: userId || "anonymous",
+          agentSource,
+          sessionId: sessionKey,
+          spaceId,
+        });
         store.bind(compositeKey, { userId: userId || "anonymous", agentSource, sessionId: sessionKey, spaceId });
 
         // ── 强制归档旧 agent 的 skill buffer（best-effort）──
@@ -700,9 +715,9 @@ export async function handleAnthropicMessages(
                 },
                 { serviceId: si.space_id },
               ).then((res) => {
-                console.log(`[session-reset] force-archive old buffer: status=${res.status} session=${sessionKey} agent=${si.agent_id}`);
-              }).catch((err) => {
-                console.warn(`[session-reset] force-archive failed (best-effort): ${err instanceof Error ? err.message : String(err)}`);
+                console.log(`[session-reset] force-archive completed status=${res.status}`);
+              }).catch(() => {
+                console.warn("[session-reset] force-archive failed category=upstream_error");
               });
             }).catch(() => {});
           }
@@ -711,7 +726,7 @@ export async function handleAnthropicMessages(
         const resetEpoch = Date.now();
         await store.set(compositeKey, { status: "uninitialized", keyId: sessionKey, startedAt: resetEpoch, attemptCount: 0, userId: userId || "anonymous", resetEpoch, resetFlow: true });
         const bindingRepo = store.getBindingRepo();
-        if (bindingRepo) await bindingRepo.deleteBinding(spaceId, sessionKey).catch(() => {});
+        if (bindingRepo) await bindingRepo.deleteBinding(spaceId, userId || "anonymous", agentSource, sessionKey).catch(() => {});
         _isSessionResetFlow = true;
         console.log(`[mem-command:pre] session-reset session=${sessionKey} → falling through to pop form`);
       }
@@ -724,11 +739,29 @@ export async function handleAnthropicMessages(
   let injectedSkipped = !conversationId;
   let sessionJustRegistered = false;
   let _resetFlowResult: { agentName: string; agentIdShort: string; teamId: string; taskName?: string | null; bypassed?: boolean } | null = null;
-  console.log(`[injection-debug] conversationId=${conversationId} sessionKey=${sessionKey} userId=${userId} agentSource=${agentSource} sessionInitEnabled=${config.sessionInit?.enabled} injectionEnabled=${config.injection?.enabled} injectors=${JSON.stringify(config.injection?.injectors)} injectedSkipped=${injectedSkipped}`);
+  console.log(`[injection-debug] request identity=${conversationId ? "present" : "none"} user=${userId ? "present" : "none"} agentSource=${agentSource} sessionInitEnabled=${config.sessionInit?.enabled} injectionEnabled=${config.injection?.enabled} injectorCount=${config.injection?.injectors?.length ?? 0} injectedSkipped=${injectedSkipped}`);
   // CC 分流：SIDEQUERY 完全跳过 session-init（独立小请求无对话概念）。
   //          FORK 允许走 L2b recovery 复用 MAIN 已建的 session，但不进 form 交互路径
   //          （借用 MAIN 的 sessionInfo，见下方的 kind === 'fork' 分支保护）。
   const skipSessionInit = requestKind === "sidequery";
+  if (config.sessionInit?.enabled && conversationId && skipSessionInit) {
+    try {
+      const { getSessionStore } = await import("./session/store.js");
+      const sidequeryIdentity = {
+        userId: userId || "anonymous",
+        agentSource,
+        sessionId: sessionKey,
+        spaceId,
+      };
+      getSessionStore().bind(sessionStoreKey(sidequeryIdentity), sidequeryIdentity);
+    } catch (err) {
+      if (err instanceof SessionIdentityConflictError) {
+        return c.json({ error: "session_identity_conflict" }, 403);
+      }
+      console.error("[session-init] failed category=unexpected_error protocol=anthropic kind=sidequery");
+      return c.json({ error: "session_store_unavailable" }, 503);
+    }
+  }
   if (config.sessionInit?.enabled && conversationId && !skipSessionInit) {
     try {
       const { getSessionStore, handleSessionInit, parsePresetIdentity } = await import("./session/index.js");
@@ -738,7 +771,6 @@ export async function handleAnthropicMessages(
       const presetIdentity = parsePresetIdentity(config.sessionInit, lcHeaders);
 
       // ── Session Recovery: try L2b binding before falling into session-init form ──
-      const compositeKey = `${agentSource}:${sessionKey}`;
       // Identity for repo/binding writes. userId 缺失时 fallback 到 `anonymous`
       // 复合键，保证 key path 分段合法（参见 §4.4 边界处理）。
       const identity = {
@@ -746,12 +778,20 @@ export async function handleAnthropicMessages(
         agentSource,
         sessionId: sessionKey,
         spaceId,
+        teamId: presetIdentity?.teamId,
+        agentId: presetIdentity?.agentId,
+        taskId: presetIdentity?.taskId,
       };
+      const compositeKey = sessionStoreKey(identity);
       const recovered = await store.getOrRecover(compositeKey, identity, {
         metadataClient,
         messages: body.messages as Array<Record<string, unknown>> ?? [],
         presetIdentity,
       });
+      if (recovered?.contextSuppressed) {
+        console.warn("[session-init] request rejected reason=context_unavailable protocol=anthropic");
+        return c.json({ error: "session_context_unavailable" }, 409);
+      }
 
       let initResult: Awaited<ReturnType<typeof handleSessionInit>>;
       // Only treat the session as "recovered" when it's in a terminal state
@@ -806,7 +846,7 @@ export async function handleAnthropicMessages(
         // FORK 借用 MAIN 已建的 session。L2b 未命中说明 MAIN 尚未完成 init —— 罕见情况，
         // 保守起见让 fork 请求走 no-op（不 intercept、不改 messages），让上游收到原样请求。
         // 这样最坏结果 = MAIN 那次拿不到 sessionInfo（等效关掉 session-init），不会更糟。
-        console.log(`[session-init:cc:fork] session=${compositeKey} L2b miss on fork request → passthrough`);
+        console.log("[session-init:cc:fork] session=<redacted> L2b miss on fork request → passthrough");
         initResult = { intercepted: false, messages: body.messages as Record<string, unknown>[] };
       } else {
         wentThroughSessionInitStateMachine = true;
@@ -829,7 +869,7 @@ export async function handleAnthropicMessages(
         return initResult.response;
       }
 
-      console.log(`[injection-debug] initResult session=${sessionKey} intercepted=${initResult.intercepted} bypassed=${initResult.bypassed} justRegistered=${initResult.justRegistered} resetFlow=${initResult.resetFlow} hasSessionInfo=${!!initResult.sessionInfo} hasAgentDetail=${!!initResult.agentDetail}`);
+      console.log(`[injection-debug] initResult session=<redacted> intercepted=${initResult.intercepted} bypassed=${initResult.bypassed} justRegistered=${initResult.justRegistered} resetFlow=${initResult.resetFlow} hasSessionInfo=${!!initResult.sessionInfo} hasAgentDetail=${!!initResult.agentDetail}`);
       // sessionJustRegistered 用于 mem-command 的 checkFirst fallback（session init 最后
       // 一步"pending_task_select → initialized"那一 turn，把用户最开始的 mem: 命令补执行）。
       // **关键**：只在真正走 handleSessionInit state machine 的分支才继承 justRegistered；
@@ -858,9 +898,9 @@ export async function handleAnthropicMessages(
             userKey: callerUserKey,
             timeoutMs: config.tdai.memory.timeoutMs,
           });
-          console.log(`[asset-capability] user=${(initResult.sessionInfo as { user_id?: string }).user_id ?? "-"} flags=${JSON.stringify(assetCapabilities)}`);
-        } catch (err) {
-          console.warn(`[asset-capability] resolve failed: ${err instanceof Error ? err.message : String(err)}`);
+          console.log("[asset-capability] resolved user=present");
+        } catch {
+          console.warn("[asset-capability] resolve failed");
         }
       }
 
@@ -877,13 +917,10 @@ export async function handleAnthropicMessages(
           }
           if (peek && isMemCommandAllowed(config.memCommand, peek.command)) {
             memCommandPending = true;
-            console.log(`[hook-cache] prewarm skipped: mem-command pending (cmd=${peek.command}) session=${sessionKey}`);
+            console.log("[hook-cache] prewarm skipped reason=mem_command_pending");
           }
-        } catch (err) {
-          console.warn(
-            "[mem-command] pre-prewarm peek failed (anthropic):",
-            err instanceof Error ? err.message : String(err),
-          );
+        } catch {
+          console.warn("[mem-command] pre-prewarm peek failed category=unexpected_error protocol=anthropic");
         }
       }
 
@@ -918,11 +955,8 @@ export async function handleAnthropicMessages(
             // 透传 caller 的 sk-mem key，用于 prewarm 阶段 TDAI ACL 校验（x-tdai-user-key）
             callerUserKey: callerUserKey ?? undefined,
           }, { clearBefore: true });
-        } catch (err) {
-          console.warn(
-            "[hook-cache] handler prewarm error (anthropic):",
-            err instanceof Error ? err.message : String(err),
-          );
+        } catch {
+          console.warn("[hook-cache] handler prewarm failed category=unexpected_error protocol=anthropic");
           // Don't re-throw: the pipeline's resolveHookBlocks has its own
           // cache-miss → execute() fallback as a safety net (see pipeline.ts).
         }
@@ -963,9 +997,18 @@ export async function handleAnthropicMessages(
         };
       }
     } catch (err: unknown) {
-      console.error("[session-init] Error in handleSessionInit (anthropic):", err instanceof Error ? err.message : String(err));
-      sessionInfo = undefined;
-      injectedSkipped = true;
+      if (err instanceof SessionIdentityConflictError) {
+        return c.json({ error: "session_identity_conflict" }, 403);
+      }
+      if (err instanceof SessionContextUnavailableError) {
+        return c.json({ error: "session_context_unavailable" }, 409);
+      }
+      if (err instanceof SessionStoreUnavailableError) {
+        console.error("[session-init] failed category=store_unavailable protocol=anthropic");
+        return c.json({ error: "session_store_unavailable" }, 503);
+      }
+      console.error("[session-init] failed category=unexpected_error protocol=anthropic");
+      return c.json({ error: "session_store_unavailable" }, 503);
     }
   }
 
@@ -1013,7 +1056,7 @@ export async function handleAnthropicMessages(
   // CC 分流：FORK/SIDEQUERY 是 CC 客户端内部构造的请求，last_user 不会以 `mem:` 开头，
   //          且伪造响应会破坏 fork 请求依赖 MAIN 的 cache 假设。跳过拦截。
   if (config.memCommand?.enabled && requestKind === "main") {
-    const { parseMemCommand, isMemCommandAllowed, executeMemCommand, buildMemResponse, extractSimpleMessages, truncateArgs } = await import("./mem-command/index.js");
+    const { parseMemCommand, isMemCommandAllowed, executeMemCommand, buildMemResponse, extractSimpleMessages } = await import("./mem-command/index.js");
     // 常规检测：最后一条 user message
     let memCmd = parseMemCommand(body as Record<string, unknown>, agentSource);
     // session init 状态机在本 turn 完成终态（初始化 or bypass）时，最后一条
@@ -1039,7 +1082,7 @@ export async function handleAnthropicMessages(
           requestId: `mem-cmd-${Date.now()}`,
           thinking: thinkingEnabled,
         });
-        console.log(`[mem-command] cmd=${memCmd.command} args="${truncateArgs(memCmd.args)}" session=${sessionKey} blocked: session not initialized`);
+        console.log("[mem-command] blocked session=<redacted> reason=session_not_initialized");
         return errResponse;
       }
       // 检测请求是否开启了 extended thinking（Anthropic 协议）
@@ -1061,6 +1104,11 @@ export async function handleAnthropicMessages(
         bodyMessages: extractSimpleMessages((body as Record<string, unknown>).messages),
       });
 
+      if (!memResult.success) {
+        console.log("[mem-command] completed session=<redacted> success=false");
+        return memResult.response;
+      }
+
       // Step 20: L0 写入 — 保证对话时间线完整。
       //   同步 await 保证 L0 落盘再返回，避免响应先返回后进程未 flush 就退出丢失。
       //   注意：只有 mem 命令时全网只有这一次落盘，跟主对话路径不同（那边有 SIGTERM
@@ -1076,8 +1124,8 @@ export async function handleAnthropicMessages(
         const userMsg = { role: "user" as const, content: memCmd.rawMessage };
         try {
           await recordTdaiTurn(tdaiClientForMem, tdaiIdentityForMem, userMsg, memResult.messageText);
-        } catch (err: unknown) {
-          console.error("[mem-command] L0 write error:", err);
+        } catch {
+          console.error("[mem-command] L0 write failed");
         }
       }
 
@@ -1101,19 +1149,19 @@ export async function handleAnthropicMessages(
             protocol: "anthropic",
             assetCapabilities,
           });
-        } catch (err: unknown) {
-          console.warn("[mem-command] skill extract trigger error:", err instanceof Error ? err.message : String(err));
+        } catch {
+          console.warn("[mem-command] skill extract trigger failed");
         }
       }
 
       // Step 18: observability
-      console.log(`[mem-command] cmd=${memCmd.command} args="${truncateArgs(memCmd.args)}" session=${sessionKey} success=${memResult.success}`);
+      console.log(`[mem-command] completed session=<redacted> success=${memResult.success}`);
 
       // Step 17: Langfuse — 上报 mem-command 为一个 generation observation。
       //   mem 命令拦截在 Langfuse context 构造之前 (lf 在 L1088 才声明), 这里
       //   inline 计算 turnSeq → traceId, 保证该 turn 在 Langfuse 有完整 trace。
       const memTurnSeq = countHumanTurns(messages, "anthropic");
-      const memTraceId = langfuseTurnTraceId(sessionKey, memTurnSeq);
+      const memTraceId = langfuseTurnTraceId(traceId);
       langfuseReportGeneration({
         traceId: memTraceId,
         name: "memory-proxy",
@@ -1160,7 +1208,12 @@ export async function handleAnthropicMessages(
   const skipInjection = requestKind === "sidequery";
   if (!injectedSkipped && !skipInjection && config.injection?.enabled && config.injection.injectors.length > 0) {
     try {
-      console.log(`[injection-debug] entering injection pipeline session=${sessionKey} turnSeq=${countHumanTurns(messages, "anthropic")} injectors=${config.injection.injectors} kind=${requestKind}`);
+      console.log("[injection-debug] entering_pipeline", {
+        turnSeq: countHumanTurns(messages, "anthropic"),
+        injectorCount: config.injection.injectors.length,
+        main: requestKind === "main",
+        fork: requestKind === "fork",
+      });
       const injectionTurnSeq = countHumanTurns(messages, "anthropic");
       const { getInjectionPipeline } = await import("./injection/index.js");
       const pipeline = getInjectionPipeline(config);
@@ -1184,11 +1237,11 @@ export async function handleAnthropicMessages(
       body = injectedBody;
       messages = Array.isArray(injectedBody.messages) ? injectedBody.messages : messages;
       hasTools = Array.isArray(body.tools) && body.tools.length > 0;
-    } catch (err: unknown) {
-      console.error("[injection] anthropic pipeline error:", err instanceof Error ? err.message : String(err));
+    } catch {
+      console.error("[injection] anthropic pipeline failed");
     }
   } else if (skipInjection) {
-    console.log(`[injection-debug] skipping injection for kind=sidequery session=${sessionKey}`);
+    console.log("[injection-debug] skipping injection for kind=sidequery session=<redacted>");
   }
 
   // ── Cost guard: resolve forward target (opaque — no routing logic here) ──
@@ -1206,8 +1259,8 @@ export async function handleAnthropicMessages(
   const forwardEndpoint = matchWhitelistEndpoint(c.req.path)?.upstreamEndpoint ?? "/messages";
   // Isolation key is user-namespaced (`${user}:${session}`) so two users that
   // share the same client session id can't contaminate each other's state /
-  // turn counting. ClickHouse keeps the raw session_key (it has its own
-  // user_id column); this composite is internal to the extension only.
+  // turn counting. ClickHouse writes fixed-redaction session/user columns;
+  // this composite remains in-process and is internal to the extension only.
   const target: ForwardTarget = await resolveForwardTarget(config, {
     keyId: `${keyId}:${sessionKey}`,
     messages,
@@ -1235,7 +1288,7 @@ export async function handleAnthropicMessages(
   if (target.logLine) pipe.info("COST_GUARD", target.logLine);
   if (target.logLineExtra) pipe.info("COST_GUARD_DETAIL", target.logLineExtra);
   if (ccRoutingEnabled) {
-    console.log(`[cc-routing] session=${sessionKey} kind=${requestKind} msgs=${messages.length}`);
+    console.log(`[cc-routing] session=<redacted> kind=${requestKind} msgs=${messages.length}`);
   }
 
 
@@ -1251,14 +1304,12 @@ export async function handleAnthropicMessages(
     `session:${sessionKey}`,
   ];
 
-  // ── Langfuse turn context: one trace = one turn (deterministic traceId) ──
-  // Same (sessionKey, turnSeq) across a turn's tool-loop requests → same trace.
-  // Prefer the extension's monotonic per-session turnSeq (survives context
-  // compaction); fall back to the stateless count when it's not tracked
-  // (extension disabled/unavailable, or no-tools auxiliary request).
+  // ── Langfuse request context: one random request trace per proxy call ─────
+  // turnSeq remains useful for in-process ordering, but privacy-safe export
+  // deliberately provides no deterministic cross-request/session grouping.
   const turnSeq = target.turnSeq > 0 ? target.turnSeq : countHumanTurns(messages, "anthropic");
   const lf: LangfuseTurnContext = {
-    traceId: langfuseTurnTraceId(sessionKey, turnSeq),
+    traceId: langfuseTurnTraceId(traceId),
     turnSeq,
     traceName: `${target.model} / ${keyId}`,
     userId: keyId,
@@ -1325,10 +1376,18 @@ export async function handleAnthropicMessages(
   // The presence of an entry (case b/c) is what cuts the global fallback —
   // this is the switch that lets one proxy serve mixed server-key / client-key
   // agents from a single config.
-  const effectiveApiKey = agentUpstreamEntry
-    ? (agentUpstreamEntry.apiKey ?? "")
-    : config.upstream.apiKey;
-  const upstreamHeaders = buildUpstreamHeaders(c, config, target, sessionKey, effectiveApiKey);
+  const effectiveApiKey = agentUpstreamEntry?.apiKey?.trim() || config.upstream.apiKey.trim();
+  let upstreamHeaders: Record<string, string>;
+  let retryHeaders: Record<string, string> | null;
+  try {
+    upstreamHeaders = buildUpstreamHeaders(c, target, defaultUpstreamUrl, effectiveApiKey);
+    retryHeaders = buildRetryUpstreamHeaders(c, target, upstreamHeaders);
+  } catch (err: unknown) {
+    if (err instanceof MissingUpstreamCredentialError) {
+      return c.json({ type: "error", error: { type: "api_error", message: err.message } }, 503);
+    }
+    throw err;
+  }
 
   // Optional private preparation stage. It rewrites `body` / `messages` in
   // place, so it has to land after every host-side mutation (injection, agent
@@ -1362,26 +1421,6 @@ export async function handleAnthropicMessages(
     );
   }
 
-  // Retry headers: preserve original client headers (x-request-id, user-agent,
-  // etc.), then force the primary upstream's auth — retry always goes to the
-  // default upstream (never the alternate route), so its apiKey must be applied
-  // just like the first-attempt path. Without this, retry sends the
-  // client's raw auth to tokenhub and gets 401.
-  const originalHeaders: Record<string, string> = {};
-  for (const [k, v] of c.req.raw.headers.entries()) {
-    if (!SKIP_REQUEST_HEADERS.has(k.toLowerCase())) {
-      originalHeaders[k] = v;
-    }
-  }
-  // Retry uses the same effective key as the primary path — same three
-  // cases as above. When it resolves to "" (agent entry present but no
-  // apiKey), retry also runs on the client's own key: preserves the
-  // "passthrough on this agent" intent even across retries.
-  if (effectiveApiKey) {
-    originalHeaders["x-api-key"] = effectiveApiKey;
-    delete originalHeaders["authorization"];
-  }
-
   const retryBody = sanitizeThinkingBlocks(body).body;
 
   // ── Forward to upstream (with automatic retry if configured) ──────────────
@@ -1392,10 +1431,9 @@ export async function handleAnthropicMessages(
 
   try {
     const result = await forwardWithRetry(
-      target, upstreamHeaders, upstreamBody,
-      retryBody, originalHeaders,
+      target, upstreamHeaders, retryHeaders, upstreamBody,
+      retryBody,
       pipe, forwardTimeoutMs,
-      sessionKey,
       { config, instanceId: spaceId || undefined },
     );
     upstreamResp = result.resp;
@@ -1668,7 +1706,7 @@ export async function handleAnthropicMessages(
       },
     });
 
-    // Langfuse: report this LLM call as a generation under the turn trace
+    // Langfuse: report this LLM call under the current request trace.
     // debug=true 时 output 用 assistantMessage 原生数组（含 tool_use / thinking /
     // 原生 stop_reason），非 debug 走原有 text 拼接节省存储。
     const langfuseOutput = langfuseDebug && assistantMessage
@@ -1731,7 +1769,7 @@ export async function handleAnthropicMessages(
   } else if (isMainDialog) {
     logExtractionSkipped(config, "skill", sessionKey);
   } else {
-    console.log(`[cc-routing] skip skill buffer for kind=${requestKind} session=${sessionKey}`);
+    console.log(`[cc-routing] skip skill buffer for kind=${requestKind} session=<redacted>`);
   }
 
   // TDAI L0 write (non-streaming).
@@ -1746,7 +1784,7 @@ export async function handleAnthropicMessages(
   } else if (isMainDialog && tdaiClient) {
     logExtractionSkipped(config, "tdai-memory", sessionKey);
   } else if (!isMainDialog) {
-    console.log(`[cc-routing] skip L0 write for kind=${requestKind} session=${sessionKey}`);
+    console.log(`[cc-routing] skip L0 write for kind=${requestKind} session=<redacted>`);
   }
 
   // Credit usage reporting (non-streaming). Failures are surfaced to the client
@@ -1918,7 +1956,7 @@ interface AnthropicTapContext {
   tdaiIdentity: TdaiIdentity | null;
   tdaiUserMessage: TdaiMessage | null;
   assetCapabilities?: import("./injection/types.js").AssetCapabilityFlags;
-  /** Langfuse turn-trace context (trace = one turn). */
+  /** Langfuse request-scoped trace context (historical type name retained). */
   lf: LangfuseTurnContext;
   /** Space/tenant ID from request path. */
   spaceId?: string;
@@ -2025,7 +2063,7 @@ function consumeAnthropicStream(stream: ReadableStream<Uint8Array>, ctx: Anthrop
           pipe.error("OPIK_SPAN", opikErr);
         }
 
-        // Langfuse: report this LLM call as a generation under the turn trace
+        // Langfuse: report this LLM call under the current request trace.
         // 流式无完整原生 assistant content 数组可用（tool_use 块在 SSE 里是分片
         // 增量事件），debug 时把 tool_use_count 与 stop_reason 塞进 metadata 兜底。
         try {
@@ -2082,7 +2120,7 @@ function consumeAnthropicStream(stream: ReadableStream<Uint8Array>, ctx: Anthrop
       } else if (isMainDialog && ctx.tdaiClient) {
         logExtractionSkipped(ctx.config, "tdai-memory", ctx.sessionKeyForSkill);
       } else if (!isMainDialog) {
-        console.log(`[cc-routing] skip L0 write (stream) for kind=${ctx.requestKind} session=${ctx.sessionKeyForSkill}`);
+        console.log(`[cc-routing] skip L0 write (stream) for kind=${ctx.requestKind} session=<redacted>`);
       }
 
       pipe.streamDone(Object.keys(usage).length > 0 ? usage : null);
@@ -2147,7 +2185,7 @@ function consumeAnthropicStream(stream: ReadableStream<Uint8Array>, ctx: Anthrop
       } else if (isMainDialog) {
         logExtractionSkipped(ctx.config, "skill", ctx.sessionKeyForSkill);
       } else {
-        console.log(`[cc-routing] skip skill buffer (stream) for kind=${ctx.requestKind} session=${ctx.sessionKeyForSkill}`);
+        console.log(`[cc-routing] skip skill buffer (stream) for kind=${ctx.requestKind} session=<redacted>`);
       }
 
       // Credit usage reporting for streaming responses. The stream has already

@@ -13,9 +13,19 @@
 
 import { appendFile, mkdir } from "node:fs/promises";
 import { resolve, dirname } from "node:path";
-import type { LogEntry, ProxyConfig } from "./types.js";
+import type {
+  AnalyzerUsageLogEntry,
+  LogEntry,
+  ProxyConfig,
+  UsageLogEntry,
+} from "./types.js";
 import { log } from "./report/log.js";
 import { writeClickHouse } from "./clickhouse.js";
+import {
+  privacySafeSessionId,
+  privacySafeText,
+  privacySafeUsage,
+} from "./telemetry-privacy.js";
 
 // ── JSONL file logger (usage events only) ─────────────────────────────────────
 
@@ -38,21 +48,62 @@ async function ensureDir(dir: string): Promise<void> {
 
 /** Append a single usage log entry as a JSON line. Fire-and-forget (no await needed). */
 export function writeLog(config: ProxyConfig, entry: LogEntry): void {
+  const common = {
+    timestamp: entry.timestamp,
+    event: entry.event,
+    modelId: privacySafeText(entry.modelId),
+    keyId: privacySafeText(entry.keyId),
+    ...(entry.sessionKey ? { sessionKey: privacySafeSessionId(entry.sessionKey) } : {}),
+    upstreamUrl: privacySafeText(entry.upstreamUrl),
+    stream: entry.stream,
+    ...(entry.routedFrom ? { routedFrom: privacySafeText(entry.routedFrom) } : {}),
+    ...(entry.upstreamRequestId
+      ? { upstreamRequestId: privacySafeText(entry.upstreamRequestId) }
+      : {}),
+  };
+  const safeEntry = entry.event === "request"
+    ? {
+        ...common,
+        ...(typeof entry.temperature === "number" && Number.isFinite(entry.temperature)
+          ? { temperature: entry.temperature }
+          : {}),
+        ...(typeof entry.maxTokens === "number" && Number.isFinite(entry.maxTokens)
+          ? { maxTokens: entry.maxTokens }
+          : {}),
+        ...(typeof entry.routingPercent === "number" && Number.isFinite(entry.routingPercent)
+          ? { routingPercent: entry.routingPercent }
+          : {}),
+      }
+    : {
+        ...common,
+        ...(typeof entry.turnSeq === "number" && Number.isFinite(entry.turnSeq)
+          ? { turnSeq: entry.turnSeq }
+          : {}),
+        ...(entry.event === "usage" && entry.userInput
+          ? { userInput: privacySafeText(entry.userInput) }
+          : {}),
+        usage: privacySafeUsage(entry.usage),
+        ...(entry.spaceId ? { spaceId: privacySafeText(entry.spaceId) } : {}),
+      };
+
   // ── ClickHouse async write (if enabled) ──────────────────────────────────
-    if (config.clickhouse.enabled && (entry.event === "usage" || entry.event === "analyzer_usage")) {
+  if (config.clickhouse.enabled && (entry.event === "usage" || entry.event === "analyzer_usage")) {
+    // Keep the typed business event intact for classification and cost math.
+    // ClickHouse mappers redact identity/content only when constructing rows.
+    const usageEntry = entry as UsageLogEntry | AnalyzerUsageLogEntry;
     writeClickHouse({
-      timestamp: entry.timestamp,
-      event: entry.event,
-      modelId: entry.modelId,
-      keyId: entry.keyId,
-      sessionKey: entry.sessionKey,
-      turnSeq: "turnSeq" in entry ? entry.turnSeq : undefined,
-      userInput: "userInput" in entry ? entry.userInput : undefined,
-      upstreamUrl: entry.upstreamUrl,
-      stream: entry.stream,
-      usage: entry.usage,
-      routedFrom: "routedFrom" in entry ? entry.routedFrom : undefined,
-      spaceId: "spaceId" in entry ? entry.spaceId : undefined,
+      timestamp: usageEntry.timestamp,
+      event: usageEntry.event,
+      modelId: usageEntry.modelId,
+      keyId: usageEntry.keyId,
+      sessionKey: usageEntry.sessionKey,
+      turnSeq: usageEntry.turnSeq,
+      userInput: "userInput" in usageEntry ? usageEntry.userInput : undefined,
+      upstreamUrl: usageEntry.upstreamUrl,
+      stream: usageEntry.stream,
+      usage: usageEntry.usage,
+      routedFrom: usageEntry.routedFrom,
+      spaceId: usageEntry.spaceId,
       upstreamRequestId:
         "upstreamRequestId" in entry ? entry.upstreamRequestId : undefined,
       extensionStats:
@@ -67,11 +118,11 @@ export function writeLog(config: ProxyConfig, entry: LogEntry): void {
   const logPath = getDailyLogPath(config.log.file);
   const dir = dirname(logPath);
 
-  const line = JSON.stringify(entry) + "\n";
+  const line = JSON.stringify(safeEntry) + "\n";
   ensureDir(dir)
     .then(() => appendFile(logPath, line, "utf-8"))
-    .catch((err: unknown) => {
-      log.error("usage_log.write_failed", { path: logPath }, err instanceof Error ? err : new Error(String(err)));
+    .catch(() => {
+      log.error("usage_log.write_failed", { backend: "jsonl" });
     });
 }
 
@@ -130,13 +181,47 @@ export interface Pipeline {
   summary(): void;
 }
 
+const SAFE_PIPELINE_STAGES = new Set([
+  "AUX_FORWARD",
+  "AUX_ENDPOINT",
+  "AUX_REDIRECT",
+  "AUX_ROUTE",
+  "CREDIT_REPORT",
+  "FORWARD",
+  "FORWARD_REDIRECT",
+  "LANGFUSE_SPAN",
+  "LOG_WRITE",
+  "NONSTREAM_THINKING_FIX",
+  "OPIK_SPAN",
+  "RATE_LIMIT",
+  "RETRY",
+  "RETRY_FAILED",
+  "RETRY_FORWARD",
+  "RETRY_SUCCESS",
+  "SSE_FIX",
+  "STREAM",
+  "STREAM_CONSUME",
+  "STREAM_FINALIZE",
+  "STREAM_TAP",
+  "STREAM_TIMEOUT",
+  "STREAM_TIMEOUT_COMPLETE",
+  "TDAI_L0",
+  "UPSTREAM_4xx",
+]);
+
+function privacySafePipelineStage(stage: string): string {
+  return SAFE_PIPELINE_STAGES.has(stage) ? stage : "OTHER";
+}
+
 export function createPipeline(
   config: ProxyConfig,
   requestId: string,
   modelId: string,
 ): Pipeline {
   const pipeStart = Date.now();
-  const tag = `[${requestId.slice(0, 8)}]`;
+  const tag = "[request]";
+  const requestIdPresent = requestId.length > 0;
+  const modelConfigured = modelId.length > 0;
   const stages: string[] = [];
   let forwardMs = 0;
   let forwardStartMs = 0;
@@ -150,14 +235,17 @@ export function createPipeline(
 
   return {
     requestReceived(msgCount, isStream) {
-      pipeLog("→ REQ", `model=${modelId} msgs=${msgCount} stream=${isStream}`);
+      pipeLog("→ REQ", `model_configured=${modelConfigured} msgs=${msgCount} stream=${isStream}`);
     },
 
     forwardStart(upstreamUrl?: string) {
       forwardStartMs = Date.now();
       const url = upstreamUrl ?? config.upstream.url;
-      log.debug("pipeline.forward.start", { requestId: tag, upstream: url });
-      pipeLog("  → FORWARD", `upstream=${url}`);
+      log.debug("pipeline.forward.start", {
+        requestIdPresent,
+        upstreamConfigured: url.length > 0,
+      });
+      pipeLog("  → FORWARD", `upstream_configured=${url.length > 0}`);
     },
 
     forwardDone(status) {
@@ -173,7 +261,7 @@ export function createPipeline(
     streamDone(usage) {
       const total = elapsed(pipeStart);
       if (usage) {
-        pipeLog("  ✓ STREAM", `usage: ${JSON.stringify(usage)}`);
+        pipeLog("  ✓ STREAM", `usage: ${JSON.stringify(privacySafeUsage(usage))}`);
       } else {
         pipeLog("  ✓ STREAM", "done (no usage extracted)");
       }
@@ -183,27 +271,32 @@ export function createPipeline(
     responseDone(usage) {
       const total = elapsed(pipeStart);
       if (usage) {
-        pipeLog("  ✓ RESP", `usage: ${JSON.stringify(usage)}`);
+        pipeLog("  ✓ RESP", `usage: ${JSON.stringify(privacySafeUsage(usage))}`);
       } else {
         pipeLog("  ✓ RESP", "done (no usage)");
       }
       pipeLog("← DONE", `total=${total}`);
     },
 
-    info(stage, detail) {
-      pipeLog(`  ℹ ${stage}`, detail);
+    info(stage, _detail) {
+      pipeLog(`  ℹ ${privacySafePipelineStage(stage)}`, "event");
     },
 
-    error(stage, err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      log.error("pipeline.error", { requestId: tag, stage, error: msg }, err instanceof Error ? err : new Error(msg));
-      pipeLog(`  ✗ ${stage}`, msg);
+    error(stage, _err) {
+      const safeStage = privacySafePipelineStage(stage);
+      log.error("pipeline.error", { requestIdPresent, stage: safeStage });
+      pipeLog(`  ✗ ${safeStage}`, "error");
     },
 
     summary() {
       const total = elapsed(pipeStart);
       const path = stages.join(" → ");
-      log.debug("pipeline.summary", { requestId: tag, stages: path, totalMs: Number(total.replace("s", "")) * 1000 || 0, forwardMs });
+      log.debug("pipeline.summary", {
+        requestIdPresent,
+        stages: path,
+        totalMs: Number(total.replace("s", "")) * 1000 || 0,
+        forwardMs,
+      });
       pipeLog("  SUMMARY", `path=[${path}] total=${total} forward=${forwardMs}ms`);
     },
   };

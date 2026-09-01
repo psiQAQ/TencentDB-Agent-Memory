@@ -20,13 +20,18 @@
 
 import type { MemCommandContext, MemCommandResult } from "../types.js";
 import { buildMemResponse } from "../response-builder.js";
-import { getSessionStore } from "../../session/store.js";
+import { getSessionStore, sessionStoreKey } from "../../session/store.js";
 import type { SessionInitState } from "../../session/types.js";
 
 export async function executeSessionReset(ctx: MemCommandContext): Promise<MemCommandResult> {
   const requestId = `mem-cmd-${Date.now()}`;
   const store = getSessionStore();
-  const compositeKey = `${ctx.agentSource}:${ctx.sessionKey}`;
+  const compositeKey = sessionStoreKey({
+    spaceId: ctx.spaceId,
+    userId: ctx.userId,
+    agentSource: ctx.agentSource,
+    sessionId: ctx.sessionKey,
+  });
 
   // 记录 old 状态用于观测(埋点在 Commit 4 追加,现在只在返回值 data 里带上)
   const before = store.get(compositeKey);
@@ -74,7 +79,7 @@ export async function executeSessionReset(ctx: MemCommandContext): Promise<MemCo
   const bindingRepo = store.getBindingRepo();
   if (bindingRepo) {
     try {
-      await bindingRepo.deleteBinding(ctx.spaceId, ctx.sessionKey);
+      await bindingRepo.deleteBinding(ctx.spaceId, ctx.userId, ctx.agentSource, ctx.sessionKey);
     } catch (err) {
       console.warn(
         `[mem-command:session-reset] deleteBinding failed for ${compositeKey}: ` +

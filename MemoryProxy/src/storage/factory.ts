@@ -176,7 +176,7 @@ export function getProxyStorage(config: StorageConfig): ProxyStorage {
     } catch (err) {
       _lastError = err instanceof Error ? err.message : String(err);
       // 装配失败也升级为 error（之前是 warn）
-      console.error(`${TAG} backend ${backend} init failed: ${_lastError}`);
+      console.error(`${TAG} backend=${backend} init failed category=storage_error`);
     }
   }
 
@@ -301,8 +301,8 @@ function startSweeperIfNeeded(storage: ProxyStorage, config: StorageConfig): voi
     try {
       // 只清 ttl bucket；nottl 永久保留（与 COS lifecycle rule 的语义一致）。
       (storage as SqliteStorage).sweep({ ttlMs });
-    } catch (err) {
-      console.warn(`${TAG} sweeper error: ${err instanceof Error ? err.message : String(err)}`);
+    } catch {
+      console.warn(`${TAG} sweeper failed category=storage_error`);
     }
   };
   _sweepTimer = setInterval(run, 5 * 60 * 1000);

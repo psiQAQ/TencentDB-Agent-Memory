@@ -14,24 +14,18 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/_lib.sh"
 
 load_env
-require_vars MEMORY_CORE_IMAGE MEMORY_CORE_PORT MEMORY_CORE_VOLUME
+require_vars \
+  MEMORY_CORE_IMAGE MEMORY_CORE_PORT MEMORY_CORE_VOLUME \
+  MEMORY_CORE_GATEWAY_API_KEY
 
 # ── Gateway 内部管理凭据 ─────────────────────────────────────────
-# 用 ${VAR-default}（不是 :-default）：允许 .env 里显式设为空字符串来关闭 Bearer gate。
-#
-# 当前 memory-core 的 Bearer gate 与 proxy auth 存在**已知不兼容**：proxy 调
-# /v3/meta/auth/verify 时不带 Bearer（源码遗漏，见 MemoryProxy/src/auth.ts），
-# 所以 proxy 启用 auth 时必须把 MEMORY_CORE_GATEWAY_API_KEY 留空。默认已置空。
-MEMORY_CORE_GATEWAY_API_KEY="${MEMORY_CORE_GATEWAY_API_KEY-}"
+# Core management endpoints are always protected. The same token is injected
+# into Proxy auth.serviceToken and its internal TDAI/Skill/Knowledge clients.
+MEMORY_CORE_GATEWAY_API_KEY="${MEMORY_CORE_GATEWAY_API_KEY:?}"
 MEMORY_CORE_ADMIN_USERNAME="${MEMORY_CORE_ADMIN_USERNAME:-admin}"
 
 # admin user_key 持久化位置（宿主机侧；volume 数据被清后需一并删掉此文件）
 ADMIN_KEY_FILE="${MEMORY_CORE_ADMIN_KEY_FILE:-$SCRIPT_DIR/.admin-key}"
-
-if [[ -n "$MEMORY_CORE_GATEWAY_API_KEY" ]]; then
-  warn "MEMORY_CORE_GATEWAY_API_KEY 非空 —— proxy 的 sessionInit/auth 目前会因缺 Bearer 而失败。"
-  warn "本地体验请把 .env 里的 MEMORY_CORE_GATEWAY_API_KEY 留空。"
-fi
 
 CONTAINER=tdai-memory-core
 NETWORK=tdai-memory-stack

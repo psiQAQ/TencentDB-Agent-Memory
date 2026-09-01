@@ -61,15 +61,18 @@ export function renderSkillToolsBlock(
   allowLlmWrite = true,
   sessionId?: string,
   spaceId?: string,
+  agentSource?: string,
 ): string {
   const base = proxyBaseUrl.replace(/\/$/, "");
   const bridge = `${base}/skill-bridge/v3/skill`;
 
-  // gateway 需要 `x-tdai-service-id: <spaceId>` 才放行；`x-conversation-id`
-  // 让 proxy 复用 session 里的身份 (user_id / team_id / agent_id)。
+  // Bridge authenticates every request before reading session state. The
+  // credential value remains in the client environment and is never cached.
+  const credentialHeader = ` -H "x-api-key: \${TDAI_MEMORY_USER_KEY:?TDAI_MEMORY_USER_KEY is required}"`;
   const sessionHeader = sessionId ? ` -H 'x-conversation-id: ${sessionId}'` : "";
   const tenantHeader = spaceId ? ` -H 'x-tdai-service-id: ${spaceId}'` : "";
-  const authHeader = `${tenantHeader}${sessionHeader}`;
+  const sourceHeader = agentSource ? ` -H 'x-tdai-agent-source: ${agentSource}'` : "";
+  const authHeader = `${credentialHeader}${tenantHeader}${sourceHeader}${sessionHeader}`;
 
   const readTools = [
     `  <tool name="skill_search">`,
@@ -163,7 +166,7 @@ export function renderSkillToolsBlock(
   return [
     "<skill_tools>",
     "以下是云端 skill 操作工具。**这些不是本地工具**，需要用 Bash 调用 curl 命中 proxy 的 skill-bridge 路径来执行。",
-    "proxy 会自动注入身份与鉴权（user_id / team_id / agent_id 由 session 决定），body 里你只需要传业务字段。",
+    "客户端必须在 TDAI_MEMORY_USER_KEY 环境变量中保持自己的 Memory user key。proxy 每次验证后再从该用户的 session 注入 user_id / team_id / agent_id，body 里你只需要传业务字段。",
     "",
     "调用模板：",
     `  curl -sSk -X POST <bridge>/<action> -H 'content-type: application/json'${authHeader} -d '{...业务字段...}'`,
@@ -210,14 +213,25 @@ export class SkillToolsInjector implements InjectionHook {
 
   async prewarm(input: PrewarmInput): Promise<ContextBlock[]> {
     if (input.assetCapabilities?.skill === false) return [];
-    return this.renderBlocks(undefined, input.sessionInfo.session_id, input.sessionInfo.space_id);
+    return this.renderBlocks(
+      undefined,
+      input.sessionInfo.session_id,
+      input.sessionInfo.space_id,
+      input.agentSource,
+    );
   }
 
-  private renderBlocks(ctx?: AgentContext, prewarmSessionId?: string, prewarmSpaceId?: string): ContextBlock[] {
+  private renderBlocks(
+    ctx?: AgentContext,
+    prewarmSessionId?: string,
+    prewarmSpaceId?: string,
+    prewarmAgentSource?: string,
+  ): ContextBlock[] {
     const allowLlmWrite = this.config.allowLlmWrite ?? false;
 
     let sessionId = prewarmSessionId;
     let spaceId = prewarmSpaceId;
+    let agentSource = prewarmAgentSource;
     if (ctx) {
       const custom = ctx.metadata.custom as Record<string, unknown> | undefined;
       const session = custom?.session as Record<string, unknown> | undefined;
@@ -229,9 +243,16 @@ export class SkillToolsInjector implements InjectionHook {
       if (typeof sp === "string" && sp.length > 0) {
         spaceId = sp;
       }
+      agentSource = ctx.metadata.agentSource;
     }
 
-    const content = renderSkillToolsBlock(this.config.proxyBaseUrl, allowLlmWrite, sessionId, spaceId);
+    const content = renderSkillToolsBlock(
+      this.config.proxyBaseUrl,
+      allowLlmWrite,
+      sessionId,
+      spaceId,
+      agentSource,
+    );
     return [{
       type: "text",
       content,

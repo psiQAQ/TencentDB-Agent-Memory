@@ -16,13 +16,47 @@
  *   ForwardTarget, ForwardTargetRequest
  */
 
-import type { ProxyConfig } from "./types.js";
+import type { AnalyzerUsageLogEntry, ProxyConfig } from "./types.js";
 import { log } from "./report/log.js";
 import { RedisSessionStore } from "./redis-session-store.js";
 import { matchWhitelistEndpoint } from "./routes/whitelist.js";
 import { opikCreateTrace, opikCreateLlmSpan, uuidv7 } from "./opik.js";
 import { langfuseReportGeneration } from "./langfuse.js";
 import { judgeAgentTurn, judgeUserTurn, readJudgeTransport } from "./judge-client.js";
+import { writeLog } from "./logger.js";
+
+/** Runtime trust boundary for opaque extension log events. */
+export function normalizeExtensionLogEvent(
+  event: Record<string, unknown>,
+): AnalyzerUsageLogEntry | null {
+  if (event.event !== "analyzer_usage") return null;
+  const parsedTimestamp = typeof event.timestamp === "string"
+    ? Date.parse(event.timestamp)
+    : Number.NaN;
+  const timestamp = Number.isFinite(parsedTimestamp)
+    ? new Date(parsedTimestamp).toISOString()
+    : new Date().toISOString();
+  const usage = event.usage && typeof event.usage === "object" && !Array.isArray(event.usage)
+    ? event.usage as Record<string, unknown>
+    : {};
+  const normalized: AnalyzerUsageLogEntry = {
+    timestamp,
+    event: "analyzer_usage",
+    modelId: typeof event.modelId === "string" ? event.modelId : "",
+    keyId: typeof event.keyId === "string" ? event.keyId : "",
+    upstreamUrl: typeof event.upstreamUrl === "string" ? event.upstreamUrl : "",
+    stream: false,
+    usage,
+  };
+  if (typeof event.sessionKey === "string") normalized.sessionKey = event.sessionKey;
+  if (typeof event.turnSeq === "number" && Number.isFinite(event.turnSeq)) {
+    normalized.turnSeq = Math.max(0, Math.trunc(event.turnSeq));
+  }
+  if (typeof event.routedFrom === "string") normalized.routedFrom = event.routedFrom;
+  if (typeof event.spaceId === "string") normalized.spaceId = event.spaceId;
+  if (typeof event.upstreamRequestId === "string") normalized.upstreamRequestId = event.upstreamRequestId;
+  return normalized;
+}
 
 // Optional Opik/Langfuse hooks — invoked only when the private extension is loaded
 // and produces telemetry. Kept out of the primary bridge flow to avoid coupling
@@ -146,13 +180,20 @@ let costGuardAvailable = false;
 // If the submodule is not initialized, we silently fall back to passthrough.
 // Use a variable to prevent TypeScript from statically resolving the module.
 const COST_GUARD_MODULE = "@context-proxy/cost-guard";
+
+export function isUsableCostGuardModule(mod: unknown): boolean {
+  return typeof (mod as { CostGuard?: unknown } | null)?.CostGuard === "function";
+}
+
 try {
   const mod = await import(/* @vite-ignore */ COST_GUARD_MODULE);
-  extensionModule = mod;
-  CostGuardClass = mod.CostGuard;
-  setDebugFn = mod.setAnalyzerDebug;
-  resolveAgentProfileFn = mod.resolveAgentProfile;
-  costGuardAvailable = true;
+  if (isUsableCostGuardModule(mod)) {
+    extensionModule = mod;
+    CostGuardClass = mod.CostGuard;
+    setDebugFn = mod.setAnalyzerDebug;
+    resolveAgentProfileFn = mod.resolveAgentProfile;
+    costGuardAvailable = true;
+  }
 } catch {
   // extension not available — passthrough mode
 }
@@ -298,6 +339,11 @@ function getCostGuard(config: ProxyConfig): unknown {
           input,
           tags: [report.reason as string],
         });
+      },
+
+      writeLogEvent: (event: Record<string, unknown>) => {
+        const normalized = normalizeExtensionLogEvent(event);
+        if (normalized) writeLog(config, normalized);
       },
 
     });

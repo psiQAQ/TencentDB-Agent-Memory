@@ -5,20 +5,23 @@
  *
  * 两种使用方式：
  *   1. 函数调用（mem:create-skill 内部用）— import forceArchiveSkill()
- *   2. HTTP 接口（面板前端用）— createSessionForceArchiveHandler() 注册路由
+ *   2. HTTP 路由保留，但在没有可信 user-scoped lookup 前始终 fail-closed
  */
 
 import type { Context } from "hono";
 import type { ProxyConfig } from "../types.js";
-import { getSessionStore } from "../session/store.js";
+import { getSessionStore, sessionStoreKey } from "../session/store.js";
 import { getCoreSkillClient } from "../skill/core-client.js";
 import type { SessionInitState } from "../session/types.js";
+import { adminAuthError, checkAdminAuth } from "./admin-auth.js";
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
 export interface ForceArchiveInput {
   sessionKey: string;
   agentSource: string;
+  /** Trusted user id already resolved by the main handler's key verification. */
+  userId: string;
   config: ProxyConfig;
   spaceId: string;
   reason?: string;
@@ -50,15 +53,15 @@ interface CoreForceArchiveResponse {
  * 从 SessionStore 取 sessionInfo → 调 CoreSkillClient.forceArchive() → 返回结果
  */
 export async function forceArchiveSkill(input: ForceArchiveInput): Promise<ForceArchiveResult> {
-  const { sessionKey, agentSource, config, spaceId, reason } = input;
+  const { sessionKey, agentSource, userId, config, spaceId, reason } = input;
 
   // 参数校验
-  if (!sessionKey) {
-    return { success: false, error: "session_key is required" };
+  if (!sessionKey || !userId || !spaceId) {
+    return { success: false, error: "trusted session identity is required" };
   }
 
   // 从 SessionStore 取 session 状态
-  const compositeKey = `${agentSource}:${sessionKey}`;
+  const compositeKey = sessionStoreKey({ userId, agentSource, sessionId: sessionKey, spaceId });
   const store = getSessionStore();
   const state: SessionInitState | undefined = store.get(compositeKey);
 
@@ -67,6 +70,15 @@ export async function forceArchiveSkill(input: ForceArchiveInput): Promise<Force
   }
 
   const sessionInfo = state.sessionInfo;
+  if (
+    sessionInfo.user_id !== userId
+    || (state.userId && state.userId !== userId)
+    || sessionInfo.session_id !== sessionKey
+    || (state.keyId && state.keyId !== sessionKey)
+    || sessionInfo.space_id !== spaceId
+  ) {
+    return { success: false, error: "Session identity mismatch" };
+  }
 
   // 调用 Core 接口
   try {
@@ -108,47 +120,27 @@ export async function forceArchiveSkill(input: ForceArchiveInput): Promise<Force
 // ── HTTP Handler ───────────────────────────────────────────────────────────
 
 /**
- * 创建 HTTP handler，注册到 server.ts。
+ * Admin auth can authenticate an operator but cannot safely select a
+ * user-scoped session. Keep the route fail-closed until such a lookup exists.
  */
 export function createSessionForceArchiveHandler(config: ProxyConfig) {
   return async (c: Context): Promise<Response> => {
-    let body: Record<string, unknown>;
-    try {
-      body = await c.req.json<Record<string, unknown>>();
-    } catch {
-      return c.json({ code: 40001, message: "Invalid JSON body", request_id: `force-archive-${Date.now()}` }, 400);
+    const adminKey = config.admin.apiKey.trim();
+    if (!adminKey) {
+      return c.json({
+        code: 50301,
+        message: "Session archive HTTP endpoint requires a configured admin credential",
+        request_id: `force-archive-${Date.now()}`,
+      }, 503);
     }
-
-    const sessionKey = typeof body.session_key === "string" ? body.session_key : "";
-    const agentSource = typeof body.agent_source === "string" ? body.agent_source : "claude-code";
-    const reason = typeof body.reason === "string" ? body.reason : undefined;
-    const spaceId = typeof body.space_id === "string" ? body.space_id : "";
-
-    const result = await forceArchiveSkill({
-      sessionKey,
-      agentSource,
-      config,
-      spaceId,
-      reason,
-    });
-
-    const requestId = `force-archive-${Date.now()}`;
-
-    if (!result.success) {
-      const status = result.error?.includes("not found") ? 404 : 500;
-      return c.json({ code: status === 404 ? 40401 : 50001, message: result.error, request_id: requestId }, status);
+    const authResult = checkAdminAuth(c, adminKey);
+    if (authResult !== "ok") {
+      return adminAuthError(c, authResult);
     }
-
     return c.json({
-      code: 0,
-      message: "ok",
-      request_id: requestId,
-      data: {
-        status: result.status,
-        task_id: result.taskId,
-        archive_key: result.archiveKey,
-        archived_at_ms: result.archivedAtMs,
-      },
-    });
+      code: 50101,
+      message: "Secure user-scoped session lookup is unavailable over HTTP; use the authenticated mem:create-skill command",
+      request_id: `force-archive-${Date.now()}`,
+    }, 501);
   };
 }

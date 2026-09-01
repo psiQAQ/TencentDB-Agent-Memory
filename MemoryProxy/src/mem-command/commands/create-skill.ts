@@ -15,6 +15,7 @@ export async function executeCreateSkill(ctx: MemCommandContext): Promise<MemCom
   const result = await forceArchiveSkill({
     sessionKey: ctx.sessionKey,
     agentSource: ctx.agentSource,
+    userId: ctx.userId,
     config: ctx.config,
     spaceId: ctx.spaceId,
     reason: ctx.args || undefined,

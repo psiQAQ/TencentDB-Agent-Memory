@@ -54,6 +54,16 @@ import { trackWrite, withL0Retry } from "./tdai/pending-writes.js";
 import type { TdaiIdentity, TdaiMessage } from "./tdai/types.js";
 import { triggerSkillExtractIfReady } from "./skill/handler-glue.js";
 import { isExtractionAllowed, logExtractionSkipped } from "./extraction-gate.js";
+import {
+  SessionContextUnavailableError,
+  SessionIdentityConflictError,
+  SessionStoreUnavailableError,
+} from "./session/store.js";
+import {
+  buildSafeUpstreamHeaders,
+  MissingUpstreamCredentialError,
+  sameOrigin,
+} from "./upstream-headers.js";
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
@@ -236,19 +246,15 @@ export function injectCodexAssets(
 function buildUpstreamHeaders(
   c: Context,
   config: ProxyConfig,
+  upstreamBase: string,
+  agentApiKey?: string,
 ): Record<string, string> {
-  const headers: Record<string, string> = {};
-  for (const [k, v] of c.req.raw.headers.entries()) {
-    if (!SKIP_REQUEST_HEADERS.has(k.toLowerCase())) {
-      headers[k] = v;
-    }
-  }
-  // Codex uses OpenAI protocol: inject Bearer token
-  if (config.upstream.apiKey) {
-    headers["authorization"] = `Bearer ${config.upstream.apiKey}`;
-    delete headers["x-api-key"];
-  }
-  return headers;
+  const apiKey = agentApiKey?.trim()
+    || (sameOrigin(upstreamBase, config.upstream.url) ? config.upstream.apiKey : "");
+  return buildSafeUpstreamHeaders(c.req.raw.headers, {
+    protocol: "openai",
+    apiKey,
+  });
 }
 
 function filterResponseHeaders(source: Headers): Headers {
@@ -320,7 +326,7 @@ export async function handleCodexEndpoint(
                   t?.name === "request_user_input",
     );
     if (rui) {
-      console.log("[codex-debug] request_user_input tool schema:", JSON.stringify(rui));
+      console.log("[codex-debug] request_user_input tool schema present");
     }
   } catch {}
 
@@ -360,7 +366,7 @@ export async function handleCodexEndpoint(
   const turnSeq = countHumanTurnsCodex(body.input);
   const userQuery = codexAdapter.extractUserText(body.input) ?? "";
   const lf: LangfuseTurnContext = {
-    traceId: langfuseTurnTraceId(sessionKey, turnSeq),
+    traceId: langfuseTurnTraceId(traceId),
     turnSeq,
     traceName: `${modelId} / ${keyId}`,
     userId: keyId,
@@ -401,9 +407,14 @@ export async function handleCodexEndpoint(
       const userText = codexAdapter.extractUserText(input) ?? "";
       const memCmd = parseCommandFromText(userText);
       if (memCmd && isMemCommandAllowed(config.memCommand, memCmd.command)) {
-        const { getSessionStore } = await import("./session/store.js");
+        const { getSessionStore, sessionStoreKey } = await import("./session/store.js");
         const store = getSessionStore();
-        const compositeKey = `${agentSource}:${sessionKey}`;
+        const compositeKey = sessionStoreKey({
+          userId: userId || "anonymous",
+          agentSource,
+          sessionId: sessionKey,
+          spaceId,
+        });
         store.bind(compositeKey, { userId: userId || "anonymous", agentSource, sessionId: sessionKey, spaceId });
 
         // ── 强制归档旧 agent 的 skill buffer（best-effort）──
@@ -425,9 +436,9 @@ export async function handleCodexEndpoint(
                 },
                 { serviceId: si.space_id },
               ).then((res) => {
-                console.log(`[session-reset] force-archive old buffer: status=${res.status} session=${sessionKey} agent=${si.agent_id}`);
-              }).catch((err) => {
-                console.warn(`[session-reset] force-archive failed (best-effort): ${err instanceof Error ? err.message : String(err)}`);
+                console.log(`[session-reset] force-archive status=${res.status} session=<redacted>`);
+              }).catch(() => {
+                console.warn("[session-reset] force-archive failed category=upstream_error");
               });
             }).catch(() => {});
           }
@@ -436,8 +447,8 @@ export async function handleCodexEndpoint(
         const resetEpoch = Date.now();
         await store.set(compositeKey, { status: "uninitialized", keyId: sessionKey, startedAt: resetEpoch, attemptCount: 0, userId: userId || "anonymous", resetEpoch, resetFlow: true });
         const bindingRepo = store.getBindingRepo();
-        if (bindingRepo) await bindingRepo.deleteBinding(spaceId, sessionKey).catch(() => {});
-        console.log(`[mem-command:pre] session-reset session=${sessionKey} → falling through to pop form`);
+        if (bindingRepo) await bindingRepo.deleteBinding(spaceId, userId || "anonymous", agentSource, sessionKey).catch(() => {});
+        console.log("[mem-command:pre] session-reset session=<redacted> action=show_form");
       }
     }
   }
@@ -511,11 +522,11 @@ export async function handleCodexEndpoint(
         // DEBUG: dump function_call_output raw text so we can tell whether the
         // client shows the form to the user (real answer) vs auto-fills (model-
         // generated answer). Also dump the extracted answers.
-        const rawOutputs = input
-          .filter((it: any) => it?.type === "function_call_output")
-          .map((it: any) => ({ call_id: it.call_id, output_preview: String(it.output ?? "").slice(0, 200) }));
-        if (rawOutputs.length > 0) {
-          console.log(`[codex-debug] session=${sessionKey} function_call_outputs=${JSON.stringify(rawOutputs)} synth_msgs=${JSON.stringify(synthesizedMessages).slice(0, 500)}`);
+        const functionOutputCount = input.filter(
+          (it: any) => it?.type === "function_call_output",
+        ).length;
+        if (functionOutputCount > 0) {
+          console.log(`[codex-debug] session=<redacted> function_call_outputs=${functionOutputCount} synthesized_messages=${synthesizedMessages.length}`);
         }
         initResult = await handleSessionInit(
           sessionKey,
@@ -591,7 +602,7 @@ export async function handleCodexEndpoint(
       if (initResult.justRegistered) sessionJustRegistered = true;
       if (initResult.bypassed) {
         injectionSkipped = true;
-        console.log(`[codex] session=${sessionKey} bypassed → skipping all injection`);
+        console.log("[codex] session=<redacted> bypassed=true injection=skipped");
         if (initResult.resetFlow) {
           _resetFlowResult = { agentName: "", agentIdShort: "", teamId: "", bypassed: true };
         }
@@ -610,8 +621,8 @@ export async function handleCodexEndpoint(
             userKey: callerUserKey,
             timeoutMs: config.tdai.memory.timeoutMs,
           });
-        } catch (err) {
-          console.warn(`[codex] asset-capability resolve failed: ${err instanceof Error ? err.message : String(err)}`);
+        } catch {
+          console.warn("[codex] asset-capability resolve failed category=upstream_error");
         }
       }
 
@@ -626,14 +637,11 @@ export async function handleCodexEndpoint(
             const peek = parseCommandFromText(userTextPeek);
             if (peek && isMemCommandAllowed(config.memCommand, peek.command)) {
               memCommandPending = true;
-              console.log(`[codex] prewarm skipped: mem-command pending (cmd=${peek.command}) session=${sessionKey}`);
+              console.log(`[codex] prewarm skipped reason=mem_command command=${peek.command} session=<redacted>`);
             }
           }
-        } catch (err) {
-          console.warn(
-            "[codex] pre-prewarm peek failed:",
-            err instanceof Error ? err.message : String(err),
-          );
+        } catch {
+          console.warn("[codex] pre-prewarm peek failed category=parse_error");
         }
       }
 
@@ -659,8 +667,8 @@ export async function handleCodexEndpoint(
             assetCapabilities,
             callerUserKey: callerUserKey ?? undefined,
           }, { clearBefore: true });
-        } catch (err) {
-          console.warn("[codex] prewarm error:", err instanceof Error ? err.message : String(err));
+        } catch {
+          console.warn("[codex] prewarm failed category=upstream_error");
         }
       }
 
@@ -686,9 +694,18 @@ export async function handleCodexEndpoint(
         };
       }
     } catch (err: unknown) {
-      console.error("[codex] session-init error:", err instanceof Error ? err.message : String(err));
-      sessionInfo = undefined;
-      injectionSkipped = true;
+      if (err instanceof SessionIdentityConflictError) {
+        return c.json({ error: "session_identity_conflict" }, 403);
+      }
+      if (err instanceof SessionContextUnavailableError) {
+        return c.json({ error: "session_context_unavailable" }, 409);
+      }
+      if (err instanceof SessionStoreUnavailableError) {
+        console.error("[session-init] failed category=store_unavailable protocol=responses source=codex");
+        return c.json({ error: "session_store_unavailable" }, 503);
+      }
+      console.error("[session-init] failed category=unexpected_error protocol=responses source=codex");
+      return c.json({ error: "session_store_unavailable" }, 503);
     }
   }
 
@@ -709,7 +726,7 @@ export async function handleCodexEndpoint(
     const text = (lines as string[]).join("\n");
 
     const { buildMemResponse } = await import("./mem-command/response-builder.js");
-    console.log(`[mem-command:session-reset] completed: bypassed=${!!bypassed} agent=${agentName} (${agentIdShort})`);
+    console.log(`[mem-command:session-reset] completed bypassed=${!!bypassed} session=<redacted>`);
     return buildMemResponse(text, {
       protocol: "responses",
       stream: isStream,
@@ -741,7 +758,7 @@ export async function handleCodexEndpoint(
             stream: isStream,
             requestId: `mem-cmd-${Date.now()}`,
           });
-          console.log(`[codex] mem-command cmd=${memCmd.command} args="${truncateArgs(memCmd.args)}" session=${sessionKey} blocked: session not initialized`);
+          console.log(`[codex] mem-command command=${memCmd.command} session=<redacted> result=session_not_initialized`);
           return errResponse;
         }
         pipe.info("CODEX_MEM_CMD", `mem command intercepted: ${memCmd.command}`);
@@ -777,7 +794,7 @@ export async function handleCodexEndpoint(
           try {
             await recordTdaiTurn(tdaiClientForMem, tdaiIdentityForMem, userMsg, memResult.messageText);
           } catch (err: unknown) {
-            console.error("[codex] mem-command L0 write error:", err);
+            console.error("[codex] mem-command L0 write failed category=upstream_error");
           }
         }
 
@@ -800,7 +817,7 @@ export async function handleCodexEndpoint(
               assetCapabilities,
             });
           } catch (err: unknown) {
-            console.warn("[codex] mem-command skill extract trigger error:", err instanceof Error ? err.message : String(err));
+            console.warn("[codex] mem-command skill extract failed category=upstream_error");
           }
         }
 
@@ -823,7 +840,7 @@ export async function handleCodexEndpoint(
           traceOutput: memResult.messageText,
         });
 
-        console.log(`[codex] mem-command cmd=${memCmd.command} args="${truncateArgs(memCmd.args)}" session=${sessionKey} success=${memResult.success}`);
+        console.log(`[codex] mem-command command=${memCmd.command} session=<redacted> success=${memResult.success}`);
         return memResult.response;
       }
     }
@@ -906,8 +923,8 @@ export async function handleCodexEndpoint(
         // 否则模型看到的会是转义字符（`&lt;user_memory&gt;`）读不出结构。
         body = injectCodexAssets(body, { raw: injectedText });
       }
-    } catch (err: unknown) {
-      console.error("[codex] injection pipeline error:", err instanceof Error ? err.message : String(err));
+    } catch {
+      console.error("[codex] injection pipeline failed category=internal_error");
       // Degrade gracefully: forward without injection
     }
   }
@@ -1025,8 +1042,8 @@ async function triggerCodexArchiveHooks(
     trackWrite(
       withL0Retry(() =>
         recordTdaiTurn(ctx.tdaiClient!, ctx.tdaiIdentity, ctx.tdaiUserMessage, assistantText || null),
-      ).catch((err: unknown) => {
-        console.warn("[codex-tdai-l0] failed:", err instanceof Error ? err.message : String(err));
+      ).catch(() => {
+        console.warn("[codex-tdai-l0] failed category=upstream_error");
       }),
     );
   } else if (ctx.tdaiClient) {
@@ -1083,15 +1100,14 @@ async function forwardToUpstream(
   const agentUpstreamEntry = config.upstream.agents?.["codex"];
   const upstreamBase = agentUpstreamEntry?.url || config.upstream.url;
   const upstreamUrl = joinUrl(upstreamBase, c.req.path);
-  const upstreamHeaders = buildUpstreamHeaders(c, config);
-  upstreamHeaders["content-type"] = "application/json";
-  // 覆盖 apiKey 与 per-agent 策略一致：agentUpstreamEntry.apiKey 优先，
-  // 否则透传客户端 Bearer。
-  if (agentUpstreamEntry) {
-    if (agentUpstreamEntry.apiKey) {
-      upstreamHeaders["authorization"] = `Bearer ${agentUpstreamEntry.apiKey}`;
+  let upstreamHeaders: Record<string, string>;
+  try {
+    upstreamHeaders = buildUpstreamHeaders(c, config, upstreamBase, agentUpstreamEntry?.apiKey);
+  } catch (err) {
+    if (err instanceof MissingUpstreamCredentialError) {
+      return c.json({ error: "Upstream server credentials are not configured" }, 503);
     }
-    // else: 保留 c.req.header('authorization') 里的客户端 key 透传
+    throw err;
   }
 
   pipe.forwardStart(upstreamUrl);
@@ -1102,9 +1118,10 @@ async function forwardToUpstream(
       method: "POST",
       headers: upstreamHeaders,
       body: JSON.stringify(body),
+      redirect: "manual",
     });
   } catch (err: unknown) {
-    pipe.error("CODEX_FORWARD", err instanceof Error ? err : new Error(String(err)));
+    pipe.error("CODEX_FORWARD", new Error("upstream_fetch_failed"));
     // 上报 langfuse 失败（转发异常 —— 上游未回响应体，只有本地 fetch 抛错）
     if (lf) {
       try {
@@ -1113,8 +1130,7 @@ async function forwardToUpstream(
           model: modelId,
           startTime,
           endTime: new Date().toISOString(),
-          input: buildCodexLangfuseInput(body),
-          statusMessage: `forward error: ${err instanceof Error ? err.message : String(err)}`.slice(0, 500),
+          statusMessage: "upstream_fetch_failed",
           extraTags: ["error"],
           observationMetadata: { stage: "forward", stream: true, upstreamUrl },
         });
@@ -1122,10 +1138,12 @@ async function forwardToUpstream(
         pipe.error("LANGFUSE_SPAN", lfErr);
       }
     }
-    return c.json(
-      { error: "Upstream request failed", detail: err instanceof Error ? err.message : String(err) },
-      502,
-    );
+    return c.json({ error: "Upstream request failed" }, 502);
+  }
+
+  if (upstreamResp.status >= 300 && upstreamResp.status < 400) {
+    pipe.info("CODEX_FORWARD_REDIRECT", "blocked");
+    return c.json({ error: "Upstream redirect blocked" }, 502);
   }
 
   pipe.forwardDone(upstreamResp.status);
@@ -1146,7 +1164,6 @@ async function forwardToUpstream(
   // codex Responses API 只有 SSE 流式响应，不区分 stream / non-stream 处理。
   if (upstreamResp.status >= 400) {
     // 4xx/5xx 通常返 JSON error（很小），完整读出来带进 langfuse 便于排查
-    const errText = await upstreamResp.text();
     if (lf) {
       try {
         langfuseReportFailure({
@@ -1154,9 +1171,8 @@ async function forwardToUpstream(
           model: modelId,
           startTime,
           endTime: new Date().toISOString(),
-          input: buildCodexLangfuseInput(body),
           status: upstreamResp.status,
-          statusMessage: errText.slice(0, 500),
+          statusMessage: `upstream_${upstreamResp.status}`,
           extraTags: ["error"],
           observationMetadata: { stage: "upstream", stream: true, upstreamUrl },
         });
@@ -1164,7 +1180,7 @@ async function forwardToUpstream(
         pipe.error("LANGFUSE_SPAN", lfErr);
       }
     }
-    return new Response(errText, {
+    return new Response(null, {
       status: upstreamResp.status,
       headers: filterResponseHeaders(upstreamResp.headers),
     });

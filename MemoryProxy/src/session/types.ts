@@ -34,6 +34,17 @@ export type SessionInitStatus =
   // legacy（一期单 form），保留以兼容旧测试 / 旧 store 数据
   | "pending_form";
 
+export function isSessionInitStatus(value: unknown): value is SessionInitStatus {
+  return value === "uninitialized"
+    || value === "pending_asset_confirm"
+    || value === "pending_team_select"
+    || value === "pending_agent_task"
+    || value === "pending_agent_select"
+    || value === "pending_task_select"
+    || value === "initialized"
+    || value === "pending_form";
+}
+
 export interface SessionInitState {
   status: SessionInitStatus;
   keyId: string;
@@ -42,6 +53,20 @@ export interface SessionInitState {
   sessionInfo?: SessionInfo | null;
   /** User ID from auth/verify (not from header). */
   userId?: string;
+  /**
+   * Durable optional identity ownership for bypass states. This is never
+   * injectable session context; bypass states keep `sessionInfo` null.
+   */
+  identityClaim?: {
+    teamId?: string;
+    agentId?: string;
+    taskId?: string;
+  };
+  /** Durable layers that must receive `identityClaim` before it is accepted. */
+  identityClaimPending?: {
+    l2a?: true;
+    l2b?: true;
+  };
   /** 内核 /teams 返回的嵌套结构，用于渲染 form 与解析用户答复。 */
   cachedTeams?: TeamOption[];
   /**
@@ -69,6 +94,13 @@ export interface SessionInitState {
   agentDetail?: AgentDetail | null;
   /** Resolved task detail (cached after selection), used to inject context every request. */
   taskDetail?: TaskDetail | null;
+  /**
+   * The bound identity remains monotonic, but Core authoritatively reported
+   * that its Agent or Task no longer exists. Consumers must fail closed before
+   * capability, injection, extraction, bridge, or model work; `sessionInfo`
+   * is retained only as an ownership claim for conflict checks and restart.
+   */
+  contextSuppressed?: boolean;
   /**
    * 用户明确选择了"跳过"（本次不关联）。状态设为 initialized 防止重复弹窗，
    * 但 agentDetail/taskDetail 为 null，后续请求只 strip 不 inject。
@@ -120,6 +152,238 @@ export interface SessionInitState {
   resetFlow?: boolean;
   /** mem:session-reset 触发的时间戳，跨节点一致性校验用。 */
   resetEpoch?: number;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function isOptionalString(value: unknown): boolean {
+  return value === undefined || typeof value === "string";
+}
+
+function isOptionalId(value: unknown): boolean {
+  return value === undefined || (typeof value === "string" && value.length > 0);
+}
+
+function isPersistedIdentityClaim(value: unknown): boolean {
+  if (!isRecord(value)) return false;
+  return isOptionalId(value.teamId)
+    && isOptionalId(value.agentId)
+    && isOptionalId(value.taskId);
+}
+
+function isPersistedIdentityClaimPending(value: unknown): boolean {
+  if (!isRecord(value)) return false;
+  const l2a = value.l2a;
+  const l2b = value.l2b;
+  return (l2a === undefined || l2a === true)
+    && (l2b === undefined || l2b === true)
+    && (l2a === true || l2b === true);
+}
+
+function isPersistedSessionInfo(value: unknown): boolean {
+  if (!isRecord(value)) return false;
+  return typeof value.session_id === "string"
+    && value.session_id.length > 0
+    && typeof value.team_id === "string"
+    && value.team_id.length > 0
+    && typeof value.agent_id === "string"
+    && value.agent_id.length > 0
+    && typeof value.user_id === "string"
+    && value.user_id.length > 0
+    && isOptionalId(value.task_id)
+    && isOptionalId(value.space_id)
+    && value.user_key === undefined;
+}
+
+function isPersistedAgentDetail(value: unknown): boolean {
+  if (value === undefined || value === null) return true;
+  if (!isRecord(value)) return false;
+  return typeof value.id === "string"
+    && value.id.length > 0
+    && typeof value.name === "string"
+    && isOptionalString(value.description)
+    && isOptionalString(value.prompt);
+}
+
+function isPersistedTaskDetail(value: unknown): boolean {
+  if (value === undefined || value === null) return true;
+  if (!isRecord(value)) return false;
+  return typeof value.id === "string"
+    && value.id.length > 0
+    && typeof value.name === "string"
+    && isOptionalString(value.description)
+    && isOptionalString(value.goal);
+}
+
+function isPersistedCachedTeams(value: unknown): boolean {
+  if (value === undefined) return true;
+  if (!Array.isArray(value)) return false;
+  return value.every((team) => {
+    if (!isRecord(team)) return false;
+    return typeof team.team_id === "string"
+      && team.team_id.length > 0
+      && typeof team.team_name === "string"
+      && Array.isArray(team.agents)
+      && team.agents.every((agent) => isRecord(agent)
+        && typeof agent.agent_id === "string"
+        && agent.agent_id.length > 0
+        && typeof agent.agent_name === "string"
+        && isOptionalString(agent.description))
+      && Array.isArray(team.tasks)
+      && team.tasks.every((task) => isRecord(task)
+        && typeof task.task_id === "string"
+        && task.task_id.length > 0
+        && typeof task.task_name === "string"
+        && (task.isDefault === undefined || typeof task.isDefault === "boolean"));
+  });
+}
+
+/** Shallow ownership proof used only to bound deletion of a pre-v2 row. */
+export function isLegacyPersistedSessionOwnershipProof(
+  value: unknown,
+): value is SessionInitState {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const state = value as Record<string, unknown>;
+  return isSessionInitStatus(state.status)
+    && (state.keyId === undefined || typeof state.keyId === "string")
+    && (state.startedAt === undefined
+      || (typeof state.startedAt === "number" && Number.isFinite(state.startedAt)))
+    && (state.attemptCount === undefined
+      || (typeof state.attemptCount === "number"
+        && Number.isInteger(state.attemptCount)
+        && state.attemptCount >= 0))
+    && (state.userId === undefined || typeof state.userId === "string")
+    && (state.sessionInfo === undefined
+      || state.sessionInfo === null
+      || (typeof state.sessionInfo === "object" && !Array.isArray(state.sessionInfo)))
+    && (state.bypassed === undefined || typeof state.bypassed === "boolean")
+    && (state.contextSuppressed === undefined || typeof state.contextSuppressed === "boolean");
+}
+
+const persistedSessionMigrations = new WeakSet<SessionInitState>();
+
+function markPersistedSessionMigration(state: SessionInitState): SessionInitState {
+  persistedSessionMigrations.add(state);
+  return state;
+}
+
+/** Non-persisted provenance consumed by SessionStore for a lazy safe rewrite. */
+export function persistedSessionNeedsMigration(state: SessionInitState): boolean {
+  return persistedSessionMigrations.has(state);
+}
+
+/** Strict runtime boundary for canonical v2 state before identity checks. */
+export function isPersistedSessionInitState(value: unknown): value is SessionInitState {
+  if (!isRecord(value)) return false;
+  const state = value;
+  if (
+    !isSessionInitStatus(state.status)
+    || typeof state.keyId !== "string"
+    || state.keyId.length === 0
+    || typeof state.startedAt !== "number"
+    || !Number.isFinite(state.startedAt)
+    || typeof state.attemptCount !== "number"
+    || !Number.isSafeInteger(state.attemptCount)
+    || state.attemptCount < 0
+    || typeof state.userId !== "string"
+    || state.userId.length === 0
+    || (state.bypassed !== undefined && typeof state.bypassed !== "boolean")
+    || (state.contextSuppressed !== undefined && typeof state.contextSuppressed !== "boolean")
+    || !isOptionalId(state.selectedTeamId)
+    || !isOptionalId(state.selectedAgentId)
+    || !isPersistedCachedTeams(state.cachedTeams)
+    || (state.agentPageIndex !== undefined
+      && (typeof state.agentPageIndex !== "number"
+        || !Number.isSafeInteger(state.agentPageIndex)
+        || state.agentPageIndex < 0))
+    || !isPersistedAgentDetail(state.agentDetail)
+    || !isPersistedTaskDetail(state.taskDetail)
+    || (state.identityClaim !== undefined && !isPersistedIdentityClaim(state.identityClaim))
+    || (state.identityClaimPending !== undefined
+      && (!isPersistedIdentityClaimPending(state.identityClaimPending)
+        || !isPersistedIdentityClaim(state.identityClaim)))
+  ) return false;
+
+  if (state.status !== "initialized") {
+    return state.contextSuppressed !== true
+      && state.bypassed !== true
+      && (state.sessionInfo === undefined || state.sessionInfo === null)
+      && (state.agentDetail === undefined || state.agentDetail === null)
+      && (state.taskDetail === undefined || state.taskDetail === null)
+      && state.identityClaim === undefined
+      && state.identityClaimPending === undefined;
+  }
+  if (state.bypassed === true) {
+    return state.sessionInfo === null
+      && state.agentDetail === null
+      && state.taskDetail === null
+      && state.contextSuppressed !== true;
+  }
+  return state.identityClaim === undefined
+    && state.identityClaimPending === undefined
+    && isPersistedSessionInfo(state.sessionInfo);
+}
+
+/**
+ * Normalize the one pre-schema canonical shape that is safe to migrate: an
+ * initialized bypass carrying no injectable session, agent, or task context.
+ */
+export function normalizePersistedSessionInitState(
+  value: unknown,
+): SessionInitState | null {
+  if (isPersistedSessionInitState(value)) return value;
+  if (
+    isRecord(value)
+    && isRecord(value.sessionInfo)
+    && typeof value.sessionInfo.user_key === "string"
+  ) {
+    const { user_key: _credential, ...safeSessionInfo } = value.sessionInfo;
+    const safeState = { ...value, sessionInfo: safeSessionInfo };
+    if (isPersistedSessionInitState(safeState)) {
+      return markPersistedSessionMigration(safeState);
+    }
+  }
+  if (!isLegacyPersistedSessionOwnershipProof(value)) return null;
+  const state = value as SessionInitState;
+  if (
+    state.status !== "initialized"
+    || state.bypassed !== true
+    || typeof state.keyId !== "string"
+    || state.keyId.length === 0
+    || typeof state.userId !== "string"
+    || state.userId.length === 0
+    || (state.sessionInfo !== undefined && state.sessionInfo !== null)
+    || (state.agentDetail !== undefined && state.agentDetail !== null)
+    || (state.taskDetail !== undefined && state.taskDetail !== null)
+    || state.contextSuppressed === true
+    || !isOptionalId(state.selectedTeamId)
+    || !isOptionalId(state.selectedAgentId)
+    || !isPersistedCachedTeams(state.cachedTeams)
+    || (state.agentPageIndex !== undefined
+      && (typeof state.agentPageIndex !== "number"
+        || !Number.isSafeInteger(state.agentPageIndex)
+        || state.agentPageIndex < 0))
+    || (state.identityClaim !== undefined && !isPersistedIdentityClaim(state.identityClaim))
+    || (state.identityClaimPending !== undefined
+      && (!isPersistedIdentityClaimPending(state.identityClaimPending)
+        || !isPersistedIdentityClaim(state.identityClaim)))
+  ) return null;
+  return markPersistedSessionMigration({
+    ...state,
+    startedAt: typeof state.startedAt === "number" && Number.isFinite(state.startedAt)
+      ? state.startedAt
+      : 0,
+    attemptCount: typeof state.attemptCount === "number"
+      && Number.isSafeInteger(state.attemptCount)
+      && state.attemptCount >= 0
+      ? state.attemptCount
+      : 0,
+    sessionInfo: null,
+    agentDetail: null,
+    taskDetail: null,
+  });
 }
 
 /**
@@ -213,12 +477,13 @@ export interface SessionRegistrationData {
  * shape loose with `permissions` etc. optional so future fields don't break us.
  */
 export interface SessionInfo {
+  [key: string]: unknown;
   session_id: string;
   team_id: string;
   agent_id: string;
   user_id: string;
   task_id?: string;
-  /** User's API key — stored so injectors can create MetadataClient for per-user kernel calls. */
+  /** @deprecated Legacy persisted field. New state uses request-local custom.userKey. */
   user_key?: string;
   /**
    * Kernel instance / space ID (e.g. `mem-example001`) extracted from the request
