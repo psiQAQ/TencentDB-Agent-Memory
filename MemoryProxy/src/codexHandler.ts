@@ -172,12 +172,14 @@ export function classifyCodexRequest(
 
 /**
  * Extract session_id from codex request.
- * Primary: `session-id` header. Fallback: `body.client_metadata.session_id`.
+ * Primary: explicit `x-conversation-id` binding. Fallbacks: Codex's
+ * `session-id` header and `body.client_metadata.session_id`.
  */
 export function extractCodexSessionId(
   headers: Record<string, string>,
   body: Record<string, unknown>,
 ): string | null {
+  if (headers["x-conversation-id"]) return headers["x-conversation-id"];
   if (headers["session-id"]) return headers["session-id"];
   const meta = body.client_metadata as { session_id?: string } | undefined;
   if (typeof meta?.session_id === "string") return meta.session_id;

@@ -163,8 +163,9 @@ export function classifyWorkbuddyRequest(
  * 从请求头/请求体中提取 WorkBuddy session id。
  *
  * 优先级（与 codex 相同）：
- *   1. header `session-id`（SDK 默认位置）
- *   2. body.client_metadata.session_id（fallback）
+ *   1. header `x-conversation-id`（调用方显式隔离绑定）
+ *   2. header `session-id`（SDK 默认位置）
+ *   3. body.client_metadata.session_id（fallback）
  *
  * 两者都缺 → null（上层负责决定是拒绝还是生成新 session）。
  */
@@ -172,7 +173,9 @@ export function extractWorkbuddySessionId(
   headers: Record<string, string>,
   body: Record<string, unknown>,
 ): string | null {
-  const fromHeader = headers["session-id"] ?? headers["Session-Id"];
+  const fromHeader = headers["x-conversation-id"]
+    ?? headers["session-id"]
+    ?? headers["Session-Id"];
   if (typeof fromHeader === "string" && fromHeader.length > 0) return fromHeader;
 
   const meta = body.client_metadata as Record<string, unknown> | undefined;
