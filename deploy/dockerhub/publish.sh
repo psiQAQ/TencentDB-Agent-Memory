@@ -42,6 +42,28 @@ NPM_REGISTRY="${NPM_REGISTRY:-https://registry.npmjs.org}"
 LOAD_PLATFORM="${LOAD_PLATFORM:-linux/amd64}"
 SECRET_SCAN="${SECRET_SCAN:-$REPO_ROOT/MemoryPanel/scripts/secret-scan.sh}"
 
+# OCI image provenance. Callers may override these values, while ordinary
+# repository builds receive a useful, self-describing default automatically.
+OCI_SOURCE="${OCI_SOURCE:-https://github.com/TencentCloud/TencentDB-Agent-Memory}"
+OCI_REVISION="${OCI_REVISION:-$(git -C "$REPO_ROOT" rev-parse HEAD 2>/dev/null || true)}"
+OCI_CREATED="${OCI_CREATED:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}"
+OCI_VERSION="${OCI_VERSION:-${VERSION:-}}"
+OCI_BRANCH="${OCI_BRANCH:-$(git -C "$REPO_ROOT" branch --show-current 2>/dev/null || true)}"
+if [[ -z "${OCI_DIRTY+x}" ]]; then
+  if [[ -n "$(git -C "$REPO_ROOT" status --porcelain --untracked-files=normal 2>/dev/null || true)" ]]; then
+    OCI_DIRTY="true"
+  else
+    OCI_DIRTY="false"
+  fi
+fi
+if [[ -z "${OCI_BUILD_PROFILE+x}" ]]; then
+  if [[ "$PUSH" == "1" ]]; then
+    OCI_BUILD_PROFILE="release"
+  else
+    OCI_BUILD_PROFILE="local"
+  fi
+fi
+
 if [[ -t 1 ]]; then
   C_GRN=$'\033[32m'; C_YLW=$'\033[33m'; C_RED=$'\033[31m'; C_BLU=$'\033[34m'; C_RST=$'\033[0m'
 else
@@ -88,6 +110,27 @@ ensure_builder() {
 # PUSH=1 → 多架构 buildx --push；PUSH=0 → 单架构 --load 供本地抽查。
 build_image() {
   local image="$1" ctx="$2"
+  local image_name="${image##*/}"
+  local image_title
+  case "$image_name" in
+    memory-core) image_title="TencentDB Agent Memory Core" ;;
+    memory-proxy) image_title="TencentDB Agent Memory Proxy" ;;
+    memory-hub) image_title="TencentDB Agent Memory Hub" ;;
+    *) image_title="$image_name" ;;
+  esac
+
+  local label_args=(
+    --label "org.opencontainers.image.title=$image_title"
+    --label "org.opencontainers.image.source=$OCI_SOURCE"
+    --label "org.opencontainers.image.created=$OCI_CREATED"
+    --label "org.opencontainers.image.version=$OCI_VERSION"
+    --label "io.github.tencentcloud.tdai.source.dirty=$OCI_DIRTY"
+    --label "io.github.tencentcloud.tdai.build.profile=$OCI_BUILD_PROFILE"
+  )
+  [[ -n "$OCI_REVISION" ]] && label_args+=(--label "org.opencontainers.image.revision=$OCI_REVISION")
+  [[ -n "$OCI_BRANCH" ]] && label_args+=(--label "io.github.tencentcloud.tdai.source.branch=$OCI_BRANCH")
+
+  info "OCI provenance: revision=${OCI_REVISION:0:12} branch=${OCI_BRANCH:-detached} dirty=$OCI_DIRTY"
 
   if [[ "$PUSH" != "1" ]]; then
     info "PUSH=0 → 本地构建 ${image}:${VERSION} ($LOAD_PLATFORM)"
@@ -96,6 +139,7 @@ build_image() {
       --platform "$LOAD_PLATFORM" \
       --build-arg "APT_MIRROR=$APT_MIRROR" \
       --build-arg "NPM_REGISTRY=$NPM_REGISTRY" \
+      "${label_args[@]}" \
       -t "${image}:${VERSION}" \
       --load \
       "$ctx"
@@ -113,6 +157,7 @@ build_image() {
     --platform "$PLATFORMS" \
     --build-arg "APT_MIRROR=$APT_MIRROR" \
     --build-arg "NPM_REGISTRY=$NPM_REGISTRY" \
+    "${label_args[@]}" \
     "${tags[@]}" \
     --push \
     "$ctx"
