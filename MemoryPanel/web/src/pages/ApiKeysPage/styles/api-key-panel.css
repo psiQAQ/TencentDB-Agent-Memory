@@ -48,6 +48,83 @@
   user-select: all;
 }
 
+/* system_admin 管理范围：Team 与成员信息是两个相互独立的水平筛选条件。 */
+._memory-apikey-scope-filters {
+  display: grid;
+  grid-template-columns: minmax(220px, 2fr) minmax(280px, 3fr);
+  gap: 16px;
+  align-items: end;
+}
+
+._memory-apikey-scope-field {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 6px;
+}
+
+._memory-apikey-scope-field > .tea-form--search,
+._memory-apikey-scope-field > .tea-search {
+  width: 100%;
+}
+
+/* 表格按内容长度分配稳定比例；容器继续变窄时转为横向滚动，避免按单字符断行。 */
+._memory-apikey-table-scroll {
+  width: 100%;
+  overflow-x: auto;
+}
+
+._memory-apikey-table-scroll .tea-table__box {
+  width: 100%;
+  min-width: 880px;
+  table-layout: fixed;
+}
+
+._memory-apikey-table-scroll th {
+  white-space: nowrap;
+}
+
+._memory-apikey-table-scroll th,
+._memory-apikey-table-scroll td {
+  box-sizing: border-box;
+}
+
+._memory-apikey-cell {
+  min-width: 0;
+  line-height: 20px;
+  overflow-wrap: anywhere;
+  word-break: normal;
+}
+
+._memory-apikey-code-cell {
+  display: inline-flex;
+  max-width: 100%;
+  align-items: center;
+  gap: 2px;
+  font-size: 12px;
+}
+
+._memory-apikey-team-line + ._memory-apikey-team-line {
+  margin-top: 4px;
+}
+
+._memory-apikey-time {
+  line-height: 20px;
+  overflow-wrap: normal;
+  word-break: keep-all;
+}
+
+._memory-apikey-action {
+  display: inline-block;
+  white-space: nowrap;
+}
+
+@media (max-width: 720px) {
+  ._memory-apikey-scope-filters {
+    grid-template-columns: 1fr 1fr;
+  }
+}
+
 /* 接入指引端点卡片
  * 用 grid 而不是 flex 的原因：
  *   flex 的 `align-items: stretch` 理论默认会让两个 endpoint 等高，

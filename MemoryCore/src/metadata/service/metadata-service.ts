@@ -16,6 +16,7 @@ import { DuplicateUserKeyError, type IMetadataStore } from "../store/interface.j
 import {
   checkPermission,
   canBindAsset,
+  canReadTeamMembersGlobally,
   roleDefaultCovers,
   type PermCheckResult,
   type PermCheckLogger,
@@ -1745,7 +1746,9 @@ export class MetadataService {
     ctx: V3AuthContext,
     pagination: PaginationParams = DEFAULT_PAGINATION,
   ): Promise<PaginatedResult<TeamMemberView>> {
-    await this.requireActiveTeamMember(ctx, teamId);
+    if (!canReadTeamMembersGlobally(ctx.isSystemAdmin)) {
+      await this.requireActiveTeamMember(ctx, teamId);
+    }
     const page = await this.store.listTeamMembersWithProfile(teamId, pagination);
     return formatListResult(page, pagination);
   }
@@ -1755,7 +1758,9 @@ export class MetadataService {
     userId: string,
     ctx: V3AuthContext,
   ): Promise<TeamMemberView> {
-    await this.requireActiveTeamMember(ctx, teamId);
+    if (!canReadTeamMembersGlobally(ctx.isSystemAdmin)) {
+      await this.requireActiveTeamMember(ctx, teamId);
+    }
     const member = await this.store.getTeamMemberWithProfile(teamId, userId);
     if (!member) {
       throw new MetadataError("member_not_found", `member not found: ${teamId}/${userId}`);

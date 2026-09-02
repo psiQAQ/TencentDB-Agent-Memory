@@ -2,14 +2,18 @@ import { describe, expect, it } from "vitest";
 import {
   buildApiKeySubjects,
   buildManagedUserKeys,
+  filterApiKeySubjects,
+  filterManagedUserKeys,
+  getKeyRevokeBlockReason,
+  getPrivilegedMemberships,
   loadSystemAdminApiKeyInventory,
 } from "../web/src/pages/ApiKeysPage/api-key-inventory.js";
 
 describe("API Key system-admin inventory", () => {
-  it("includes every Team member once and keeps the current admin without a Team", () => {
+  it("includes every Team member once, resolves owner/member roles, and keeps the current admin", () => {
     const subjects = buildApiKeySubjects(
       [
-        { user_id: "admin", username: "root" },
+        { user_id: "admin", username: "root", user_type: "system_admin" },
         { user_id: "alice", username: "alice" },
         { user_id: "orphan", username: "orphan" },
       ],
@@ -17,10 +21,18 @@ describe("API Key system-admin inventory", () => {
         [
           "alice",
           [
-            { team_id: "team-a", name: "Alpha" },
-            { team_id: "team-b", name: "Beta" },
+            {
+              team_id: "team-a",
+              name: "Alpha",
+              owner_user_id: "alice",
+            },
+            { team_id: "team-b", name: "Beta", owner_user_id: "bob" },
           ],
         ],
+      ]),
+      new Map([
+        ["team-a", [{ user_id: "alice", role: "admin" }]],
+        ["team-b", [{ user_id: "alice", role: "member" }]],
       ]),
       "admin",
     );
@@ -29,16 +41,26 @@ describe("API Key system-admin inventory", () => {
       "admin",
       "alice",
     ]);
-    expect(subjects[1]?.teams.map((team) => team.name)).toEqual([
-      "Alpha",
-      "Beta",
+    expect(subjects[1]?.teams).toEqual([
+      {
+        teamId: "team-a",
+        teamName: "Alpha",
+        roles: ["owner", "admin"],
+      },
+      { teamId: "team-b", teamName: "Beta", roles: ["member"] },
     ]);
   });
 
-  it("combines active keys with owner and Team context and hides revoked keys", () => {
+  it("combines active keys with owner and Team role context and hides revoked keys", () => {
     const subjects = buildApiKeySubjects(
       [{ user_id: "alice", username: "alice", display_name: "Alice" }],
-      new Map([["alice", [{ team_id: "team-a", name: "Alpha" }]]]),
+      new Map([
+        [
+          "alice",
+          [{ team_id: "team-a", name: "Alpha", owner_user_id: "alice" }],
+        ],
+      ]),
+      new Map([["team-a", [{ user_id: "alice", role: "admin" }]]]),
       "admin",
     );
     const rows = buildManagedUserKeys(
@@ -63,22 +85,92 @@ describe("API Key system-admin inventory", () => {
     expect(rows[0]).toMatchObject({
       ownerUserId: "alice",
       ownerName: "Alice",
-      teamNames: ["Alpha"],
+      teamMemberships: [
+        {
+          teamId: "team-a",
+          teamName: "Alpha",
+          roles: ["owner", "admin"],
+        },
+      ],
     });
+    expect(getPrivilegedMemberships(rows[0]!)).toHaveLength(1);
   });
 
-  it("loads Team membership for all users and keys only for managed subjects", async () => {
+  it("filters by Team first and then matches member identity fields", () => {
+    const subjects = buildApiKeySubjects(
+      [
+        { user_id: "usr-a", username: "alice", display_name: "Alice Chen" },
+        { user_id: "usr-b", username: "bob", display_name: "Bob Li" },
+      ],
+      new Map([
+        ["usr-a", [{ team_id: "team-a", name: "Alpha" }]],
+        ["usr-b", [{ team_id: "team-b", name: "Beta" }]],
+      ]),
+      new Map([
+        ["team-a", [{ user_id: "usr-a", role: "member" }]],
+        ["team-b", [{ user_id: "usr-b", role: "member" }]],
+      ]),
+      "admin",
+    );
+    const keys = buildManagedUserKeys(
+      subjects,
+      new Map([
+        ["usr-a", [{ key_id: "key-a" }]],
+        ["usr-b", [{ key_id: "key-b" }]],
+      ]),
+    );
+
+    const alpha = filterApiKeySubjects(subjects, "team-a", "");
+    expect(alpha.map((subject) => subject.userId)).toEqual(["usr-a"]);
+    expect(filterApiKeySubjects(subjects, "*", "BOB LI")).toHaveLength(1);
+    expect(filterManagedUserKeys(keys, alpha).map((key) => key.key_id)).toEqual(
+      ["key-a"],
+    );
+  });
+
+  it("blocks system_admin and a member's last active Key from Panel revocation", () => {
+    const systemKey = {
+      key_id: "system",
+      ownerUserId: "admin",
+      ownerName: "admin",
+      ownerUserType: "system_admin",
+      teamMemberships: [],
+    };
+    const onlyKey = {
+      key_id: "only",
+      ownerUserId: "alice",
+      ownerName: "Alice",
+      ownerUserType: "user",
+      teamMemberships: [],
+    };
+    const secondKey = { ...onlyKey, key_id: "second" };
+
+    expect(getKeyRevokeBlockReason(systemKey, [systemKey])).toBe(
+      "system_admin",
+    );
+    expect(getKeyRevokeBlockReason(onlyKey, [onlyKey])).toBe("last_active_key");
+    expect(getKeyRevokeBlockReason(onlyKey, [onlyKey, secondKey])).toBeNull();
+  });
+
+  it("loads member roles once per unique Team and keys only for managed subjects", async () => {
     const teamCalls: string[] = [];
+    const memberCalls: string[] = [];
     const keyCalls: string[] = [];
     const inventory = await loadSystemAdminApiKeyInventory("admin", {
       listUsers: async () => [
-        { user_id: "admin", username: "root" },
+        { user_id: "admin", username: "root", user_type: "system_admin" },
         { user_id: "alice", username: "alice" },
         { user_id: "orphan", username: "orphan" },
       ],
       listTeamsForUser: async (userId) => {
         teamCalls.push(userId);
-        return userId === "alice" ? [{ team_id: "team-a", name: "Alpha" }] : [];
+        return userId === "alice"
+          ? [{ team_id: "team-a", name: "Alpha", owner_user_id: "alice" }]
+          : [];
+      },
+      listMembersForTeam: async (teamId) => {
+        memberCalls.push(teamId);
+        return [{ user_id: "alice", role: "admin" }];
       },
       listKeysForUser: async (userId) => {
         keyCalls.push(userId);
@@ -87,6 +179,7 @@ describe("API Key system-admin inventory", () => {
     });
 
     expect(teamCalls.sort()).toEqual(["admin", "alice", "orphan"]);
+    expect(memberCalls).toEqual(["team-a"]);
     expect(keyCalls.sort()).toEqual(["admin", "alice"]);
     expect(inventory.keys.map((key) => key.key_id).sort()).toEqual([
       "key-admin",

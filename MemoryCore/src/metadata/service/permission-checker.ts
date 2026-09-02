@@ -40,6 +40,11 @@ const MEMBER_ACTIONS: Permission[] = ["read"];
 
 const noopLogger: PermCheckLogger = { debug: () => {} };
 
+/** system_admin 可跨 Team 读取成员与角色；所有写操作仍走 Team 角色鉴权。 */
+export function canReadTeamMembersGlobally(isSystemAdmin: boolean): boolean {
+  return isSystemAdmin;
+}
+
 export function checkPermission(ctx: PermCheckContext): PermCheckResult {
   const { user, asset, membership, action, aclRecords, agentId } = ctx;
   const logger = ctx.logger ?? noopLogger;

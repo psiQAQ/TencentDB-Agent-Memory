@@ -1,27 +1,44 @@
 import type { UserKey } from '@/lib/api/users';
 
+export type ApiKeyTeamRole = 'owner' | 'admin' | 'member' | 'reviewer';
+
 export interface ApiKeyInventoryUser {
   user_id: string;
   username: string;
   display_name?: string;
+  user_type?: string;
 }
 
 export interface ApiKeyInventoryTeam {
   team_id: string;
   name: string;
+  owner_user_id?: string;
+}
+
+export interface ApiKeyInventoryMember {
+  user_id: string;
+  role: Exclude<ApiKeyTeamRole, 'owner'>;
+}
+
+export interface ApiKeyTeamMembership {
+  teamId: string;
+  teamName: string;
+  roles: ApiKeyTeamRole[];
 }
 
 export interface ApiKeySubject {
   userId: string;
   username: string;
   displayName?: string;
-  teams: ApiKeyInventoryTeam[];
+  userType?: string;
+  teams: ApiKeyTeamMembership[];
 }
 
 export interface ManagedUserKey extends UserKey {
   ownerUserId: string;
   ownerName: string;
-  teamNames: string[];
+  ownerUserType?: string;
+  teamMemberships: ApiKeyTeamMembership[];
 }
 
 async function mapWithConcurrency<T, R>(
@@ -41,6 +58,22 @@ async function mapWithConcurrency<T, R>(
   return results;
 }
 
+function toMembership(
+  userId: string,
+  team: ApiKeyInventoryTeam,
+  members: ApiKeyInventoryMember[],
+): ApiKeyTeamMembership {
+  const roles: ApiKeyTeamRole[] = [];
+  if (team.owner_user_id === userId) roles.push('owner');
+  const memberRole = members.find((member) => member.user_id === userId)?.role;
+  if (memberRole) roles.push(memberRole);
+  return {
+    teamId: team.team_id,
+    teamName: team.name,
+    roles: [...new Set(roles)],
+  };
+}
+
 /**
  * system_admin 的管理范围是“所有 Team 的全部成员”，同时保留其自己的 Key 入口，
  * 即使 system_admin 本身尚未加入任何 Team。
@@ -48,6 +81,7 @@ async function mapWithConcurrency<T, R>(
 export function buildApiKeySubjects(
   users: ApiKeyInventoryUser[],
   teamsByUser: Map<string, ApiKeyInventoryTeam[]>,
+  membersByTeam: Map<string, ApiKeyInventoryMember[]>,
   currentUserId: string,
 ): ApiKeySubject[] {
   return users
@@ -55,7 +89,10 @@ export function buildApiKeySubjects(
       userId: user.user_id,
       username: user.username,
       displayName: user.display_name,
-      teams: teamsByUser.get(user.user_id) ?? [],
+      userType: user.user_type,
+      teams: (teamsByUser.get(user.user_id) ?? []).map((team) =>
+        toMembership(user.user_id, team, membersByTeam.get(team.team_id) ?? []),
+      ),
     }))
     .filter((subject) => subject.teams.length > 0 || subject.userId === currentUserId)
     .sort((a, b) => {
@@ -78,10 +115,54 @@ export function buildManagedUserKeys(
           ...key,
           ownerUserId: subject.userId,
           ownerName: subject.displayName || subject.username,
-          teamNames: subject.teams.map((team) => team.name),
+          ownerUserType: subject.userType,
+          teamMemberships: subject.teams,
         })),
     )
     .sort((a, b) => (b.created_at ?? '').localeCompare(a.created_at ?? ''));
+}
+
+export function filterApiKeySubjects(
+  subjects: ApiKeySubject[],
+  teamId: string,
+  memberKeyword: string,
+): ApiKeySubject[] {
+  const keyword = memberKeyword.trim().toLocaleLowerCase();
+  return subjects.filter((subject) => {
+    if (teamId !== '*' && !subject.teams.some((team) => team.teamId === teamId)) return false;
+    if (!keyword) return true;
+    return [subject.userId, subject.username, subject.displayName]
+      .filter(Boolean)
+      .some((value) => value!.toLocaleLowerCase().includes(keyword));
+  });
+}
+
+export function filterManagedUserKeys(
+  keys: ManagedUserKey[],
+  subjects: ApiKeySubject[],
+): ManagedUserKey[] {
+  const userIds = new Set(subjects.map((subject) => subject.userId));
+  return keys.filter((key) => userIds.has(key.ownerUserId));
+}
+
+export type KeyRevokeBlockReason = 'system_admin' | 'last_active_key' | null;
+
+/** 镜像 Core 的最后一把有效 Key 保护，并额外禁止在 Panel 吊销 system_admin Key。 */
+export function getKeyRevokeBlockReason(
+  key: ManagedUserKey,
+  activeKeys: ManagedUserKey[],
+): KeyRevokeBlockReason {
+  if (key.ownerUserType === 'system_admin') return 'system_admin';
+  const ownerActiveKeyCount = activeKeys.filter(
+    (candidate) => candidate.ownerUserId === key.ownerUserId && !candidate.revoked_at,
+  ).length;
+  return ownerActiveKeyCount <= 1 ? 'last_active_key' : null;
+}
+
+export function getPrivilegedMemberships(key: ManagedUserKey): ApiKeyTeamMembership[] {
+  return key.teamMemberships.filter((team) =>
+    team.roles.some((role) => role === 'owner' || role === 'admin'),
+  );
 }
 
 export async function loadSystemAdminApiKeyInventory(
@@ -89,6 +170,7 @@ export async function loadSystemAdminApiKeyInventory(
   api: {
     listUsers: () => Promise<ApiKeyInventoryUser[]>;
     listTeamsForUser: (userId: string) => Promise<ApiKeyInventoryTeam[]>;
+    listMembersForTeam: (teamId: string) => Promise<ApiKeyInventoryMember[]>;
     listKeysForUser: (userId: string) => Promise<UserKey[]>;
   },
 ): Promise<{ subjects: ApiKeySubject[]; keys: ManagedUserKey[] }> {
@@ -98,7 +180,22 @@ export async function loadSystemAdminApiKeyInventory(
     8,
     async (user) => [user.user_id, await api.listTeamsForUser(user.user_id)] as const,
   );
-  const subjects = buildApiKeySubjects(users, new Map(teamEntries), currentUserId);
+  const uniqueTeams = [
+    ...new Map(
+      teamEntries.flatMap(([, teams]) => teams).map((team) => [team.team_id, team]),
+    ).values(),
+  ];
+  const memberEntries = await mapWithConcurrency(
+    uniqueTeams,
+    8,
+    async (team) => [team.team_id, await api.listMembersForTeam(team.team_id)] as const,
+  );
+  const subjects = buildApiKeySubjects(
+    users,
+    new Map(teamEntries),
+    new Map(memberEntries),
+    currentUserId,
+  );
   const keyEntries = await mapWithConcurrency(
     subjects,
     8,

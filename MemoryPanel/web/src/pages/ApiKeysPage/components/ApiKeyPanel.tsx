@@ -34,16 +34,23 @@ import {
   H3,
   Form,
   Modal,
+  SearchBox,
   Select,
 } from 'tea-component';
 import { AddIcon } from 'tea-icons-react';
-import { userKeysApi, usersApi, teamsApi, metaInstancesApi } from '@/lib/teamApi';
+import { userKeysApi, usersApi, teamsApi, membersApi, metaInstancesApi } from '@/lib/teamApi';
 import { useAuthStore } from '@/stores/auth';
 import { tea } from '@/lib/tea-bridge';
+import { getErrorMessage } from '@/lib/error-message';
 import {
   buildManagedUserKeys,
+  filterApiKeySubjects,
+  filterManagedUserKeys,
+  getKeyRevokeBlockReason,
+  getPrivilegedMemberships,
   loadSystemAdminApiKeyInventory,
   type ApiKeySubject,
+  type ApiKeyTeamRole,
   type ManagedUserKey,
 } from '../api-key-inventory';
 import '../styles/api-key-panel.css';
@@ -57,7 +64,8 @@ export default function ApiKeyPanel() {
   const [keys, setKeys] = useState<ManagedUserKey[]>([]);
   const [subjects, setSubjects] = useState<ApiKeySubject[]>([]);
   const [selectedUserId, setSelectedUserId] = useState(auth?.user_id ?? '');
-  const [filterUserId, setFilterUserId] = useState('*');
+  const [filterTeamId, setFilterTeamId] = useState('*');
+  const [memberKeyword, setMemberKeyword] = useState('');
   const [loading, setLoading] = useState(true);
   // 客户端接入 base 地址（来自当前登录的 instance 元数据；每个实例不同）。
   // 优先取 proxy_endpoint —— 开源本地部署 core+proxy 分开时客户端要接的是 proxy；
@@ -93,6 +101,7 @@ export default function ApiKeyPanel() {
         const ownSubject: ApiKeySubject = {
           userId: auth.user_id,
           username: auth.user,
+          userType: auth.isAdmin ? 'system_admin' : 'user',
           teams: [],
         };
         const ownKeys = await userKeysApi.list();
@@ -107,12 +116,14 @@ export default function ApiKeyPanel() {
       const inventory = await loadSystemAdminApiKeyInventory(auth.user_id, {
         listUsers: usersApi.list,
         listTeamsForUser: teamsApi.listForUser,
+        listMembersForTeam: membersApi.list,
         listKeysForUser: userKeysApi.list,
       });
       const nextSubjects = inventory.subjects;
       setSubjects(nextSubjects);
-      setFilterUserId((current) =>
-        current === '*' || nextSubjects.some((subject) => subject.userId === current)
+      setFilterTeamId((current) =>
+        current === '*' ||
+        nextSubjects.some((subject) => subject.teams.some((team) => team.teamId === current))
           ? current
           : '*',
       );
@@ -174,9 +185,27 @@ export default function ApiKeyPanel() {
   }
 
   async function handleDelete(key: ManagedUserKey) {
+    const blockReason = getKeyRevokeBlockReason(key, keys);
+    if (blockReason) {
+      tea.notify.warning(t(`apiKey.revoke.disabled.${blockReason}`));
+      return;
+    }
+    const privilegedMemberships = getPrivilegedMemberships(key);
+    const roleLabel = (role: ApiKeyTeamRole) => t(`apiKey.role.${role}`);
+    const managedTeams = privilegedMemberships
+      .map(
+        (team) =>
+          `${team.teamName} (${team.roles
+            .filter((role) => role === 'owner' || role === 'admin')
+            .map(roleLabel)
+            .join(', ')})`,
+      )
+      .join('；');
     const ok = await tea.confirm({
       message: t('apiKey.confirm.revoke', { name: key.key_prefix || key.key_id }),
-      description: t('apiKey.confirm.revoke.desc'),
+      description: privilegedMemberships.length
+        ? t('apiKey.confirm.revoke.privileged.desc', { teams: managedTeams })
+        : t('apiKey.confirm.revoke.desc'),
       okText: t('apiKey.confirm.revoke.ok'),
     });
     if (!ok) return;
@@ -184,7 +213,12 @@ export default function ApiKeyPanel() {
       await userKeysApi.revoke(key.key_id);
       await refresh();
     } catch (e) {
-      tea.notify.error(e);
+      const message = getErrorMessage(e);
+      tea.notify.error(
+        message.includes('last_key_cannot_revoke') || String(e).includes('last_key_cannot_revoke')
+          ? t('apiKey.revoke.disabled.last_active_key')
+          : e,
+      );
     }
   }
 
@@ -194,9 +228,22 @@ export default function ApiKeyPanel() {
     if (Number.isNaN(d.getTime())) return iso;
     return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')} ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
   };
+  const allTeams = useMemo(
+    () =>
+      [
+        ...new Map(
+          subjects.flatMap((subject) => subject.teams).map((team) => [team.teamId, team]),
+        ).values(),
+      ].sort((a, b) => a.teamName.localeCompare(b.teamName)),
+    [subjects],
+  );
+  const filteredSubjects = useMemo(
+    () => filterApiKeySubjects(subjects, filterTeamId, memberKeyword),
+    [filterTeamId, memberKeyword, subjects],
+  );
   const visibleKeys = useMemo(
-    () => (filterUserId === '*' ? keys : keys.filter((key) => key.ownerUserId === filterUserId)),
-    [filterUserId, keys],
+    () => filterManagedUserKeys(keys, filteredSubjects),
+    [filteredSubjects, keys],
   );
   return (
     <div className="_memory-apikey-body">
@@ -255,46 +302,59 @@ export default function ApiKeyPanel() {
       {isSystemAdmin && (
         <Card>
           <Card.Body title={t('apiKey.scope.title')}>
-            <Form>
-              <Form.Item label={t('apiKey.scope.user')}>
+            <div className="_memory-apikey-scope-filters">
+              <div className="_memory-apikey-scope-field">
+                <Text theme="label" parent="label">
+                  {t('apiKey.scope.team')}
+                </Text>
                 <Select
                   size="full"
                   searchable
-                  value={filterUserId}
-                  onChange={setFilterUserId}
+                  value={filterTeamId}
+                  onChange={(teamId) => {
+                    setFilterTeamId(teamId);
+                    setMemberKeyword('');
+                  }}
                   options={[
-                    { value: '*', text: t('apiKey.scope.all', { count: subjects.length }) },
-                    ...subjects.map((subject) => ({
-                      value: subject.userId,
-                      text: `${subject.displayName || subject.username} (${subject.userId}) · ${
-                        subject.teams.length
-                          ? subject.teams.map((team) => team.name).join(', ')
-                          : t('apiKey.noTeam')
-                      }`,
+                    { value: '*', text: t('apiKey.scope.allTeams') },
+                    ...allTeams.map((team) => ({
+                      value: team.teamId,
+                      text: team.teamName,
                     })),
                   ]}
                 />
-              </Form.Item>
-            </Form>
+              </div>
+              <div className="_memory-apikey-scope-field">
+                <Text theme="label" parent="label">
+                  {t('apiKey.scope.member')}
+                </Text>
+                <SearchBox
+                  value={memberKeyword}
+                  onChange={setMemberKeyword}
+                  placeholder={t('apiKey.scope.member.placeholder')}
+                />
+              </div>
+            </div>
           </Card.Body>
         </Card>
       )}
 
       {/* ===== Key 列表：key_id / key_prefix / 创建时间 + 操作 ===== */}
       <Card>
-        <Table
-          verticalTop
-          records={visibleKeys}
-          recordKey="key_id"
-          columns={[
+        <div className="_memory-apikey-table-scroll">
+          <Table
+            verticalTop
+            records={visibleKeys}
+            recordKey="key_id"
+            columns={[
             ...(isSystemAdmin
               ? [
                   {
                     key: 'owner',
                     header: t('apiKey.table.owner'),
-                    width: 220,
+                    width: '20%',
                     render: (key: ManagedUserKey) => (
-                      <div>
+                      <div className="_memory-apikey-cell">
                         <Text theme="strong" parent="div">
                           {key.ownerName}
                         </Text>
@@ -307,10 +367,22 @@ export default function ApiKeyPanel() {
                   {
                     key: 'teams',
                     header: t('apiKey.table.teams'),
+                    width: '22%',
                     render: (key: ManagedUserKey) => (
-                      <Text theme={key.teamNames.length ? 'text' : 'weak'}>
-                        {key.teamNames.length ? key.teamNames.join(', ') : t('apiKey.noTeam')}
-                      </Text>
+                      <div className="_memory-apikey-cell _memory-apikey-team-list">
+                        {key.teamMemberships.length ? (
+                          key.teamMemberships.map((team) => (
+                            <div className="_memory-apikey-team-line" key={team.teamId}>
+                              <span>{team.teamName}</span>{' '}
+                              <Text theme="weak">
+                                ({team.roles.map((role) => t(`apiKey.role.${role}`)).join(', ')})
+                              </Text>
+                            </div>
+                          ))
+                        ) : (
+                          <Text theme="weak">{t('apiKey.noTeam')}</Text>
+                        )}
+                      </div>
                     ),
                   },
                 ]
@@ -318,17 +390,12 @@ export default function ApiKeyPanel() {
             {
               key: 'key_id',
               header: t('apiKey.table.keyId'),
+              width: isSystemAdmin ? '15%' : '25%',
               render: (key) => (
                 <Text
                   parent="code"
                   copyable
-                  style={{
-                    fontSize: 12,
-                    display: 'inline-flex',
-                    alignItems: 'center',
-                    gap: 2,
-                    whiteSpace: 'nowrap',
-                  }}
+                  className="_memory-apikey-cell _memory-apikey-code-cell"
                 >
                   {key.key_id}
                 </Text>
@@ -337,8 +404,9 @@ export default function ApiKeyPanel() {
             {
               key: 'key_prefix',
               header: t('apiKey.table.keyPrefix'),
+              width: isSystemAdmin ? '13%' : '25%',
               render: (key) => (
-                <Text parent="code" style={{ fontSize: 12 }}>
+                <Text parent="code" className="_memory-apikey-cell _memory-apikey-code-cell">
                   {key.key_prefix || '—'}
                 </Text>
               ),
@@ -346,17 +414,23 @@ export default function ApiKeyPanel() {
             {
               key: 'created_at',
               header: t('apiKey.table.createdAt'),
-              width: 180,
-              render: (key) => <Text theme="text">{formatTime(key.created_at)}</Text>,
+              width: isSystemAdmin ? '12%' : '20%',
+              render: (key) => (
+                <Text theme="text" className="_memory-apikey-time">
+                  {formatTime(key.created_at)}
+                </Text>
+              ),
             },
             {
               key: 'expires_at',
               header: t('apiKey.table.expiresAt'),
-              width: 180,
+              width: isSystemAdmin ? '11%' : '20%',
               render: (key) => {
                 if (key.revoked_at) return <Text theme="weak">{t('apiKey.revoked')}</Text>;
                 return key.expires_at ? (
-                  <Text theme="text">{formatTime(key.expires_at)}</Text>
+                  <Text theme="text" className="_memory-apikey-time">
+                    {formatTime(key.expires_at)}
+                  </Text>
                 ) : (
                   <Text theme="weak">{t('apiKey.neverExpire')}</Text>
                 );
@@ -365,20 +439,28 @@ export default function ApiKeyPanel() {
             {
               key: 'actions',
               header: t('apiKey.table.actions'),
-              width: 100,
+              width: isSystemAdmin ? '7%' : '10%',
               align: 'right',
-              render: (key) => (
-                <Button
-                  type="text"
-                  disabled={!!key.revoked_at}
-                  onClick={() => void handleDelete(key)}
-                >
-                  {t('apiKey.revoke')}
-                </Button>
-              ),
+              render: (key) => {
+                const blockReason = getKeyRevokeBlockReason(key, keys);
+                return (
+                  <span
+                    className="_memory-apikey-action"
+                    title={blockReason ? t(`apiKey.revoke.disabled.${blockReason}`) : undefined}
+                  >
+                    <Button
+                      type="text"
+                      disabled={!!key.revoked_at || !!blockReason}
+                      onClick={() => void handleDelete(key)}
+                    >
+                      {t('apiKey.revoke')}
+                    </Button>
+                  </span>
+                );
+              },
             },
-          ]}
-          addons={[
+            ]}
+            addons={[
             autotip({
               isLoading: loading,
               emptyText: (
@@ -393,8 +475,9 @@ export default function ApiKeyPanel() {
               ),
               onRetry: () => void refresh(),
             }),
-          ]}
-        />
+            ]}
+          />
+        </div>
       </Card>
 
       {/* ===== 接入指引 ===== */}
@@ -500,7 +583,7 @@ export default function ApiKeyPanel() {
                       value: subject.userId,
                       text: `${subject.displayName || subject.username} (${subject.userId}) · ${
                         subject.teams.length
-                          ? subject.teams.map((team) => team.name).join(', ')
+                          ? subject.teams.map((team) => team.teamName).join(', ')
                           : t('apiKey.noTeam')
                       }`,
                     }))}
