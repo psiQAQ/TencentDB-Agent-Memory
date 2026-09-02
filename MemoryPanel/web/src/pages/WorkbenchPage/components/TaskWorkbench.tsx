@@ -54,8 +54,6 @@ export default function TaskWorkbench(props: {
   currentUser: string;
   /** 当前 team 下可关联的 Agent 列表（来自 TeamManagementPanel 的同源数据） */
   agents: AgentOption[];
-  /** 是否为全局 admin（保留接口兼容；admin 不再有 task 特权） */
-  isAdmin?: boolean;
 }) {
   const { t } = useTranslation();
   const { activeTeamId, currentUser, agents } = props;
@@ -127,7 +125,7 @@ export default function TaskWorkbench(props: {
           onSelect={(id) => setSelectedId(id)}
           onCreate={() => setShowCreate(true)}
           onDelete={async (task) => {
-            // 权限：删除 task 仅创建者 / team admin / 全局 admin
+            // 权限：删除 task 仅创建者或当前 Team owner/admin。
             const team = teams.find((t) => t.team_id === task.team_id) ?? null;
             if (!canDeleteTask(task, team, currentUser)) {
               tea.notify.warning(

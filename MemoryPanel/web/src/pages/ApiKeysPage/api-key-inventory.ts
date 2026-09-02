@@ -75,8 +75,8 @@ function toMembership(
 }
 
 /**
- * system_admin 的管理范围是“所有 Team 的全部成员”，同时保留其自己的 Key 入口，
- * 即使 system_admin 本身尚未加入任何 Team。
+ * system_admin 的管理范围是实例内全部账号（含 Teamless normal）及其 Key；
+ * Team 信息只作为组织上下文展示。
  */
 export function buildApiKeySubjects(
   users: ApiKeyInventoryUser[],
@@ -94,7 +94,6 @@ export function buildApiKeySubjects(
         toMembership(user.user_id, team, membersByTeam.get(team.team_id) ?? []),
       ),
     }))
-    .filter((subject) => subject.teams.length > 0 || subject.userId === currentUserId)
     .sort((a, b) => {
       if (a.userId === currentUserId) return -1;
       if (b.userId === currentUserId) return 1;

@@ -15,10 +15,8 @@
  *   - Fork → team tab 下选中一条 skill 后可用。前端拼装 `fetchSkillFull → importSkill`，
  *            以 `<原名>-fork-<agentId>` 落新副本，agent 拿到的是独立可写副本。
  *
- * 权限模型：
- *   - admin 用户：全部可见 + 全部可操作
- *   - skill owner：可编辑自己的 skill；可选择是否让其他人可见
- *   - 其他人：只能看到 owner 设为可见的 skill（可见 = 可复制 + 只读使用）
+ * 权限模型由 Team membership、skill owner 和现有 visibility/ACL 共同决定；
+ * system_admin 账号类型不获得额外 Team 资产权限。
  *
  * Refresh strategy: poll on tab change + after every write action. No
  * setInterval — skill mutations are user-driven, the auto-refresh cost

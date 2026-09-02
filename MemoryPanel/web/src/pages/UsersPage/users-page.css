@@ -1,0 +1,18 @@
+._memory-users-page {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding: 20px;
+}
+
+._memory-users-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+._memory-users-hint {
+  margin-top: 6px;
+  color: var(--tea-color-text-secondary);
+  font-size: 12px;
+}

@@ -184,14 +184,14 @@ export const agentsApi = {
   },
 
   /**
-   * 读取当前 team 的默认 Agent 模板（按 实例 × 团队 隔离，无权限校验）。
+   * 读取当前 team 的默认 Agent 模板（按实例 × Team 隔离；要求 active membership）。
    * 未配置时后端返回 `{}`，调用方以 `data.name` 是否存在判断「未配置」。
    */
   getDefaultTemplate: (teamId: string) =>
     metaPost<AgentTemplateConfig>('agent/get-default-template', { team_id: teamId }),
 
   /**
-   * 配置/覆盖当前 team 的默认 Agent 模板（仅 system_admin，否则 403 permission_denied）。
+   * 配置/覆盖当前 team 的默认 Agent 模板（仅当前 Team owner/admin）。
    * 覆盖式写入：必须一次回传完整 template。
    */
   setDefaultTemplate: (teamId: string, template: AgentTemplateConfig) =>

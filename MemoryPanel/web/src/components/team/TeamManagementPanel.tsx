@@ -48,7 +48,7 @@ import { MAX_IMPORTED_CHAT_MEMORIES, importedChatMemoryIds, type AgentCard } fro
 import { useAgentMountedCounts, syncChatMemoryBindings } from './useAgentAssets';
 import AgentGrid from './AgentGrid';
 import { TeamHeaderCard } from './TeamHeaderCard';
-import { MemberSection, AddMemberDialog, CreatedUserKeyModal } from './MemberSection';
+import { MemberSection, AddMemberDialog } from './MemberSection';
 import CreateTeamDialog from './CreateTeamDialog';
 import CreateAgentDialog from './CreateAgentDialog';
 import AgentEditDialog from './AgentEditDialog';
@@ -62,13 +62,9 @@ function errMsg(e: unknown): string {
 
 export default function TeamManagementPanel({
   currentUser,
-  instanceId: _instanceId,
-  isAdmin: _isAdmin,
   section = 'all',
 }: {
   currentUser: string;
-  instanceId: string;
-  isAdmin: boolean;
   /**
    * 控制本面板渲染哪一块内容（拆 tab 用，功能完全不变）：
    *   - 'members'：仅成员管理
@@ -84,9 +80,9 @@ export default function TeamManagementPanel({
   const { agents: allAgents, loading: agentsLoading } = useAgents(activeTeamId);
   const { t } = useTranslation();
   // Agent 可见性：
-  //   - 全局 admin / 当前 team 的 admin(owner)：可见 team 内全部 agent
+  //   - 当前 team 的 admin(owner)：可见 team 内全部 agent
   //   - 普通成员：只能看到自己 owner（创建）的 agent
-  const canSeeAllAgents = !!activeTeam && (_isAdmin || isTeamAdmin(activeTeam, currentUser));
+  const canSeeAllAgents = !!activeTeam && isTeamAdmin(activeTeam, currentUser);
   const agents = useMemo(() => {
     if (!activeTeam || canSeeAllAgents) return allAgents;
     return allAgents.filter((a) => a.owner_user_id === currentUser);
@@ -100,11 +96,6 @@ export default function TeamManagementPanel({
   const [showAddMember, setShowAddMember] = useState(false);
   const [editingAgent, setEditingAgent] = useState<StoreAgent | null>(null);
   const [busy, setBusy] = useState(false);
-  const [createdUserKeyInfo, setCreatedUserKeyInfo] = useState<{
-    username: string;
-    userId: string;
-    keyValue: string;
-  } | null>(null);
 
   async function handleCreateAgent(card: Omit<AgentCard, 'id' | 'icon' | 'accent'>) {
     if (!activeTeamId || !activeTeam) return;
@@ -247,11 +238,9 @@ export default function TeamManagementPanel({
           team={activeTeam}
           ops={
             <>
-              {_isAdmin && (
-                <Button onClick={() => setShowCreateTeam(true)} title={t('team.createTeam')}>
-                  <AddIcon size={14} /> {t('team.createTeam')}
-                </Button>
-              )}
+              <Button onClick={() => setShowCreateTeam(true)} title={t('team.createTeam')}>
+                <AddIcon size={14} /> {t('team.createTeam')}
+              </Button>
             </>
           }
         />
@@ -274,7 +263,7 @@ export default function TeamManagementPanel({
         </div>
       ) : !activeTeam ? (
         <EmptyTeamState
-          onCreateTeam={_isAdmin ? () => setShowCreateTeam(true) : undefined}
+          onCreateTeam={() => setShowCreateTeam(true)}
         />
       ) : (
         <>
@@ -284,12 +273,11 @@ export default function TeamManagementPanel({
               team={activeTeam}
               currentUser={currentUser}
               onAdd={() => setShowAddMember(true)}
-              isAdmin={_isAdmin}
             />
           )}
 
-          {/* === 默认 Agent 模板（仅全局 admin 可见）=== */}
-          {showAgents && _isAdmin && (
+          {/* === 默认 Agent 模板（仅当前 Team owner/admin 可见）=== */}
+          {showAgents && isTeamAdmin(activeTeam, currentUser) && (
             <DefaultAgentTemplateSection
               teamId={activeTeam.team_id}
               teamName={activeTeam.name}
@@ -305,7 +293,6 @@ export default function TeamManagementPanel({
               countsLoading={countsLoading}
               mountedCounts={mountedCounts}
               currentUser={currentUser}
-              isAdmin={_isAdmin}
               canSeeAllAgents={canSeeAllAgents}
               onCreateAgent={() => setShowCreateAgent(true)}
               onEditAgent={setEditingAgent}
@@ -336,15 +323,7 @@ export default function TeamManagementPanel({
         <AddMemberDialog
           team={activeTeam}
           onClose={() => setShowAddMember(false)}
-          onCreatedUser={setCreatedUserKeyInfo}
           currentUser={currentUser}
-          isAdmin={_isAdmin}
-        />
-      )}
-      {createdUserKeyInfo && (
-        <CreatedUserKeyModal
-          info={createdUserKeyInfo}
-          onClose={() => setCreatedUserKeyInfo(null)}
         />
       )}
       {editingAgent && activeTeam && (
@@ -362,12 +341,7 @@ export default function TeamManagementPanel({
 /**
  * 空态引导。
  *
- * 历史行为：任何已登录用户都能创建自己的第一个 team（team/create 无 admin 限制，
- * 创建者自动成为 owner），所以这里曾不区分 admin / 非 admin。
- *
- * 现行行为：前端暂时屏蔽普通用户创建 team 的入口，
- * 仅 admin 可见创建 CTA；普通用户只看到"联系管理员"提示。
- * 后端 team/create 本身仍无角色限制，此屏蔽仅在前端实现。
+ * 任意已认证用户都可创建 Team，并自动成为 owner/admin。
  */
 function EmptyTeamState({ onCreateTeam }: { onCreateTeam?: () => void }) {
   const { t } = useTranslation();

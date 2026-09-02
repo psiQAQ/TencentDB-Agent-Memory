@@ -71,13 +71,6 @@ function bind<S2 extends ZodType>(schema: S2, fn: BizFn<S2["_output"]>): Handler
   };
 }
 
-function orNotFound<T>(entity: T | null, code: string, id: string): T {
-  if (entity === null || entity === undefined) {
-    throw new MetadataError(code, `not found: ${id}`);
-  }
-  return entity;
-}
-
 const OK = { ok: true } as const;
 
 // ── Route table（55 接口）──
@@ -131,16 +124,16 @@ const routeTable: Record<string, Handler> = {
 
   // Team
   [`${V3_PREFIX}/team/create`]: bind(S.teamCreateSchema, (d, c, s) => s.createTeamForCaller(d, c)),
-  [`${V3_PREFIX}/team/get`]: bind(S.teamGetSchema, async (d, _c, s) => orNotFound(await s.getTeamById(d.team_id), "team_not_found", d.team_id)),
+  [`${V3_PREFIX}/team/get`]: bind(S.teamGetSchema, (d, c, s) => s.getTeamForCaller(d.team_id, c)),
   [`${V3_PREFIX}/team/update`]: bind(S.teamUpdateSchema, async (d, c, s) => {
     const { team_id, ...patch } = d;
     return s.updateTeamForCaller(team_id, patch, c);
   }),
   [`${V3_PREFIX}/team/delete`]: bind(S.teamDeleteSchema, (d, c, s) => s.deleteTeamsForCaller(d.team_ids, c)),
-  [`${V3_PREFIX}/team/list`]: bind(S.teamListSchema, async (d, _c, s) => {
+  [`${V3_PREFIX}/team/list`]: bind(S.teamListSchema, async (d, c, s) => {
     const userId = await resolveUserId(s, d);
     const filter = d.name ? { name: d.name } : undefined;
-    return s.listTeamsByUser(userId, resolvePagination(d), filter);
+    return s.listTeamsForCaller(userId, c, resolvePagination(d), filter);
   }),
 
   // TeamMember
@@ -161,13 +154,13 @@ const routeTable: Record<string, Handler> = {
 
   // Agent
   [`${V3_PREFIX}/agent/create`]: bind(S.agentCreateSchema, (d, c, s) => s.createAgentForCaller(d, c)),
-  [`${V3_PREFIX}/agent/get`]: bind(S.agentGetSchema, async (d, _c, s) => orNotFound(await s.getAgentById(d.agent_id), "agent_not_found", d.agent_id)),
+  [`${V3_PREFIX}/agent/get`]: bind(S.agentGetSchema, (d, c, s) => s.getAgentForCaller(d.agent_id, c)),
   [`${V3_PREFIX}/agent/update`]: bind(S.agentUpdateSchema, async (d, c, s) => {
     const { agent_id, ...patch } = d;
     return s.updateAgentForCaller(agent_id, patch, c);
   }),
   [`${V3_PREFIX}/agent/delete`]: bind(S.agentDeleteSchema, (d, c, s) => s.deleteAgentsForCaller(d.agent_ids, c)),
-  [`${V3_PREFIX}/agent/list`]: bind(S.agentListSchema, async (d, _c, s) => {
+  [`${V3_PREFIX}/agent/list`]: bind(S.agentListSchema, async (d, c, s) => {
     const pagination = resolvePagination(d);
     if (d.team_id) {
       // team_id 分支：owner_user_id 若同传则叠加过滤（"团队内我 owner 的 agent"），
@@ -176,25 +169,25 @@ const routeTable: Record<string, Handler> = {
       if (d.status) filter.status = d.status;
       if (d.owner_user_id) filter.owner_user_id = d.owner_user_id;
       if (d.name) filter.name = d.name;
-      return s.listAgentsByTeam(d.team_id, pagination, filter);
+      return s.listAgentsByTeamForCaller(d.team_id, c, pagination, filter);
     }
     const ownerId = d.owner_user_id ?? await resolveUserId(s, { user_key: d.owner_user_key });
     const filter2: AgentFilter = {};
     if (d.status) filter2.status = d.status;
     if (d.name) filter2.name = d.name;
-    return s.listAgentsByOwner(ownerId, pagination, Object.keys(filter2).length ? filter2 : undefined);
+    return s.listAgentsByOwnerForCaller(ownerId, c, pagination, Object.keys(filter2).length ? filter2 : undefined);
   }),
   [`${V3_PREFIX}/agent/archive`]: bind(S.agentArchiveSchema, (d, c, s) => s.archiveAgentForCaller(d.agent_id, c)),
 
   // Task
   [`${V3_PREFIX}/task/create`]: bind(S.taskCreateSchema, (d, c, s) => s.createTaskForCaller(d, c)),
-  [`${V3_PREFIX}/task/get`]: bind(S.taskGetSchema, async (d, _c, s) => orNotFound(await s.getTaskById(d.task_id), "task_not_found", d.task_id)),
+  [`${V3_PREFIX}/task/get`]: bind(S.taskGetSchema, (d, c, s) => s.getTaskForCaller(d.task_id, c)),
   [`${V3_PREFIX}/task/update`]: bind(S.taskUpdateSchema, (d, c, s) => {
     const { task_id, ...patch } = d;
     return s.updateTaskForCaller(task_id, patch, c);
   }),
   [`${V3_PREFIX}/task/delete`]: bind(S.taskDeleteSchema, (d, c, s) => s.deleteTasksForCaller(d.task_ids, c)),
-  [`${V3_PREFIX}/task/list`]: bind(S.taskListSchema, async (d, _c, s) => {
+  [`${V3_PREFIX}/task/list`]: bind(S.taskListSchema, async (d, c, s) => {
     const filter: TaskFilter = {};
     if (d.status) filter.status = d.status;
     if (d.title) filter.title = d.title;
@@ -204,8 +197,10 @@ const routeTable: Record<string, Handler> = {
       filter.creator_user_id = await resolveUserId(s, { user_key: d.creator_user_key });
     }
     const pagination = resolvePagination(d);
-    if (d.team_id) return s.listTasksByTeam(d.team_id, pagination, filter);
-    return s.listTasks(filter, pagination);
+    if (d.team_id) return s.listTasksByTeamForCaller(d.team_id, c, pagination, filter);
+    const creatorId = filter.creator_user_id ?? c.userId;
+    if (!creatorId) throw new MetadataError("permission_denied", "authentication required");
+    return s.listTasksByCreatorForCaller(creatorId, c, pagination, filter);
   }),
   [`${V3_PREFIX}/task/archive`]: bind(S.taskArchiveSchema, (d, c, s) => s.archiveTaskForCaller(d.task_id, c)),
 
@@ -218,8 +213,8 @@ const routeTable: Record<string, Handler> = {
     await s.unlinkTaskAgentForCaller(d.task_id, d.agent_id, c);
     return OK;
   }),
-  [`${V3_PREFIX}/task-agent/list`]: bind(S.taskAgentListSchema, (d, _c, s) =>
-    s.listTaskAgents(d.task_id, resolvePagination(d)),
+  [`${V3_PREFIX}/task-agent/list`]: bind(S.taskAgentListSchema, (d, c, s) =>
+    s.listTaskAgentsForCaller(d.task_id, c, resolvePagination(d)),
   ),
 
   // ParticipationLog
@@ -239,18 +234,18 @@ const routeTable: Record<string, Handler> = {
 
   // Asset
   [`${V3_PREFIX}/asset/create`]: bind(S.assetCreateSchema, (d, c, s) => s.createAssetForCaller(d, c)),
-  [`${V3_PREFIX}/asset/get`]: bind(S.assetGetSchema, async (d, _c, s) => orNotFound(await s.getAssetById(d.asset_id), "asset_not_found", d.asset_id)),
+  [`${V3_PREFIX}/asset/get`]: bind(S.assetGetSchema, (d, c, s) => s.getAssetForCaller(d.asset_id, c)),
   [`${V3_PREFIX}/asset/update`]: bind(S.assetUpdateSchema, (d, c, s) => {
     const { asset_id, ...patch } = d;
     return s.updateAssetForCaller(asset_id, patch, c);
   }),
   [`${V3_PREFIX}/asset/delete`]: bind(S.assetDeleteSchema, (d, c, s) => s.deleteAssetsForCaller(d.asset_ids, c)),
-  [`${V3_PREFIX}/asset/list`]: bind(S.assetListSchema, (d, _c, s) => {
+  [`${V3_PREFIX}/asset/list`]: bind(S.assetListSchema, (d, c, s) => {
     const { team_id, limit, offset, ...filter } = d;
-    return s.listAssetsByTeam(team_id, resolvePagination({ limit, offset }), filter);
+    return s.listAssetsByTeamForCaller(team_id, c, resolvePagination({ limit, offset }), filter);
   }),
-  [`${V3_PREFIX}/asset/list-accessible`]: bind(S.assetListAccessibleSchema, (d, _c, s) =>
-    s.listAccessibleAssets(d)),
+  [`${V3_PREFIX}/asset/list-accessible`]: bind(S.assetListAccessibleSchema, (d, c, s) =>
+    s.listAccessibleAssetsForCaller(d, c)),
 
   [`${V3_PREFIX}/asset/touch-usage`]: bind(S.assetTouchUsageSchema, async (d, c, s) => {
     await s.touchAssetUsageForCaller(d.asset_id, c);
@@ -262,12 +257,13 @@ const routeTable: Record<string, Handler> = {
     await s.setAgentFixedAssetsForCaller(d.agent_id, d.bindings, c);
     return OK;
   }),
-  [`${V3_PREFIX}/agent-fixed-asset/list`]: bind(S.fixedAssetListSchema, (d, _c, s) =>
-    s.listAgentFixedAssets(d.agent_id, resolvePagination(d)),
+  [`${V3_PREFIX}/agent-fixed-asset/list`]: bind(S.fixedAssetListSchema, (d, c, s) =>
+    s.listAgentFixedAssetsForCaller(d.agent_id, c, resolvePagination(d)),
   ),
-  [`${V3_PREFIX}/agent-fixed-asset/list-with-detail`]: bind(S.fixedAssetListWithDetailSchema, (d, _c, s) => s.listAgentFixedAssetsWithDetail(d)),
-  [`${V3_PREFIX}/agent-fixed-asset/summary-by-agents`]: bind(S.fixedAssetSummaryByAgentsSchema, (d, _c, s) =>
-    s.summarizeAgentFixedAssetsByAgents({ agent_ids: d.agent_ids, asset_id: d.asset_id }),
+  [`${V3_PREFIX}/agent-fixed-asset/list-with-detail`]: bind(S.fixedAssetListWithDetailSchema, (d, c, s) =>
+    s.listAgentFixedAssetsWithDetailForCaller(d, c)),
+  [`${V3_PREFIX}/agent-fixed-asset/summary-by-agents`]: bind(S.fixedAssetSummaryByAgentsSchema, (d, c, s) =>
+    s.summarizeAgentFixedAssetsByAgentsForCaller({ agent_ids: d.agent_ids, asset_id: d.asset_id }, c),
   ),
 
   // ACL
@@ -285,9 +281,9 @@ const routeTable: Record<string, Handler> = {
   [`${V3_PREFIX}/acl/list`]: bind(S.aclListSchema, (d, c, s) =>
     s.listAclByAssetForCaller(d.asset_id, c, resolvePagination(d)),
   ),
-  [`${V3_PREFIX}/acl/check`]: bind(S.aclCheckSchema, async (d, _c, s) => {
+  [`${V3_PREFIX}/acl/check`]: bind(S.aclCheckSchema, async (d, c, s) => {
     if (d.agent_id) await requireEntity(s, EntityType.Agent, d.agent_id);
-    return s.checkAssetPermission(d);
+    return s.checkAssetPermissionForCaller(d, c);
   }),
 
   // Auth
@@ -330,6 +326,7 @@ function mapErrorCode(code: string): number {
     case "bootstrap_admin_key_cannot_revoke":
     case "already_initialized":
     case "last_system_admin":
+    case "user_has_owned_resources":
     case "member_already_exists":
       return 409;
     case "invalid_credentials":

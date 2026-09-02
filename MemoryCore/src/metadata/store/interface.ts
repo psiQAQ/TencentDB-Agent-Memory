@@ -41,6 +41,7 @@ import type {
   TeamFilter,
   AssetFilter,
   BatchDeleteResult,
+  UserOwnedResourceCounts,
   ListPage,
   PaginationParams,
   InstanceUserListFilter,
@@ -91,6 +92,7 @@ export interface IMetadataStore {
   countUsers(): MaybePromise<number>;
   countSystemAdmins(): MaybePromise<number>;
   countTeams(): MaybePromise<number>;
+  getUserOwnedResourceCounts(userId: string): MaybePromise<UserOwnedResourceCounts>;
 
   // ── UserKey（多 API 密钥）──
   createUserKey(input: CreateUserKeyInput): MaybePromise<UserKeyEntity>;

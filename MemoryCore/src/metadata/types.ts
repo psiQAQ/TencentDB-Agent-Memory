@@ -506,6 +506,14 @@ export interface BatchDeleteResult {
   failed: Array<{ id: string; reason: string }>;
 }
 
+/** 用户直接拥有的业务资源数量；用于删除前的整批安全检查。 */
+export interface UserOwnedResourceCounts {
+  teams: number;
+  agents: number;
+  tasks: number;
+  assets: number;
+}
+
 // ============================
 // ConfigParam 类型
 // ============================

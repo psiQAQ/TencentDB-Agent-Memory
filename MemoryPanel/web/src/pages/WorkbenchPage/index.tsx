@@ -24,7 +24,6 @@ export function WorkbenchPage() {
       activeTeamId={activeTeamId}
       currentUser={auth.user_id}
       agents={teamAgents}
-      isAdmin={auth.isAdmin === true}
     />
   );
 }

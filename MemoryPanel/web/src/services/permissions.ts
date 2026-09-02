@@ -1,12 +1,12 @@
 /**
  * permissions.ts — 全局权限判断的唯一权威实现。
  *
- * 从原 demoStore.ts 中抽出。isGlobalAdmin 是全站唯一的"全局 admin"判定
- * 入口（与 team/agent/task 的后端实现无关，纯前端 auth state 判断）。
+ * isGlobalAdmin 只识别实例级 system_admin，用于用户与凭证管理入口；
+ * Team/Agent/Task/Asset 权限必须另查真实 Team membership/role。
  */
 
 /**
- * 全局 admin 判断：admin 拥有所有权限，可见所有内容。
+ * 全局账号类型判断：system_admin 可管理实例用户与凭证，但不自动获得 Team 权限。
  *
  * 唯一权威来源：auth/verify 响应的 `user.user_type === 'system_admin'`，
  * 由 LoginGate 在登录时写入 `AuthState.isAdmin`。

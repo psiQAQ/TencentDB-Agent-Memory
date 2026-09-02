@@ -36,10 +36,10 @@ export interface PublicUser {
   updated_at: string;
   /**
    * 全局用户类型（auth/verify、user/get、user/list 均会返回），
-   * 'system_admin' = 全局唯一的 admin 身份，与 team 无关；其余（如 'user'）都是普通用户。
+   * 'system_admin' = 全局唯一的人员/凭证管理员；'normal' = 普通账号。
    * 这是判断"当前登录用户是不是 admin"的唯一权威字段——不要再用 username === 'admin' 兜底猜。
    */
-  user_type?: 'system_admin' | 'user' | string;
+  user_type: 'system_admin' | 'normal';
 }
 
 export interface Team {

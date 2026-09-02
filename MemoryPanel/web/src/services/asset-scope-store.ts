@@ -6,7 +6,7 @@
  *
  * 需求：每个 owner 可以管理「自己的资产」，选择该资产是
  *   - team    团队内可配置：team 成员都能配置 / 编辑这条资产
- *   - private 仅自己私有：只有 owner（+ team admin / 全局 admin）能配置 / 编辑
+ *   - private 仅自己私有：只有 owner（或当前 Team owner/admin）能配置 / 编辑
  *
  * 这一层覆盖全部 5 类资产（agent / skill / code / wiki / memory）。不同资产的
  * 底层数据来源不同（backendStore / mock / 后端 knowledgeApi），但「可配置范围」
@@ -86,7 +86,7 @@ export function setAssetConfigScope(
 
 /**
  * 谁能改一条资产的可配置范围：
- *   - 全局 admin / team admin → 可改（治理需要）
+ *   - 当前 Team owner/admin → 可改（Team 自治）
  *   - owner 本人 → 可改（"管理自己的资产"）
  *   - 无归属资产（ownerUserId 为空，如后端 Code/Wiki 没有 owner 概念）
  *     → 任意 team 成员可设置，首次设置者成为 owner

@@ -1,12 +1,12 @@
 /**
- * DefaultAgentTemplateSection —— 「默认 Agent 模板」管理区（仅全局 admin 可见）。
+ * DefaultAgentTemplateSection —— 「默认 Agent 模板」管理区（仅当前 Team owner/admin 可见）。
  *
  * 放置于 Agents 页面的 AgentGrid 上方：
  *   - 未配置：展示「新建默认 Agent」入口；
  *   - 已配置：展示当前模板摘要 + 「修改配置」入口。
  *
- * 数据源：agent/get-default-template（无权限校验）；写操作 agent/set-default-template
- * 仅 system_admin 可调用，因此本组件只在 isAdmin=true 时渲染。
+ * 数据源：agent/get-default-template；Panel 服务端要求 active membership，写操作
+ * agent/set-default-template 还要求真实 Team admin 角色。
  */
 
 import { useCallback, useEffect, useState } from 'react';

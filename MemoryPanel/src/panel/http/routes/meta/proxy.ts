@@ -40,6 +40,31 @@ function readAction(path: string): string {
   return path.slice(idx + marker.length);
 }
 
+/** 默认 Agent 模板只按真实 Team membership 授权，不继承 system_admin 全局身份。 */
+async function getCallerActiveTeamRole(
+  deps: PanelDeps,
+  ctx: MetaCallContext,
+  teamId: string,
+): Promise<'admin' | 'member' | 'reviewer' | null> {
+  const userId = await resolveCallerUserId(deps, ctx);
+  if (!userId || !teamId) return null;
+  try {
+    const envelope = await deps.metaKernel.invoke(
+      'team-member/get',
+      { team_id: teamId, user_id: userId },
+      ctx,
+    );
+    if (envelope.code !== 0 || !envelope.data) return null;
+    const member = envelope.data as { user_id?: string; role?: string; status?: string };
+    if (member.user_id !== userId || member.status === 'removed') return null;
+    return member.role === 'admin' || member.role === 'member' || member.role === 'reviewer'
+      ? member.role
+      : null;
+  } catch {
+    return null;
+  }
+}
+
 // ── 创建时重复名称检查 ──
 
 interface DupCheckConfig {
@@ -188,19 +213,23 @@ export function registerMetaProxyRoutes(api: Hono, deps: PanelDeps): void {
 
     // ── 默认 Agent 模板读写：Panel 直接读写本地文件（不转发内核）──
     if (action === 'agent/set-default-template') {
-      if (!(await isCallerSystemAdmin(deps, ctx))) {
-        return respondControlError(c, 403, 'permission_denied');
-      }
       const teamId = typeof body.team_id === 'string' ? body.team_id : '';
       const template = body.template;
       if (!teamId || !template || typeof template !== 'object') {
         return respondControlError(c, 400, 'INVALID_PARAM');
+      }
+      if ((await getCallerActiveTeamRole(deps, ctx, teamId)) !== 'admin') {
+        return respondControlError(c, 403, 'permission_denied');
       }
       writeTemplateFile(deps.config.agentTemplateDir, ctx.instanceId, teamId, template as AgentTemplateConfig);
       return respondEnvelope(c, { code: 0, message: 'ok', request_id: ctx.reqId ?? '', data: { ok: true } });
     }
     if (action === 'agent/get-default-template') {
       const teamId = typeof body.team_id === 'string' ? body.team_id : '';
+      if (!teamId) return respondControlError(c, 400, 'INVALID_PARAM');
+      if (!(await getCallerActiveTeamRole(deps, ctx, teamId))) {
+        return respondControlError(c, 403, 'permission_denied');
+      }
       const template = teamId ? readTemplateFile(deps.config.agentTemplateDir, ctx.instanceId, teamId) : null;
       return respondEnvelope(c, { code: 0, message: 'ok', request_id: ctx.reqId ?? '', data: template ?? {} });
     }

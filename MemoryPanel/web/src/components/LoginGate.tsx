@@ -30,10 +30,11 @@ export interface AuthState {
   instance_id: string;
   instance_name: string;
   loggedInAt: number;
+  /** 全局账号类型；与当前 Team 角色相互独立。 */
+  user_type: 'normal' | 'system_admin';
   /**
    * 是否是全局 admin —— 来自 auth/verify 响应 data.user.user_type === 'system_admin'。
-   * admin 是全局角色，与是否创建/加入任何 team 无关（管团队，不管资源）；
-   * 非 admin 的普通用户（user_type !== 'system_admin'）才需要按 team.members 表查角色。
+   * system_admin 只管理全局用户与凭证，不自动获得任何 Team 业务权限。
    */
   isAdmin: boolean;
 }
@@ -64,6 +65,7 @@ function toAuthState(user: PublicUser, instanceId: string, instanceName: string)
     instance_id: instanceId,
     instance_name: instanceName,
     loggedInAt: Date.now(),
+    user_type: user.user_type === 'system_admin' ? 'system_admin' : 'normal',
     isAdmin: user.user_type === 'system_admin',
   };
 }

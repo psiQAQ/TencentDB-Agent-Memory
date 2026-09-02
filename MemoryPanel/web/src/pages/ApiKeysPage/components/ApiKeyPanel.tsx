@@ -109,7 +109,7 @@ export default function ApiKeyPanel() {
         const ownSubject: ApiKeySubject = {
           userId: auth.user_id,
           username: auth.user,
-          userType: auth.isAdmin ? 'system_admin' : 'user',
+          userType: auth.user_type,
           teams: [],
         };
         const ownKeys = await userKeysApi.list();

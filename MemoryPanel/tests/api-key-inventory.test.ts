@@ -10,7 +10,7 @@ import {
 } from "../web/src/pages/ApiKeysPage/api-key-inventory.js";
 
 describe("API Key system-admin inventory", () => {
-  it("includes every Team member once, resolves owner/member roles, and keeps the current admin", () => {
+  it("includes Teamless users and resolves owner/member roles", () => {
     const subjects = buildApiKeySubjects(
       [
         { user_id: "admin", username: "root", user_type: "system_admin" },
@@ -40,6 +40,7 @@ describe("API Key system-admin inventory", () => {
     expect(subjects.map((subject) => subject.userId)).toEqual([
       "admin",
       "alice",
+      "orphan",
     ]);
     expect(subjects[1]?.teams).toEqual([
       {
@@ -142,7 +143,7 @@ describe("API Key system-admin inventory", () => {
       key_id: "only",
       ownerUserId: "alice",
       ownerName: "Alice",
-      ownerUserType: "user",
+      ownerUserType: "normal",
       teamMemberships: [],
     };
     const secondKey = { ...onlyKey, key_id: "second" };
@@ -166,7 +167,7 @@ describe("API Key system-admin inventory", () => {
     expect(getKeyRevokeBlockReason(onlyKey, [onlyKey, secondKey])).toBeNull();
   });
 
-  it("loads member roles once per unique Team and keys only for managed subjects", async () => {
+  it("loads member roles once per unique Team and keys for every instance user", async () => {
     const teamCalls: string[] = [];
     const memberCalls: string[] = [];
     const keyCalls: string[] = [];
@@ -194,10 +195,11 @@ describe("API Key system-admin inventory", () => {
 
     expect(teamCalls.sort()).toEqual(["admin", "alice", "orphan"]);
     expect(memberCalls).toEqual(["team-a"]);
-    expect(keyCalls.sort()).toEqual(["admin", "alice"]);
+    expect(keyCalls.sort()).toEqual(["admin", "alice", "orphan"]);
     expect(inventory.keys.map((key) => key.key_id).sort()).toEqual([
       "key-admin",
       "key-alice",
+      "key-orphan",
     ]);
   });
 });

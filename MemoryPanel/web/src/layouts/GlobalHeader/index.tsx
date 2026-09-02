@@ -23,12 +23,14 @@ import { useTranslation } from 'react-i18next';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { SettingsDialog } from '@/components/SettingsDialog';
 import { type TeamRole } from '@/services/useCurrentRole';
+import { useTeams } from '@/services';
 import { TeamSwitcher } from './TeamSwitcher';
 import { LanguageSwitcher } from './LanguageSwitcher';
 import './style.css';
 
 export function GlobalHeader({
   userRole,
+  accountType,
   currentUser,
   currentUserId,
   instanceName,
@@ -36,6 +38,7 @@ export function GlobalHeader({
   onLogout,
 }: {
   userRole: TeamRole | null;
+  accountType: 'normal' | 'system_admin';
   currentUser: string;
   currentUserId?: string;
   /** 当前登录所在的 memory 实例名（来自 auth.instance_name），用于「我的资料」展示 */
@@ -52,6 +55,9 @@ export function GlobalHeader({
   const location = useLocation();
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [profileOpen, setProfileOpen] = useState(false);
+  const { activeTeam } = useTeams();
+  const isTeamOwner = !!currentUserId && activeTeam?.owner_user_id === currentUserId;
+  const role = roleDisplay(userRole, isTeamOwner);
 
   return (
     <header className="_memory-global-header">
@@ -61,7 +67,7 @@ export function GlobalHeader({
           <img src="/logo.png" alt="Memory Hub" className="_memory-global-header-logo" />
           <span className="_memory-global-header-brand-text">{t('header.brand')}</span>
         </div>
-        <TeamSwitcher userRole={userRole} />
+        <TeamSwitcher />
       </div>
 
       {/* 右侧：同步状态 + 语言切换 + 用户菜单 */}
@@ -99,6 +105,10 @@ export function GlobalHeader({
                 {currentUser.slice(0, 1).toUpperCase()}
               </span>
               <span className="_memory-global-header-username">{currentUser}</span>
+              <span className="_memory-global-header-identity-tags">
+                <span>{accountType}</span>
+                <span>{t(`header.profile.role.${role.label}`)}</span>
+              </span>
             </button>
           }
         >
@@ -140,6 +150,8 @@ export function GlobalHeader({
           currentUser={currentUser}
           currentUserId={currentUserId}
           userRole={userRole}
+          accountType={accountType}
+          isTeamOwner={isTeamOwner}
           instanceName={instanceName}
           onClose={() => setProfileOpen(false)}
           onReplayOnboarding={onReplayOnboarding}
@@ -154,10 +166,11 @@ export function GlobalHeader({
 // =================== Profile Modal ===================
 
 /** TeamRole → 展示文案 + Tag 主题色 */
-function roleDisplay(role: TeamRole | null): { label: string; theme: 'primary' | 'default' | 'warning' } {
-  if (role === 'admin') return { label: 'admin', theme: 'primary' };
+function roleDisplay(role: TeamRole | null, isOwner = false): { label: string; theme: 'primary' | 'default' | 'warning' } {
+  if (role === 'admin') return { label: isOwner ? 'owner_admin' : 'admin', theme: 'primary' };
   if (role === 'reviewer') return { label: 'reviewer', theme: 'warning' };
-  return { label: 'member', theme: 'default' };
+  if (role === 'member') return { label: 'member', theme: 'default' };
+  return { label: 'none', theme: 'default' };
 }
 
 /**
@@ -173,6 +186,8 @@ function ProfileModal({
   currentUser,
   currentUserId,
   userRole,
+  accountType,
+  isTeamOwner,
   instanceName,
   onClose,
   onReplayOnboarding,
@@ -180,13 +195,15 @@ function ProfileModal({
   currentUser: string;
   currentUserId: string;
   userRole: TeamRole | null;
+  accountType: 'normal' | 'system_admin';
+  isTeamOwner: boolean;
   instanceName?: string;
   onClose: () => void;
   onReplayOnboarding?: () => void;
 }) {
   const { t } = useTranslation();
   const initial = currentUser.slice(0, 1).toUpperCase();
-  const role = roleDisplay(userRole);
+  const role = roleDisplay(userRole, isTeamOwner);
 
   return (
     <Modal visible size="s" onClose={onClose} caption={t('header.profile.caption')}>
@@ -211,7 +228,14 @@ function ProfileModal({
               </div>
             </div>
           }
-          right={<Tag theme={role.theme} variant="soft">{t(`header.profile.role.${role.label}`)}</Tag>}
+          right={
+            <div className="_memory-profile-tags">
+              <Tag variant="soft">{t('header.profile.accountType')}: {accountType}</Tag>
+              <Tag theme={role.theme} variant="soft">
+                {t('header.profile.teamRole')}: {t(`header.profile.role.${role.label}`)}
+              </Tag>
+            </div>
+          }
         />
 
         <div className="_memory-profile-divider" />

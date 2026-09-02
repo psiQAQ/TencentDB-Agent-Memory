@@ -52,6 +52,7 @@ import type {
   TaskFilter,
   AssetFilter,
   BatchDeleteResult,
+  UserOwnedResourceCounts,
   ListPage,
   PaginationParams,
   InstanceUserListFilter,
@@ -506,6 +507,16 @@ export class MongoMetadataStore implements IMetadataStore {
 
   async countTeams(): Promise<number> {
     return this.col("meta_teams").countDocuments({});
+  }
+
+  async getUserOwnedResourceCounts(userId: string): Promise<UserOwnedResourceCounts> {
+    const [teams, agents, tasks, assets] = await Promise.all([
+      this.col("meta_teams").countDocuments({ owner_user_id: userId } as Document),
+      this.col("meta_agents").countDocuments({ owner_user_id: userId } as Document),
+      this.col("meta_tasks").countDocuments({ creator_user_id: userId } as Document),
+      this.col("meta_assets").countDocuments({ owner_user_id: userId } as Document),
+    ]);
+    return { teams, agents, tasks, assets };
   }
 
   // ============================================================

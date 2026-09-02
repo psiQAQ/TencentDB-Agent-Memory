@@ -162,6 +162,10 @@
 
 **鉴权**：`x-tdai-service-id` + `x-tdai-user-key`（仅 `auth/verify` 免 user-key）。
 
+账号类型与 Team 角色互不替代：唯一 bootstrap `system_admin` 可管理实例内全部
+用户与 User-Key，并跨 Team 只读查看人员组成；Team/Agent/Task/Asset 权限仍由
+caller 的 active membership 与真实 `admin/member/reviewer` 角色决定。
+
 **转发语义**：
 - 请求体整体透传给内核对应 action；响应信封原样返回。
 - 路径最后一段即 action 名（如 `POST /meta/agent/list` → 内核 `agent/list`）。
@@ -192,10 +196,16 @@
 | action | 行为 |
 |---|---|
 | `user/create`、`user/create-with-key`、`team/create`、`agent/create`、`task/create` | 先按 name/username/title 查重，重名返回 `409` 中文提示 |
-| `agent/set-default-template` | **不转发内核**，Panel 本地写模板文件；需 `system_admin` 权限，否则 `403 permission_denied`；缺 `team_id`/`template` 返回 `400 INVALID_PARAM` |
-| `agent/get-default-template` | **不转发内核**，Panel 本地读模板文件 |
+| `agent/set-default-template` | **不转发内核**，Panel 本地写模板文件；需当前 Team owner/admin（真实 role=`admin`），否则 `403 permission_denied` |
+| `agent/get-default-template` | **不转发内核**，Panel 本地读模板文件；需当前 Team active membership |
 | `team-member/add` | 成功后异步为默认 Agent 复制模板资产（best-effort） |
 | `user/list` | 隐藏内部 `knowledge-service` 计费用户 |
+
+人员管理约定：`user/create` 与 `user/create-with-key` 只允许 `system_admin`，且固定
+创建 `normal`；`user/delete` 请求体为 `{ "user_ids": [...] }`，目标仍拥有 Team、
+Agent、Task 或 Asset 时内核返回 `409 user_has_owned_resources` 并保持整批不变。
+`team-member/add` 只添加已有账号，可写 `admin/member/reviewer`，已有成员调用时更新角色。
+`system_admin` 的 Teamless 用户同样属于 User-Key 管理范围。
 
 **示例**（`agent/create`）：
 
@@ -1338,7 +1348,7 @@ Panel 会再次按 Task 可见性过滤 Core 聚合行，Core 即使错误返回
 | 404 | UNKNOWN_META_ACTION | 未知 meta action |
 | 404 | UNKNOWN_SKILL_ACTION | 未知 skill action |
 | 501 | NOT_IN_SCOPE | action 未对面板开放（agent-fixed-asset/*） |
-| 403 | permission_denied | 非 system_admin 操作默认模板 |
+| 403 | permission_denied | 非当前 Team admin 写默认模板，或非 Team member 读取模板 |
 | 400 | INVALID_PARAM | `agent/set-default-template` 缺 `team_id`/`template` |
 
 **Chat-Memory**

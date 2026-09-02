@@ -104,6 +104,20 @@
   white-space: nowrap;
 }
 
+._memory-global-header-identity-tags {
+  display: flex;
+  gap: 4px;
+}
+
+._memory-global-header-identity-tags > span {
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: var(--tea-color-bg-secondary-default);
+  color: var(--tea-color-text-secondary);
+  font: 10px/16px var(--font-mono);
+  white-space: nowrap;
+}
+
 ._memory-global-header-icon-btn {
   display: inline-flex;
   align-items: center;
@@ -180,6 +194,13 @@
   text-overflow: ellipsis;
   white-space: nowrap;
   max-width: 220px;
+}
+
+._memory-profile-tags {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 6px;
 }
 
 ._memory-profile-divider {

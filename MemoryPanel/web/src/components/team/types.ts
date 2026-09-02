@@ -3,7 +3,7 @@
  * 无 React 依赖，方便被 hooks / 各 Dialog 子模块共用。
  */
 
-import { isTeamAdmin, isGlobalAdmin, type Team } from '@/services';
+export { canRemoveMember } from '@/services/team-role';
 
 export const MAX_IMPORTED_CHAT_MEMORIES = 2;
 
@@ -63,16 +63,4 @@ export interface AgentOverviewEnvelope {
 
 export function emptyMountedCounts(): AgentMountedCounts {
   return { skills: 0, code_graph: 0, llm_wiki: 0, chat_memory: 0 };
-}
-
-/** 移除成员权限：全局 admin / team owner / team admin 可以移除非 owner 成员；owner 不可被移除（含全局 admin）。 */
-export function canRemoveMember(
-  team: Team,
-  targetUserId: string,
-  currentUser: string,
-  globalAdmin: boolean,
-): boolean {
-  if (targetUserId === team.owner_user_id) return false;
-  if (isGlobalAdmin(currentUser, globalAdmin)) return true;
-  return isTeamAdmin(team, currentUser);
 }

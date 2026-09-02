@@ -50,7 +50,6 @@ export default function AgentGrid({
   countsLoading,
   mountedCounts,
   currentUser,
-  isAdmin: _isAdmin,
   canSeeAllAgents,
   onCreateAgent,
   onEditAgent,
@@ -63,9 +62,7 @@ export default function AgentGrid({
   countsLoading: boolean;
   mountedCounts: Record<string, AgentMountedCounts>;
   currentUser: string;
-  /** 保留接口兼容；admin 不再有特殊权限。 */
-  isAdmin: boolean;
-  /** 是否有权限看到 team 内全部 agent（admin / team admin）。普通用户只能看到自己的，无需 Owner 筛选。 */
+  /** 是否有权限看到 team 内全部 agent（Team owner/admin）。普通成员只看到自己的。 */
   canSeeAllAgents: boolean;
   onCreateAgent: () => void;
   onEditAgent: (agent: StoreAgent) => void;
@@ -110,7 +107,7 @@ export default function AgentGrid({
   }, [agents, keyword, ownerFilter]);
 
   function canEdit(agent: StoreAgent): boolean {
-    // admin 与 member 一致：只能操作自己 owner 的 agent（不再有全局 admin 特权）。
+    // 资产 owner 或当前 Team owner/admin 可操作；全局账号类型不参与判断。
     return canManageAsset(
       { owner_user_id: agent.owner_user_id, team_id: agent.team_id },
       activeTeam,

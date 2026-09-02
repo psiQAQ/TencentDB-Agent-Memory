@@ -810,20 +810,29 @@ upsert 知识明细（幂等）。
 > 失败 message 格式 `"{error_code}: {detail}"`，HTTP 状态由 mapErrorCode 映射（见 §4.2）。
 > 所有 list 接口出参统一 `{ items, total, limit, offset }`。
 
+**账号类型与 Team 角色**：单实例只有一个 bootstrap `system_admin`；公开
+`user/create*` 固定创建 `normal`。`system_admin` 可管理实例内全部用户和 User-Key，
+并可跨 Team 只读查询用户所属 Team 与成员角色；它不会自动获得 Team 业务权限。
+Team/Agent/Task/Asset 及关联关系的读取要求 caller 是资源所属 Team 的 active member，
+Team 更新、删除及人员变更仅限真实 Team owner/admin。
+
 ### 3.7.1 User（5）
 
 | 接口 | 鉴权 | 说明 |
 |---|---|---|
 | `POST /user/create` | system_admin | 建普通用户，返回 `{ user_id, user_type, created_at, default_user_key }` |
 | `POST /user/create-with-key` | system_admin | 姊妹接口，可显式指定 user_key |
-| `POST /user/get` | 本人/admin | 按 user_id 或 user_key 查 |
-| `POST /user/delete` | admin | 批量删除 |
-| `POST /user/list` | admin | 分页列表 |
+| `POST /user/get` | 本人/system_admin | 按 user_id 或 user_key 查 |
+| `POST /user/delete` | system_admin | 安全批量删除 |
+| `POST /user/list` | system_admin 或 Team member | 实例/Team 范围分页列表 |
 
 **create 请求体**：`username`、`user_id?`（可指定确定性 ID）。
 **create-with-key 请求体**：`username`、`user_key`。
 **get 请求体**：`user_id` 或 `user_key`（二选一）。
 **list 请求体**：`team_id?`、`user_ids?`(≤100)、`username?` + 分页。
+**delete 请求体**：`user_ids: string[]`。任一目标仍拥有 Team、Agent、Task 或 Asset
+时整批返回 `409 user_has_owned_resources`，message 含各类数量，且不删除任何数据；
+最后一个 `system_admin` 仍受 `last_system_admin` 保护。
 
 **UserPublic 响应**：`{ user_id, user_type: "normal"\|"system_admin", username, created_at }`。
 
@@ -854,21 +863,25 @@ upsert 知识明细（幂等）。
 
 **create 请求体**：`user_id?`、`name?`(≤128)、`expires_at?`。
 
+普通用户只能管理自己的 Key；`system_admin` 可为任意实例用户列出、创建、更新和吊销 Key，
+包括尚未加入任何 Team 的 `normal` 用户。
+
 **UserKeyPublic 响应**：`{ key_id, user_id, key_prefix, name?, status: "active"\|"revoked", is_default, last_used_at?, expires_at?, created_at, revoked_at? }`。create 额外返回 `key_value`（仅此一次完整 key）。`key_id` 由服务生成且不可自定义；`name` 是创建者可填写的可选备注名（最长 128 字符）。`init-admin` 创建的 `system_admin` 默认 Key（`is_default=true`）对应部署持久化的 `.admin-key`，不可吊销；其他 `system_admin` Key 可吊销。
 
 ### 3.7.3 Team（5）
 
 | 接口 | 说明 |
 |---|---|
-| `POST /team/create` | 建 team |
-| `POST /team/get` | 按 team_id 查 |
-| `POST /team/update` | 更新（owner 不可改） |
-| `POST /team/delete` | 批量删除 |
-| `POST /team/list` | 按 user 列出其所属 team |
+| `POST /team/create` | 任意已认证用户为自己建 Team，创建后为 owner/admin |
+| `POST /team/get` | active member 按 team_id 查 |
+| `POST /team/update` | Team owner/admin 更新（owner 不可改） |
+| `POST /team/delete` | Team owner/admin 批量删除 |
+| `POST /team/list` | 本人列所属 Team；system_admin 可按任意用户只读查询关系 |
 
 **create 请求体**：`name`、`owner_user_id`、`description?`、`status?`(active/archived)、`metadata_json?`。
 **update 请求体**：`team_id`、`name?`、`description?`、`status?`、`metadata_json?`（owner 传入被 strip）。
 **list 请求体**：`user_id`/`user_key`(二选一) + `name?` + 分页。
+`team/create.owner_user_id` 必须等于 caller，不允许代他人创建。
 
 **TeamEntity 响应**：`{ team_id, name, description?, owner_user_id, status, created_at, updated_at, metadata_json }`。
 
@@ -876,12 +889,13 @@ upsert 知识明细（幂等）。
 
 | 接口 | 说明 |
 |---|---|
-| `POST /team-member/add` | 加成员 |
-| `POST /team-member/remove` | 移除成员 |
-| `POST /team-member/list` | 成员列表 |
-| `POST /team-member/get` | 单查成员 |
+| `POST /team-member/add` | Team admin 添加已有账号或更新其角色 |
+| `POST /team-member/remove` | Team admin 移除非 owner、非自己的成员 |
+| `POST /team-member/list` | active member；system_admin 跨 Team 只读例外 |
+| `POST /team-member/get` | active member；system_admin 跨 Team 只读例外 |
 
 **add 请求体**：`team_id`、`user_id`、`role?`(admin/member/reviewer)、`status?`。
+owner 角色不可降级，Team admin 不可用 add 修改自己的角色。
 **list 请求体**：`team_id` + 分页。
 
 **TeamMemberView 响应**：`{ id, team_id, user_id, role, joined_at, status, username }`（username 为 JOIN 所得）。
@@ -891,10 +905,10 @@ upsert 知识明细（幂等）。
 | 接口 | 说明 |
 |---|---|
 | `POST /agent/create` | 建 agent |
-| `POST /agent/get` | 按 agent_id 查 |
+| `POST /agent/get` | 所属 Team active member 按 agent_id 查 |
 | `POST /agent/update` | 更新（owner 不可改） |
 | `POST /agent/delete` | 批量删除 |
-| `POST /agent/list` | 按 team 或 owner 列表 |
+| `POST /agent/list` | active member 按 Team 列表；owner 分支只能查 caller 自己 |
 | `POST /agent/archive` | 归档 |
 
 **create 请求体**：`team_id`、`owner_user_id`、`name`、`description?`、`prompt?`、`visibility?`、`status?`、`metadata_json?`。
@@ -922,10 +936,10 @@ upsert 知识明细（幂等）。
 | 接口 | 说明 |
 |---|---|
 | `POST /task/create` | 建 task（可带 linked_agents） |
-| `POST /task/get` | 按 task_id 查 |
+| `POST /task/get` | 所属 Team active member 按 task_id 查 |
 | `POST /task/update` | 更新 |
 | `POST /task/delete` | 批量删除 |
-| `POST /task/list` | 按 team 或 creator 列表 |
+| `POST /task/list` | active member 按 Team 列表；creator 分支只能查 caller 自己 |
 | `POST /task/archive` | 归档 |
 
 **create 请求体**：`team_id`、`creator_user_id`、`title`、`description?`、`source_type?`(manual/tapd/github/other)、`source_url?`、`status?`(running/completed)、`auto_assign_floating_assets?`、`risk_level?`、`metadata_json?`、`linked_agents?`(`[{ agent_id, role_in_task? }]`)。
@@ -938,7 +952,7 @@ upsert 知识明细（幂等）。
 |---|---|
 | `POST /task-agent/link` | 关联 agent 到 task |
 | `POST /task-agent/unlink` | 解除关联 |
-| `POST /task-agent/list` | 列出 task 的 agents |
+| `POST /task-agent/list` | 所属 Team active member 列出 task 的 agents |
 
 **link 请求体**：`task_id`、`agent_id`、`role_in_task?`。
 
@@ -959,16 +973,17 @@ upsert 知识明细（幂等）。
 | 接口 | 说明 |
 |---|---|
 | `POST /asset/create` | 登记资产（asset_id 由调用方提供） |
-| `POST /asset/get` | 按 asset_id 查 |
+| `POST /asset/get` | 所属 Team active member 按 asset_id 查 |
 | `POST /asset/update` | 更新 |
 | `POST /asset/delete` | 批量删除 |
-| `POST /asset/list` | 按 team 列表 |
-| `POST /asset/list-accessible` | 按权限列出可访问资产 |
+| `POST /asset/list` | active member 按 Team 列表 |
+| `POST /asset/list-accessible` | caller 本人按 visibility/ACL 列出可访问资产 |
 | `POST /asset/touch-usage` | 触碰使用（更新 last_used_at） |
 
 **create 请求体**：`asset_id`、`team_id`、`asset_type`(skill/llm_wiki/code_graph/chat_memory)、`name`、`owner_user_id`、`source_type`、`description?`、`source_ref?`、`visibility?`、`status?`、`confidence?`、`expires_at?`、`content_ref?`、`metadata_json?`。
 **list 请求体**：`team_id`、`asset_type?`、`status?`、`owner_user_id?`、`visibility?` + 分页。
 **list-accessible 请求体**：`user_id`/`user_key`(二选一) + `team_id?`、`action?`、`asset_type?`、`agent_id?`、`visibility?`(单值或数组) + 分页。
+请求身份必须解析为 caller；显式 `team_id` 时 caller 还必须是该 Team 的 active member。
 
 **AssetEntity 响应**：`{ asset_id, team_id, asset_type, name, description?, owner_user_id, source_type, source_ref?, version, visibility, status, confidence?, expires_at?, last_used_at?, usage_count, content_ref?, created_at, updated_at, metadata_json }`。
 
@@ -977,9 +992,9 @@ upsert 知识明细（幂等）。
 | 接口 | 说明 |
 |---|---|
 | `POST /agent-fixed-asset/set` | 全量设置 agent 固定资产绑定 |
-| `POST /agent-fixed-asset/list` | 分页列出绑定 |
-| `POST /agent-fixed-asset/list-with-detail` | 带详情 + 可见性过滤 |
-| `POST /agent-fixed-asset/summary-by-agents` | 多 agent 按类型聚合计数 |
+| `POST /agent-fixed-asset/list` | 所属 Team active member 分页列出绑定 |
+| `POST /agent-fixed-asset/list-with-detail` | 所属 Team active member 读取详情与可见性过滤 |
+| `POST /agent-fixed-asset/summary-by-agents` | 所有目标 Agent 所属 Team 均须 active membership |
 
 **set 请求体**：`agent_id`、`bindings: [{ asset_id, asset_type, injection_mode?, priority?, created_by }]`。
 **list-with-detail 请求体**：`agent_id`、`apply_visibility_filter?`、`touch_usage?` + 分页。
@@ -1000,6 +1015,7 @@ upsert 知识明细（幂等）。
 **revoke 请求体**：`id`（**注意是 ACL 条目 `id`，非 `asset_id`**，`aclRevokeSchema`）。
 **list 请求体**：`asset_id` + 分页。
 **check 请求体**：`asset_id`、`action`、`user_id`/`user_key`(二选一)、`agent_id?`。
+被检查身份必须等于 caller，且 caller 必须是资产所属 Team 的 active member。
 
 **AclEntity 响应**：`{ id, asset_id, subject_type, subject_id, permission, effect, granted_by, created_at, updated_at }`。
 
@@ -1123,7 +1139,7 @@ upsert 知识明细（幂等）。
 | 401 | invalid_credentials / invalid_password / unauthorized | 鉴权失败 |
 | 403 | permission_denied / agent_team_mismatch / task_agent_not_linked / user_inactive | 权限/归属 |
 | 404 | `*_not_found`（team/agent/task/asset/user_key 等） | 资源不存在 |
-| 409 | duplicate_entry / duplicate_user_key / key_limit_exceeded / user_limit_exceeded / team_limit_exceeded / last_key_cannot_revoke / already_initialized / last_system_admin / member_already_exists / asset_not_bindable | 冲突/超限 |
+| 409 | duplicate_entry / duplicate_user_key / key_limit_exceeded / user_limit_exceeded / team_limit_exceeded / last_key_cannot_revoke / already_initialized / last_system_admin / user_has_owned_resources / member_already_exists / asset_not_bindable | 冲突/超限/安全删除拒绝 |
 
 #### 数据面 / knowledge / chat-memory / memory-prompt / generation-log（标准 HTTP code，message 纯文本或枚举）
 

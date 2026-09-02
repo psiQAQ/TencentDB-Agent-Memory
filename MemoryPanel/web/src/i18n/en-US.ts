@@ -13,6 +13,7 @@ export const enUS = {
   'menu.chat_memory': 'Chat_Memory',
   'menu.team_members': 'Members',
   'menu.team_agents': 'Agents',
+  'menu.user_management': 'User Management',
   'menu.api_keys': 'API Key',
   'menu.group.workbench': 'Workbench',
   'menu.group.organization': 'Organization',
@@ -106,7 +107,32 @@ export const enUS = {
   'menu.desc.chat_memory': 'L0–L3 layered memory assets',
   'menu.desc.team_members': 'Team members / users / roles',
   'menu.desc.team_agents': 'Agent / scope / fixed assets',
+  'menu.desc.user_management': 'Global accounts / type / create / safe delete',
   'menu.desc.api_keys': 'Manage your API keys for external clients',
+
+  // ===== User Management (system_admin only) =====
+  'users.title': 'User Management',
+  'users.desc': 'Manage instance accounts. Team membership and roles remain autonomous to each Team owner/admin.',
+  'users.create': 'Create User',
+  'users.total': '{{count}} accounts',
+  'users.search': 'Search username, user_id, or account type',
+  'users.column.username': 'Username',
+  'users.column.type': 'Account type',
+  'users.column.createdAt': 'Created at',
+  'users.column.actions': 'Actions',
+  'users.detail': 'View',
+  'users.detail.caption': 'User Details',
+  'users.create.caption': 'Create Global Account',
+  'users.create.typeFixed': 'Account type is fixed to normal. This instance allows only one bootstrap system_admin.',
+  'users.create.usernamePlaceholder': 'Letters, numbers, or underscores',
+  'users.create.customKey': 'Custom initial User_Key',
+  'users.create.customKeyHint': 'When off, Core generates it. The plaintext is shown only once after creation.',
+  'users.create.invalidUsername': 'Username may contain only letters, numbers, and underscores.',
+  'users.create.emptyKey': 'Enter a custom User_Key.',
+  'users.create.submit': 'Create normal user',
+  'users.delete.confirm': 'Delete user "{{username}}"?',
+  'users.delete.desc': 'user_id: {{userId}}. Core rejects the whole deletion if the user still owns a Team, Agent, Task, or Asset.',
+  'users.delete.systemAdminLocked': 'The bootstrap system_admin cannot be deleted',
 
   // ===== GlobalHeader =====
   'header.guide': 'Guide',
@@ -122,9 +148,13 @@ export const enUS = {
   'header.profile.userId': 'User ID',
   'header.profile.userIdHint': 'Share with your team admin to get invited to a Team',
   'header.profile.instance': 'Instance',
+  'header.profile.accountType': 'Account type',
+  'header.profile.teamRole': 'Current Team role',
+  'header.profile.role.owner_admin': 'owner (admin)',
   'header.profile.role.admin': 'Administrator',
   'header.profile.role.member': 'Member',
   'header.profile.role.reviewer': 'Reviewer',
+  'header.profile.role.none': 'Not in a Team',
   'header.profile.close': 'Close',
   'header.brand': 'Memory Hub',
 
@@ -137,7 +167,7 @@ export const enUS = {
   'teamSwitcher.teamCount': 'Teams ({{count}})',
   'teamSwitcher.empty.admin': 'No teams yet. Click "New Team" below to create one.',
   'teamSwitcher.empty.member':
-    'You have not been added to any team. Please contact your admin to be added.',
+    'You have no Team yet. Create your own below, or ask a Team admin to invite you.',
   'teamSwitcher.memberCount': '{{count}} members',
   'teamSwitcher.teamNamePlaceholder': 'Team name (required)',
   'teamSwitcher.teamDescPlaceholder': 'Team description (optional)',
@@ -1068,6 +1098,7 @@ export const enUS = {
 
   // ===== AddMemberDialog =====
   'addMember.caption': 'Add Member to "{{name}}"',
+  'addMember.existingOnlyHint': 'Only existing accounts can be added here. Ask the system_admin to create accounts in User Management first.',
   'addMember.adminOnlyHint': 'Only team admins can grant admin roles',
   'addMember.mode': 'Mode',
   'addMember.mode.existing': 'Add Existing User',
@@ -1084,7 +1115,7 @@ export const enUS = {
   'addMember.username.hint': 'Letters, numbers, underscores. Cannot be changed after creation.',
   'addMember.role': 'Role',
   'addMember.role.default': 'member (default)',
-  'addMember.role.hint': 'New members default to the member role.',
+  'addMember.role.hint': 'Choose admin, member, or reviewer. A Team owner/admin can change it later.',
   'addMember.existing.submit': 'Add',
   'addMember.new.submit': 'Create & Add',
   'addMember.cancel': 'Cancel',
@@ -1144,7 +1175,7 @@ export const enUS = {
   'apiKey.desc':
     'Manage your User Keys for external client access (e.g. CodeBuddy / ClaudeCode CLI).',
   'apiKey.desc.admin':
-    'Manage User Keys for members across all Teams. Existing keys expose only their masked prefixes.',
+    'Manage User Keys for every account, including Teamless users. Existing keys expose only their masked prefixes.',
   'apiKey.create': 'New Key',
   'apiKey.fresh.desc':
     'Here is the full Key for {{keyId}} (shown only once. Please copy and save it securely immediately. You will not be able to view it again after closing):',
@@ -1407,26 +1438,29 @@ export const enUS = {
   // Welcome (startContent, role-specific)
   'onboarding.guide.start.admin.title': 'Welcome to TDAI Panel',
   'onboarding.guide.start.admin.desc':
-    'You are an administrator: you manage teams and members. Let\'s walk through the core features — click "Next" to begin.',
+    'Your account type is system_admin: you manage instance accounts and credentials. Team permissions still depend on your actual Team role.',
   'onboarding.guide.start.member.title': 'Welcome to TDAI Panel',
   'onboarding.guide.start.member.desc':
     'You are a team member: you can manage Agents and assets within the team. Let\'s walk through the core features — click "Next" to begin.',
   // Login identity (shared by Admin / Member)
   'onboarding.guide.login.title': 'Your login identity',
   'onboarding.guide.login.desc':
-    'You are signed in with a user_key. Use the top-right menu to view your profile, switch language, or log out; ownership and permissions are based on your current identity.',
+    'You are signed in with a user_key. The top right shows account type and current Team role as two independent permission dimensions.',
+  'onboarding.guide.userManagement.title': 'Create normal users',
+  'onboarding.guide.userManagement.desc':
+    'The system_admin creates global accounts in User Management. Account type is fixed to normal and the initial User_Key is shown only once.',
   // Admin: create / switch team
   'onboarding.guide.team.title': 'Create / switch team',
   'onboarding.guide.team.desc':
-    'Click the top-left corner to switch the active team. A team is the primary boundary of assets, Agents and Tasks; as an administrator you can create new teams here.',
+    'Use the top-left switcher to change Team. Any authenticated user can create a Team and becomes its owner/admin.',
   // Admin: create members and issue user_key (not available to member)
-  'onboarding.guide.memberAdmin.title': 'Create members and issue user_key',
+  'onboarding.guide.memberAdmin.title': 'Add existing accounts and assign roles',
   'onboarding.guide.memberAdmin.desc':
-    'As an administrator you can create new user accounts in "Members" and issue a one-time user_key (shown only once), or invite existing users into the team. Regular members cannot create users — they can only invite existing ones.',
+    'A Team owner/admin adds existing accounts by user_id, selects admin, member, or reviewer, and can change roles later. Owner and self roles are locked.',
   // Member: invite teammates (cannot create users)
   'onboarding.guide.member.title': 'Invite team members',
   'onboarding.guide.member.desc':
-    'In "Members" you can invite existing users into the current team by user_id (you cannot create new user accounts — that requires an administrator). Ask them to copy their user_id from "My Profile".',
+    'You can view members and roles in the current Team. Only a Team owner/admin can add or remove members or change roles.',
   // Agent management (same for Admin and Member, both can edit)
   'onboarding.guide.agent.title': 'Create and edit Agents',
   'onboarding.guide.agent.desc':

@@ -78,6 +78,7 @@ import type {
   TaskFilter,
   AssetFilter,
   BatchDeleteResult,
+  UserOwnedResourceCounts,
   AssetType,
   AssetVisibility,
   AssetStatus,
@@ -526,6 +527,25 @@ export class MetadataService {
     const totalAdmins = await this.store.countSystemAdmins();
     if (totalAdmins > 0 && totalAdmins - deletingSystemAdmins < 1) {
       throw new MetadataError("last_system_admin", "cannot delete the last system_admin user");
+    }
+
+    const ownedResources: Array<{ user_id: string; counts: UserOwnedResourceCounts }> = [];
+    for (const userId of userIds) {
+      const counts = await this.store.getUserOwnedResourceCounts(userId);
+      if (counts.teams || counts.agents || counts.tasks || counts.assets) {
+        ownedResources.push({ user_id: userId, counts });
+      }
+    }
+    if (ownedResources.length > 0) {
+      const details = ownedResources
+        .map(({ user_id, counts }) =>
+          `${user_id}(teams=${counts.teams}, agents=${counts.agents}, tasks=${counts.tasks}, assets=${counts.assets})`,
+        )
+        .join(", ");
+      throw new MetadataError(
+        "user_has_owned_resources",
+        `cannot delete users with owned resources: ${details}`,
+      );
     }
     return this.deleteUsers(userIds);
   }
@@ -1715,6 +1735,170 @@ export class MetadataService {
   }
 
   // ============================================================
+  // Caller-scoped reads（Team 业务数据必须有 active membership）
+  // ============================================================
+  async getTeamForCaller(teamId: string, ctx: V3AuthContext): Promise<TeamEntity> {
+    const team = await this.getTeamById(teamId);
+    if (!team) throw new MetadataError("team_not_found", `team not found: ${teamId}`);
+    await this.requireActiveTeamMember(ctx, teamId);
+    return team;
+  }
+
+  async listTeamsForCaller(
+    userId: string,
+    ctx: V3AuthContext,
+    pagination: PaginationParams = DEFAULT_PAGINATION,
+    filter?: { name?: string },
+  ): Promise<PaginatedResult<TeamEntity>> {
+    const callerId = this.requireCallerId(ctx);
+    if (userId !== callerId && !ctx.isSystemAdmin) {
+      throw new MetadataError("permission_denied", "cannot list another user's teams");
+    }
+    return this.listTeamsByUser(userId, pagination, filter);
+  }
+
+  async getAgentForCaller(agentId: string, ctx: V3AuthContext): Promise<AgentEntity> {
+    const agent = await this.getAgentById(agentId);
+    if (!agent) throw new MetadataError("agent_not_found", `agent not found: ${agentId}`);
+    await this.requireActiveTeamMember(ctx, agent.team_id);
+    return agent;
+  }
+
+  async listAgentsByTeamForCaller(
+    teamId: string,
+    ctx: V3AuthContext,
+    pagination: PaginationParams = DEFAULT_PAGINATION,
+    filter?: AgentFilter,
+  ): Promise<PaginatedResult<AgentEntity>> {
+    await this.requireActiveTeamMember(ctx, teamId);
+    return this.listAgentsByTeam(teamId, pagination, filter);
+  }
+
+  async listAgentsByOwnerForCaller(
+    ownerUserId: string,
+    ctx: V3AuthContext,
+    pagination: PaginationParams = DEFAULT_PAGINATION,
+    filter?: AgentFilter,
+  ): Promise<PaginatedResult<AgentEntity>> {
+    this.assertCallerIsResourceOwner(ctx, ownerUserId);
+    const result = await this.listAgentsByOwner(ownerUserId, pagination, filter);
+    for (const agent of result.items) {
+      await this.requireActiveTeamMember(ctx, agent.team_id);
+    }
+    return result;
+  }
+
+  async getTaskForCaller(taskId: string, ctx: V3AuthContext): Promise<TaskEntity> {
+    const task = await this.getTaskById(taskId);
+    if (!task) throw new MetadataError("task_not_found", `task not found: ${taskId}`);
+    await this.requireActiveTeamMember(ctx, task.team_id);
+    return task;
+  }
+
+  async listTasksByTeamForCaller(
+    teamId: string,
+    ctx: V3AuthContext,
+    pagination: PaginationParams = DEFAULT_PAGINATION,
+    filter?: TaskFilter,
+  ): Promise<PaginatedResult<TaskEntity>> {
+    await this.requireActiveTeamMember(ctx, teamId);
+    return this.listTasksByTeam(teamId, pagination, filter);
+  }
+
+  async listTasksByCreatorForCaller(
+    creatorUserId: string,
+    ctx: V3AuthContext,
+    pagination: PaginationParams = DEFAULT_PAGINATION,
+    filter?: TaskFilter,
+  ): Promise<PaginatedResult<TaskEntity>> {
+    this.assertCallerIsResourceOwner(ctx, creatorUserId);
+    const result = await this.listTasks({ ...filter, creator_user_id: creatorUserId }, pagination);
+    for (const task of result.items) {
+      await this.requireActiveTeamMember(ctx, task.team_id);
+    }
+    return result;
+  }
+
+  async listTaskAgentsForCaller(
+    taskId: string,
+    ctx: V3AuthContext,
+    pagination: PaginationParams = DEFAULT_PAGINATION,
+  ): Promise<PaginatedResult<TaskAgentEntity>> {
+    await this.getTaskForCaller(taskId, ctx);
+    return this.listTaskAgents(taskId, pagination);
+  }
+
+  async getAssetForCaller(assetId: string, ctx: V3AuthContext): Promise<AssetEntity> {
+    const asset = await this.getAssetById(assetId);
+    if (!asset) throw new MetadataError("asset_not_found", `asset not found: ${assetId}`);
+    await this.requireActiveTeamMember(ctx, asset.team_id);
+    return asset;
+  }
+
+  async listAssetsByTeamForCaller(
+    teamId: string,
+    ctx: V3AuthContext,
+    pagination: PaginationParams = DEFAULT_PAGINATION,
+    filter?: AssetFilter,
+  ): Promise<PaginatedResult<AssetEntity>> {
+    await this.requireActiveTeamMember(ctx, teamId);
+    return this.listAssetsByTeam(teamId, pagination, filter);
+  }
+
+  async listAccessibleAssetsForCaller(
+    params: ListAccessibleAssetsParams,
+    ctx: V3AuthContext,
+  ): Promise<PaginatedResult<AssetEntity>> {
+    const requestedUserId = await resolveUserId(this, params);
+    this.assertCallerIsResourceOwner(ctx, requestedUserId);
+    if (params.team_id) await this.requireActiveTeamMember(ctx, params.team_id);
+    return this.listAccessibleAssets({ ...params, user_id: requestedUserId, user_key: undefined });
+  }
+
+  async listAgentFixedAssetsForCaller(
+    agentId: string,
+    ctx: V3AuthContext,
+    pagination: PaginationParams = DEFAULT_PAGINATION,
+  ): Promise<PaginatedResult<FixedAssetBindingEntity>> {
+    await this.getAgentForCaller(agentId, ctx);
+    return this.listAgentFixedAssets(agentId, pagination);
+  }
+
+  async listAgentFixedAssetsWithDetailForCaller(
+    params: ListWithDetailParams,
+    ctx: V3AuthContext,
+  ): Promise<AgentFixedAssetDetailResult> {
+    await this.getAgentForCaller(params.agent_id, ctx);
+    return this.listAgentFixedAssetsWithDetail(params);
+  }
+
+  async summarizeAgentFixedAssetsByAgentsForCaller(
+    params: SummarizeAgentFixedAssetsParams,
+    ctx: V3AuthContext,
+  ): Promise<AgentFixedAssetSummaryResult> {
+    for (const agentId of new Set(params.agent_ids)) {
+      await this.getAgentForCaller(agentId, ctx);
+    }
+    return this.summarizeAgentFixedAssetsByAgents(params);
+  }
+
+  async checkAssetPermissionForCaller(
+    params: CheckPermissionParams,
+    ctx: V3AuthContext,
+  ): Promise<PermCheckResult> {
+    const requestedUserId = await resolveUserId(this, params);
+    this.assertCallerIsResourceOwner(ctx, requestedUserId);
+    const asset = await this.getAssetForCaller(params.asset_id, ctx);
+    if (params.agent_id) {
+      const agent = await this.getAgentForCaller(params.agent_id, ctx);
+      if (agent.team_id !== asset.team_id) {
+        throw new MetadataError("agent_team_mismatch", "agent and asset belong to different teams");
+      }
+    }
+    return this.checkAssetPermission({ ...params, user_id: requestedUserId, user_key: undefined });
+  }
+
+  // ============================================================
   // Caller-scoped mutations（L-12 / L-14）
   // ============================================================
   async createTeamForCaller(input: CreateTeamInput, ctx: V3AuthContext): Promise<TeamEntity> {
@@ -1750,6 +1934,10 @@ export class MetadataService {
 
   async removeTeamMemberForCaller(teamId: string, userId: string, ctx: V3AuthContext): Promise<void> {
     await this.assertCallerIsTeamAdmin(ctx, teamId);
+    const callerId = this.requireCallerId(ctx);
+    if (userId === callerId) {
+      throw new MetadataError("permission_denied", "cannot remove yourself from a team");
+    }
     const team = await this.getTeamById(teamId);
     if (!team) throw new MetadataError("team_not_found", `team not found: ${teamId}`);
     if (userId === team.owner_user_id) {

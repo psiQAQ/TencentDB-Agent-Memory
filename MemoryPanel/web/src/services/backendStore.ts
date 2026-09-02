@@ -26,6 +26,8 @@ import {
   type BackendTask,
 } from '@/lib/teamApi';
 import { invalidateBackendCache } from '@/stores/backend';
+import { isTeamAdmin, isTeamMember } from './team-role';
+export { isTeamAdmin, isTeamMember, roleInTeam } from './team-role';
 
 // ========================= Types（前端展示形状，尽量贴近旧 demoStore，减少调用方改动） =========================
 
@@ -303,28 +305,6 @@ export {
 } from '@/stores/backend';
 
 // ========================= Permissions =========================
-
-export function roleInTeam(team: Team | null | undefined, userId: string): 'admin' | 'member' | 'reviewer' | null {
-  if (!team) return null;
-  const member = team.members.find((m) => m.user_id === userId);
-  if (member) return member.role;
-  // team owner 如果不在 members 列表里（后端 owner 不一定出现在 members 数组中），
-  // 默认按 'member' 处理——owner 在 team 内能管理资源，应能看到资源页。
-  // 不返回 'admin' 是因为 useCurrentRole 返回的 'admin' 语义是"全局 admin"（看不到资源页），
-  // team owner 不是全局 admin，不应被 AdminResourceLock 锁住。
-  if (team.owner_user_id === userId) return 'member';
-  return null;
-}
-
-export function isTeamAdmin(team: Team | null | undefined, userId: string): boolean {
-  if (!team) return false;
-  if (team.owner_user_id === userId) return true;
-  return team.members.some((m) => m.user_id === userId && m.role === 'admin');
-}
-
-export function isTeamMember(team: Team | null | undefined, userId: string): boolean {
-  return roleInTeam(team, userId) !== null;
-}
 
 export function canManageAsset(
   asset: { owner_user_id: string; team_id: string },

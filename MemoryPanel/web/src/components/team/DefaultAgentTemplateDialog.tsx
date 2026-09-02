@@ -1,5 +1,5 @@
 /**
- * DefaultAgentTemplateDialog —— 默认 Agent 模板配置弹窗（仅全局 admin）。
+ * DefaultAgentTemplateDialog —— 默认 Agent 模板配置弹窗（仅当前 Team owner/admin）。
  *
  * 表单字段与「创建 Agent」对齐，但只允许选择**团队公共资产**
  * （useTeamAssets 内部已按 visibility=team 过滤 skill / code_graph / wiki；

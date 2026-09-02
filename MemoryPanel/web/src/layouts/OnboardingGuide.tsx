@@ -3,13 +3,8 @@
  *
  * 使用 tea-component `Guide` 组件逐步高亮页面元素，替代旧的全屏双栏引导。
  *
- * 双角色 SOP（步骤切换时自动跳转到对应页面，不只是展示）：
- *   - Admin：登录身份 → 新建/切换团队 → 新建成员发放 user_key → Agent → 点击 Agent 绑定资产 → 四个资产页
- *   - Member：登录身份 → 邀请成员 → Agent → 点击 Agent 绑定资产 → User_Key 管理 → 四个资产页
- *
- * Admin 与 Member 的 Agent / 资产操作能力一致（均可编辑）；唯一差异在成员管理：
- * member 不能创建用户账号，只能按 user_id 邀请已有用户；admin 可新建用户并发放
- * user_key，也可新建团队。资产步骤逐一跳入 Wiki / Code / Skill / Chat Memory 页面介绍。
+ * 账号类型与 Team role 分开编排：system_admin 先进入全局用户管理；Team owner/admin
+ * 才出现成员变更步骤；任意已认证用户都可从 TeamSwitcher 创建自己的 Team。
  *
  * 健壮性：每步 element 选择器若在目标页缺失（如成员无「添加成员」权限），
  * 自动 fallback 到全局 Header 品牌区，避免 Guide 因元素缺失而整体消失。
@@ -185,7 +180,10 @@ const ASSET_STEPS: OnboardingStep[] = [
   },
 ];
 
-function buildSteps(role: 'admin' | 'member'): OnboardingStep[] {
+function buildSteps(
+  accountType: 'normal' | 'system_admin',
+  teamRole: 'admin' | 'member' | 'reviewer' | null,
+): OnboardingStep[] {
   const loginStep: OnboardingStep = {
     selector: '._memory-global-header-user-btn',
     // header 右上角用户按钮：用 bottom-end 让气泡右边缘对齐元素右边缘，向左展开，
@@ -195,82 +193,77 @@ function buildSteps(role: 'admin' | 'member'): OnboardingStep[] {
     descKey: 'onboarding.guide.login.desc',
   };
 
-  // Admin 与 Member 的 Agent / 资产操作能力一致（都可编辑），仅成员管理不同：
-  //   - system_admin：可新建团队、新建用户，并管理各团队成员的 User_Key
-  //   - member / Team admin：只能按 user_id 邀请已有用户加入团队，且只管理自己的 User_Key
-  // placement 选择：右侧元素用 bottom-end（向左展开），左侧元素用 bottom-start（向右展开）
-  if (role === 'admin') {
-    return [
-      loginStep,
-      {
-        selector: '._memory-team-switcher-trigger',
-        // header 左上角：向左展开避免右移溢出
-        placement: 'bottom-start',
-        titleKey: 'onboarding.guide.team.title',
-        descKey: 'onboarding.guide.team.desc',
-      },
-      {
-        path: '/team/members',
-        // 优先高亮"添加成员"按钮；无 team 时按钮不存在，回退到成员列表区
-        selector: ['[data-guide="add-member"]', '[data-guide="members-list"]'],
-        placement: 'bottom-end',
-        titleKey: 'onboarding.guide.memberAdmin.title',
-        descKey: 'onboarding.guide.memberAdmin.desc',
-      },
-      {
-        path: '/team/agents',
-        selector: '[data-guide="create-agent"]',
-        // ActionPanel 左侧"新建 Agent"按钮：向右展开
-        placement: 'bottom-start',
-        titleKey: 'onboarding.guide.agent.title',
-        descKey: 'onboarding.guide.agent.desc',
-      },
-      AGENT_BIND_STEP,
-      ...ASSET_STEPS,
-    ];
+  const steps: OnboardingStep[] = [loginStep];
+  if (accountType === 'system_admin') {
+    steps.push({
+      path: '/users',
+      selector: '[data-guide="create-user"]',
+      placement: 'bottom-end',
+      titleKey: 'onboarding.guide.userManagement.title',
+      descKey: 'onboarding.guide.userManagement.desc',
+    });
   }
 
-  return [
-    loginStep,
-    {
+  steps.push({
+    selector: '._memory-team-switcher-trigger',
+    placement: 'bottom-start',
+    titleKey: 'onboarding.guide.team.title',
+    descKey: 'onboarding.guide.team.desc',
+  });
+
+  if (teamRole === 'admin') {
+    steps.push({
       path: '/team/members',
-      // 普通 member 没有"添加成员"按钮（仅 admin/teamAdmin 可见），
-      // 所以高亮始终存在的成员列表区，避免 fallback 到 header 导致"没跳转/定位错"
+      selector: ['[data-guide="add-member"]', '[data-guide="members-list"]'],
+      placement: 'bottom-end',
+      titleKey: 'onboarding.guide.memberAdmin.title',
+      descKey: 'onboarding.guide.memberAdmin.desc',
+    });
+  } else if (teamRole) {
+    steps.push({
+      path: '/team/members',
       selector: '[data-guide="members-list"]',
       placement: 'bottom-start',
       titleKey: 'onboarding.guide.member.title',
       descKey: 'onboarding.guide.member.desc',
-    },
+    });
+  }
+
+  steps.push(
     {
       path: '/team/agents',
       selector: '[data-guide="create-agent"]',
-      // ActionPanel 左侧"新建 Agent"按钮：向右展开
       placement: 'bottom-start',
       titleKey: 'onboarding.guide.agent.title',
       descKey: 'onboarding.guide.agent.desc',
     },
     AGENT_BIND_STEP,
-    {
+  );
+
+  if (accountType === 'system_admin') {
+    steps.push({
       path: '/team/api-keys',
       selector: '[data-guide="create-key"]',
-      // Justify 右侧"新建 Key"按钮：向左展开
       placement: 'bottom-end',
       titleKey: 'onboarding.guide.apikey.title',
       descKey: 'onboarding.guide.apikey.desc',
-    },
-    ...ASSET_STEPS,
-  ];
+    });
+  }
+  steps.push(...ASSET_STEPS);
+  return steps;
 }
 
 export function OnboardingGuide({
   visible,
   userId,
   userRole,
+  accountType,
   onClose,
 }: {
   visible: boolean;
   userId?: string;
   userRole: 'admin' | 'member' | 'reviewer' | null;
+  accountType: 'normal' | 'system_admin';
   /** 关闭引导（无论「跳过」还是「完成」都会标记为已看过） */
   onClose: () => void;
 }) {
@@ -278,8 +271,8 @@ export function OnboardingGuide({
   const navigate = useNavigate();
   const location = useLocation();
 
-  const isAdmin = userRole === 'admin';
-  const steps = useMemo(() => buildSteps(isAdmin ? 'admin' : 'member'), [isAdmin]);
+  const isSystemAdmin = accountType === 'system_admin';
+  const steps = useMemo(() => buildSteps(accountType, userRole), [accountType, userRole]);
 
   const [current, setCurrent] = useState(-1);
   const pendingRef = useRef<number | null>(null);
@@ -408,14 +401,14 @@ export function OnboardingGuide({
       // 欢迎页高亮 header 品牌区：按实际位置动态计算方向
       placement: computePlacement(FALLBACK_SELECTOR, 'bottom-start'),
       title: t(
-        isAdmin ? 'onboarding.guide.start.admin.title' : 'onboarding.guide.start.member.title',
+        isSystemAdmin ? 'onboarding.guide.start.admin.title' : 'onboarding.guide.start.member.title',
       ),
       description: t(
-        isAdmin ? 'onboarding.guide.start.admin.desc' : 'onboarding.guide.start.member.desc',
+        isSystemAdmin ? 'onboarding.guide.start.admin.desc' : 'onboarding.guide.start.member.desc',
       ),
     }),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [isAdmin, t, visible],
+    [isSystemAdmin, t, visible],
   );
 
   // ===== 自定义精确高亮层 =====

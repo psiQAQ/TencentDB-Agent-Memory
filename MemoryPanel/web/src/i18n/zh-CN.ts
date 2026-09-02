@@ -13,6 +13,7 @@ export const zhCN = {
   'menu.chat_memory': 'Chat_Memory',
   'menu.team_members': '成员管理',
   'menu.team_agents': 'Agents 管理',
+  'menu.user_management': '用户管理',
   'menu.api_keys': 'API Key',
   'menu.group.workbench': '工作台',
   'menu.group.organization': '组织与权限',
@@ -106,7 +107,32 @@ export const zhCN = {
   'menu.desc.chat_memory': 'L0–L3 分层记忆资产',
   'menu.desc.team_members': 'Team 成员 / 用户 / 角色',
   'menu.desc.team_agents': 'Agent / 可配置范围 / 固定资产',
+  'menu.desc.user_management': '全局账号 / 类型 / 创建与安全删除',
   'menu.desc.api_keys': '管理你的 API Key，用于外部客户端接入',
+
+  // ===== 用户管理（仅 system_admin）=====
+  'users.title': '用户管理',
+  'users.desc': '管理实例内全局账号。Team 成员与角色仍由各 Team owner/admin 自治。',
+  'users.create': '新建用户',
+  'users.total': '共 {{count}} 个账号',
+  'users.search': '搜索用户名、user_id 或账号类型',
+  'users.column.username': '用户名',
+  'users.column.type': '账号类型',
+  'users.column.createdAt': '创建时间',
+  'users.column.actions': '操作',
+  'users.detail': '查看',
+  'users.detail.caption': '用户详情',
+  'users.create.caption': '新建全局账号',
+  'users.create.typeFixed': '账号类型固定为 normal。当前实例只允许一个 bootstrap system_admin。',
+  'users.create.usernamePlaceholder': '英文字母、数字或下划线',
+  'users.create.customKey': '自定义初始 User_Key',
+  'users.create.customKeyHint': '关闭时由 Core 自动生成；明文只在创建成功后展示一次。',
+  'users.create.invalidUsername': '用户名仅支持英文字母、数字和下划线。',
+  'users.create.emptyKey': '请输入自定义 User_Key。',
+  'users.create.submit': '创建 normal 用户',
+  'users.delete.confirm': '删除用户「{{username}}」？',
+  'users.delete.desc': 'user_id：{{userId}}。若该用户仍拥有 Team、Agent、Task 或 Asset，Core 将拒绝整次删除。',
+  'users.delete.systemAdminLocked': 'bootstrap system_admin 不可删除',
 
   // ===== GlobalHeader =====
   'header.guide': '使用说明',
@@ -122,9 +148,13 @@ export const zhCN = {
   'header.profile.userId': '用户 ID',
   'header.profile.userIdHint': '发给团队管理员用于邀请你加入 Team',
   'header.profile.instance': '所属实例',
+  'header.profile.accountType': '账号类型',
+  'header.profile.teamRole': '当前 Team 角色',
+  'header.profile.role.owner_admin': 'owner（admin）',
   'header.profile.role.admin': '管理员',
   'header.profile.role.member': '普通成员',
   'header.profile.role.reviewer': '审核员',
+  'header.profile.role.none': '未加入 Team',
   'header.profile.close': '关闭',
   'header.brand': 'Memory Hub',
 
@@ -135,7 +165,7 @@ export const zhCN = {
   'teamSwitcher.desc': '不同团队的资产相互独立。切换后会在当前页面显示对应团队的数据。',
   'teamSwitcher.teamCount': '团队（{{count}}）',
   'teamSwitcher.empty.admin': '暂无 team。点击下方「新建团队」创建。',
-  'teamSwitcher.empty.member': '你还没有被加入任何 team。请联系管理员将你加入团队。',
+  'teamSwitcher.empty.member': '你还没有 Team。可在下方创建自己的 Team，或联系 Team 管理员邀请你。',
   'teamSwitcher.memberCount': '{{count}} 名成员',
   'teamSwitcher.teamNamePlaceholder': '团队名称（必填）',
   'teamSwitcher.teamDescPlaceholder': '团队描述（选填）',
@@ -1043,6 +1073,7 @@ export const zhCN = {
 
   // ===== AddMemberDialog =====
   'addMember.caption': '添加成员到「{{name}}」',
+  'addMember.existingOnlyHint': '这里只能添加已有账号；请由 system_admin 先在「用户管理」创建账号。',
   'addMember.adminOnlyHint': '仅 team admin 可授予 admin 角色',
   'addMember.mode': '方式',
   'addMember.mode.existing': '添加已有用户',
@@ -1057,7 +1088,7 @@ export const zhCN = {
   'addMember.username.hint': '英文字母、数字、下划线，创建后不可修改',
   'addMember.role': '角色',
   'addMember.role.default': 'member（默认）',
-  'addMember.role.hint': '新成员默认角色为 member。',
+  'addMember.role.hint': '可选择 admin、member 或 reviewer；后续仍可由 Team owner/admin 修改。',
   'addMember.existing.submit': '添加',
   'addMember.new.submit': '新建并添加',
   'addMember.cancel': '取消',
@@ -1110,7 +1141,7 @@ export const zhCN = {
   // ===== ApiKeyPanel =====
   'apiKey.title': 'User_Key 管理',
   'apiKey.desc': '管理你的 User Key，用于外部客户端接入（如 CodeBuddy / ClaudeCode CLI）。',
-  'apiKey.desc.admin': '管理所有团队成员的 User Key；既有 Key 只显示脱敏前缀，明文不会再次返回。',
+  'apiKey.desc.admin': '管理实例内全部用户（含未加入 Team 的用户）的 User Key；既有 Key 只显示脱敏前缀。',
   'apiKey.create': '新建 Key',
   'apiKey.fresh.desc':
     '以下是 {{keyId}} 的完整 Key（仅展示这一次，请立即复制并安全保存；关闭后将无法再次查看明文）：',
@@ -1369,26 +1400,29 @@ export const zhCN = {
   // 欢迎（startContent，按角色区分）
   'onboarding.guide.start.admin.title': '欢迎使用 TDAI 面板',
   'onboarding.guide.start.admin.desc':
-    '你是管理员：负责团队与成员的组织管理。接下来将带你了解面板核心能力，按「下一步」开始。',
+    '你的账号类型是 system_admin：负责实例内账号与凭证管理；Team 权限仍取决于真实 Team 角色。',
   'onboarding.guide.start.member.title': '欢迎使用 TDAI 面板',
   'onboarding.guide.start.member.desc':
     '你是团队成员：可在团队内管理 Agent 与资产。接下来将带你了解面板核心能力，按「下一步」开始。',
   // 登录身份（Admin / Member 共有）
   'onboarding.guide.login.title': '你的登录身份',
   'onboarding.guide.login.desc':
-    '你已通过 user_key 登录。右上角可查看「我的资料」、切换语言或退出登录；资产归属与权限均以当前登录身份为准。',
+    '你已通过 user_key 登录。右上角分别显示账号类型与当前 Team 角色；两者是独立权限维度。',
+  'onboarding.guide.userManagement.title': '创建 normal 用户',
+  'onboarding.guide.userManagement.desc':
+    'system_admin 在「用户管理」创建全局账号，账号类型固定为 normal；初始 User_Key 明文只展示一次。',
   // Admin：新建/切换团队
   'onboarding.guide.team.title': '新建 / 切换团队',
   'onboarding.guide.team.desc':
-    '点击左上角切换当前团队。团队是资产、Agent 和 Task 的主要边界；作为管理员，你可以在这里新建团队。',
+    '点击左上角切换当前团队。任意已认证用户都可新建自己的 Team，并自动成为 owner/admin。',
   // Admin：新建成员，发放 user key（member 无此权限）
-  'onboarding.guide.memberAdmin.title': '新建成员，发放 user_key',
+  'onboarding.guide.memberAdmin.title': '添加已有账号并分配角色',
   'onboarding.guide.memberAdmin.desc':
-    '作为管理员，你可以在「成员管理」中新建用户账号并发放专属 user_key（仅展示一次），也可以把已有用户拉入团队。普通成员无法创建用户，只能邀请已有用户。',
+    'Team owner/admin 只能按 user_id 添加已有账号，可选择 admin、member 或 reviewer，并可后续调整；owner 与操作者本人锁定。',
   // Member：邀请成员（不能创建用户）
   'onboarding.guide.member.title': '邀请团队成员',
   'onboarding.guide.member.desc':
-    '在「成员管理」中可按 user_id 邀请已有用户加入当前团队（你无法创建新用户账号，创建用户需管理员操作）。请让对方在「我的资料」里复制 user_id 发给你。',
+    '你可以查看当前 Team 的成员与角色；只有 Team owner/admin 能添加、移除成员或修改角色。',
   // Agent 管理（Admin 与 Member 一致，均可编辑）
   'onboarding.guide.agent.title': '创建并编辑 Agent',
   'onboarding.guide.agent.desc':

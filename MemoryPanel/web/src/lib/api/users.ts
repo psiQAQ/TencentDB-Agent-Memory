@@ -48,7 +48,10 @@ export const usersApi = {
    *
    * ⚠️ 权限同上，须 system_admin 才能调用。
    */
-  delete: (userId: string) => metaPost<{ ok: boolean }>('user/delete', { user_id: userId }),
+  delete: (userId: string) => metaPost<{ deleted_ids: string[]; failed: Array<{ id: string; reason: string }> }>(
+    'user/delete',
+    { user_ids: [userId] },
+  ),
 };
 
 // ========================= User API Keys（meta/user-key/*）=========================

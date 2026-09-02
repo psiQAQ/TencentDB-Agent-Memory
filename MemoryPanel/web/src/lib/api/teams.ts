@@ -8,7 +8,7 @@ export const teamsApi = {
   /**
    * 列出当前用户作为 active 成员的 team。
    * meta/team/list 要求 body 带 user_id 或 user_key；身份只在 header 不够。
-   * admin 也传自己的 user_id（后端暂无 user/list 式「实例级列举全部 team」）。
+   * system_admin 也传自己的 user_id；全局身份不会列举所有 Team。
    */
   list: async () => {
     const me = await getCurrentUser();

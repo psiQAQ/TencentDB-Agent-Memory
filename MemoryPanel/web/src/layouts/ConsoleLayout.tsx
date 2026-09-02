@@ -26,6 +26,7 @@ const PATH_TO_PAGE: Record<string, PageId> = {
   '/memory': 'chat_memory',
   '/team/members': 'team_members',
   '/team/agents': 'team_agents',
+  '/users': 'user_management',
   '/team/api-keys': 'api_keys',
 };
 
@@ -44,6 +45,7 @@ function legacyHashToPath(): string | null {
   if (leaf === 'skills' || leaf === 'skill') return '/skills';
   if (leaf === 'chat_memory' || leaf === 'memory' || leaf === 'chat-memory') return '/memory';
   if (leaf === 'agents' || leaf === 'team_agents') return '/team/agents';
+  if (leaf === 'users' || leaf === 'user_management') return '/users';
   if (leaf === 'team' || leaf === 'members' || leaf === 'team_members') return '/team/members';
   if (leaf === 'api_keys' || leaf === 'apikey' || leaf === 'api-keys') return '/team/api-keys';
   return null;
@@ -133,14 +135,14 @@ export function ConsoleLayout() {
     [activePage, navigateTo],
   );
 
-  // ===== 基于 team role 的菜单过滤 =====
-  // admin 可访问所有页面（含资源管理）
-  // 「成员管理」项：reviewer 不可见
+  // ===== 账号类型与 Team role 分离的菜单过滤 =====
+  // “用户管理”仅 system_admin 可见；“成员管理”对 reviewer 隐藏。
   const menuGroups = useMemo(() => {
     const byGroup = new Map<string, (typeof PAGE_META)[PageId][]>();
 
     for (const meta of Object.values(PAGE_META)) {
       if (userRole === 'reviewer' && meta.id === 'team_members') continue;
+      if (meta.id === 'user_management' && !auth?.isAdmin) continue;
       const list = byGroup.get(meta.group) ?? [];
       list.push(meta);
       byGroup.set(meta.group, list);
@@ -152,7 +154,7 @@ export function ConsoleLayout() {
         title: g,
         items: byGroup.get(g)!.sort((a, b) => a.order - b.order),
       }));
-  }, [userRole, PAGE_META, t]);
+  }, [userRole, auth?.isAdmin, PAGE_META, t]);
 
   const workbenchGroupTitle = t('menu.group.workbench');
   const pinnedGroup = menuGroups.find((g) => g.title === workbenchGroupTitle);
@@ -177,10 +179,12 @@ export function ConsoleLayout() {
         visible={onboardingVisible}
         userId={currentUserId}
         userRole={userRole}
+        accountType={auth?.user_type ?? 'normal'}
         onClose={() => setOnboardingVisible(false)}
       />
       <GlobalHeader
         userRole={userRole}
+        accountType={auth?.user_type ?? 'normal'}
         currentUser={auth?.user ?? ''}
         currentUserId={auth?.user_id}
         instanceName={auth?.instance_name}

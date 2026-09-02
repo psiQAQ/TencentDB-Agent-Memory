@@ -85,50 +85,55 @@ cd TencentDB-Agent-Memory/deploy/global-images
 
 - 第一次访问会看到登录页，用 `start-all.sh` 结尾打印的 admin `user_key`
   （即 `deploy/global-images/.admin-key` 文件里那串 `sk-mem-...`）登录
-- admin 登录后可以直接使用 Wiki、CodeGraph、Skill 等资产管理功能，创建 Team / Agent / Task 等业务资产
-- 如果希望隔离运维与业务（推荐），可创建 `normal` 业务用户 → 复制新用户的 `user_key` → 退出 admin 换新用户登录
+- 顶栏会分别显示“账号类型：`system_admin`”和“当前 Team 角色”。若尚未加入
+  Team，后者显示“未加入 Team”
+- `system_admin` 只因账号类型获得全局用户与凭证管理能力；Team、Agent、Task、
+  Asset 的权限仍取决于它在当前 Team 中的真实角色
 
-> 换句话说：admin 是"运维口"用来管人，业务用户是"应用口"用来管资产。
-> 单机本地体验也推荐遵循这个分层，不要用 admin key 直接跑 CC。
-> 注：2.0.0-beta.1 中 admin 不能拥有业务资产；2.0.0 正式版起 admin 也可以直接操作资产。
+> 单实例只允许一个 bootstrap `system_admin`。面板“用户管理”创建的账号固定为
+> `normal`，不能创建第二个 `system_admin`。账号类型与 Team 角色是两套独立概念：
+> `normal` 也可以是某个 Team 的 owner/admin；`system_admin` 若在 Team 中只是 member，
+> 就没有编辑/删除 Team、增删成员或修改角色的权限。
 
 Knowledge Service Swagger（可选，看接口调试用）：
 <http://localhost:8424/docs>
 
-### 第 1.5 步：admin 建业务用户（可选，推荐隔离运维与业务）
+### 第 1.5 步：在“用户管理”创建业务用户
 
-面板左上角「用户管理」（或用 admin 直接调 API）新建一个用户：
+1. 用 bootstrap `system_admin` 登录后，打开左侧“组织与权限 → 用户管理”。
+2. 点击“新建用户”。页面明确显示账号类型固定为 `normal`。
+3. 填写用户名；初始 User_Key 可由 Core 自动生成，也可开启开关后自定义。
+4. 创建成功后立即复制并安全保存 User_Key。**完整明文只展示这一次**。
+5. 退出登录，用新 Key 登录。顶栏应显示 `normal / 未加入 Team`。
 
-```bash
-# API 方式，更明确（面板里等价操作在「用户」→「新建」）
-ADMIN_KEY=$(cat ./.admin-key)
-curl -sS -X POST http://localhost:8420/v3/meta/user/create \
-  -H "x-tdai-user-key: $ADMIN_KEY" \
-  -H "x-tdai-service-id: default" \
-  -H "Content-Type: application/json" \
-  -d '{"username":"you"}' | jq
-```
+Teamless 用户也会出现在 `system_admin` 的“API Key”清单中；Team 只作为组织关系
+上下文，不决定 `system_admin` 是否能管理该用户的凭证。
 
-返回体里 `data.default_user_key`（`sk-mem-...`）就是新用户的登录 key，
-**保存好**（面板无处再看到全值，只有创建时返回一次）。
-
-之后**面板退出登录**，用这把新 key 重新登录 —— 你现在是 `normal` 用户，
-可以在自己名下建 Team / Agent / Task 了。当然，admin 也可以直接操作，这里只是推荐隔离。
-
-### 第 2 步：在面板里建 Team / Agent / Task
+### 第 2 步：用 normal 用户在面板里建 Team / Agent / Task
 
 Coding agent 用记忆必须落到具体 `team / agent / task` 三元组上：
 
-1. **Team**（团队）：面板左侧「团队」→ 新建
+1. **Team**（团队）：点击顶栏左侧 TeamSwitcher → “新建团队”
    - 一个 Team 是一组资产的归属容器（memory、skill、knowledge 都归 Team）
-2. **Agent**（智能体）：进入 Team → 「Agent」→ 新建
+   - 任意已认证用户都可以创建自己的 Team；创建后自动成为 owner/Team `admin`
+2. **Agent**（智能体）：左侧“Agents 管理”→ “新建 Agent”
    - 给它填一段清晰的 `description` + `system prompt`（就是这个 agent 的角色说明）
    - 例：`bug-fix 工程师`、`前端评审 agent`、`SQL 优化师`
-3. **Task**（任务，可选）：Team → 「任务」→ 新建
+3. **Task**（任务，可选）：左侧工作台看板 → “新建任务”
    - Task 是**这一次工作的抓手**，比如「修复登录页 XSS」「上线 v1.4 灰度」
    - 记忆会关联到 Task；不建 Task 也能用，但 L2/L3 会缺 Task 维度
 
 先建**至少 1 个 Team + 1 个 Agent**，可选建 Task。
+
+### 第 2.5 步：Team admin 添加已有账号并设置角色
+
+1. 让待加入用户从“我的资料”复制自己的 `user_id`。
+2. Team owner/admin 打开“成员管理”→“添加成员”，输入该 `user_id`。
+3. 添加时选择 `admin`、`member` 或 `reviewer`；以后可在成员卡片中调整。
+
+“成员管理”不会创建全局账号。owner 的角色以及操作者自己的角色被锁定；owner
+不可移除。全局 `system_admin` 也只有在当前 Team 确实为 owner/admin 时才会看到
+编辑/删除 Team、增删成员和修改角色等入口。
 
 ### 第 3 步：把 Claude Code 指向 Proxy
 
@@ -203,7 +208,8 @@ curl -s http://localhost:8420/health | jq .services.pipelineWorker
 起的，重启 proxy：`PROXY_FULL_STACK=1 ./start-proxy.sh`。
 
 **Q: 表单选择项里空空的，或者只有别人的 team？**
-请确认当前使用的账号已在面板中创建过 Team 和 Agent。如果用的是 admin 账号，确保已创建了相关资产；如果用的是业务用户账号，检查是否已在对应 team 下建过 Agent。
+请确认当前使用的账号已加入目标 Team，且该 Team 已创建 Agent。`system_admin` 不会因为
+账号类型自动看到所有 Team；若要作为业务身份使用，也必须先加入目标 Team。
 
 
 **Q: 面板显示"Panel API 8125 未启动"？**

@@ -19,7 +19,6 @@ import {
   isTeamAdmin,
 } from '@/services';
 import { useBackendStore } from '@/stores/backend';
-import { type TeamRole } from '@/services/useCurrentRole';
 import { teamsApi } from '@/lib/teamApi';
 import { getPanelSession } from '@/lib/panelSession';
 import { teamColor } from '@/utils/color';
@@ -28,7 +27,7 @@ import { getErrorMessage } from '@/lib/error-message';
 import EditTeamDialog from '@/components/team/EditTeamDialog';
 import './team-switcher.css';
 
-export function TeamSwitcher({ userRole }: { userRole: TeamRole | null }) {
+export function TeamSwitcher() {
   const { t } = useTranslation();
   const { teams, activeTeamId } = useTeams();
   const refreshTeams = useBackendStore((s) => s.refreshTeams);
@@ -43,9 +42,8 @@ export function TeamSwitcher({ userRole }: { userRole: TeamRole | null }) {
   const active = myTeams.find((tm) => tm.team_id === activeTeamId) ?? null;
   // 当前用户 user_id（panelSession 同步可读）
   const currentUserId = getPanelSession()?.user?.user_id ?? '';
-  // 是否可编辑 / 删除当前 active team：全局 admin 或当前 team 的 owner / admin
-  const canManageActiveTeam =
-    !!active && (userRole === 'admin' || isTeamAdmin(active, currentUserId));
+  // 是否可编辑 / 删除当前 active team：只看真实 Team owner/admin 角色。
+  const canManageActiveTeam = !!active && isTeamAdmin(active, currentUserId);
 
   function resetCreateForm() {
     setShowCreateTeam(false);
@@ -169,9 +167,7 @@ export function TeamSwitcher({ userRole }: { userRole: TeamRole | null }) {
             <div className="_memory-team-switcher-list-wrap">
               {myTeams.length === 0 ? (
                 <div className="_memory-team-switcher-empty">
-                  {userRole === 'admin'
-                    ? t('teamSwitcher.empty.admin')
-                    : t('teamSwitcher.empty.member')}
+                  {t('teamSwitcher.empty.member')}
                 </div>
               ) : (
                 // 用原生 ul/li 而非 Tea List：Tea 的 List.Item selected 会自动渲染 ✓
@@ -235,7 +231,7 @@ export function TeamSwitcher({ userRole }: { userRole: TeamRole | null }) {
             </div>
 
             <div className="_memory-team-switcher-footer">
-              {userRole !== 'admin' ? null : showCreateTeam ? (
+              {showCreateTeam ? (
                 <div className="_memory-team-switcher-create-form">
                   <Input
                     autoFocus

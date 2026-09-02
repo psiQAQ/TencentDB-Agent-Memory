@@ -6,6 +6,7 @@
  */
 import { createHashRouter, type RouteObject } from 'react-router-dom';
 import { ConsoleLayout } from '@/layouts/ConsoleLayout';
+import { SystemAdminGuard } from '@/components/RouteGuards';
 
 export const routes: RouteObject[] = [
   {
@@ -43,6 +44,13 @@ export const routes: RouteObject[] = [
       {
         path: 'team/agents',
         lazy: async () => ({ Component: (await import('@/pages/AgentsPage')).AgentsPage }),
+      },
+      {
+        path: 'users',
+        lazy: async () => {
+          const { UsersPage } = await import('@/pages/UsersPage');
+          return { Component: () => <SystemAdminGuard><UsersPage /></SystemAdminGuard> };
+        },
       },
       {
         path: 'team/api-keys',

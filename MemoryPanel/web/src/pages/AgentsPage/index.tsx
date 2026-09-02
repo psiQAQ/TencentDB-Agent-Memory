@@ -8,8 +8,6 @@ export function AgentsPage() {
   return (
     <TeamManagementPanel
       currentUser={auth.user_id}
-      instanceId={auth.instance_id}
-      isAdmin={auth.isAdmin === true}
       section="agents"
     />
   );

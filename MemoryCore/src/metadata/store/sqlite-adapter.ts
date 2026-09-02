@@ -48,6 +48,7 @@ import type {
   TaskFilter,
   AssetFilter,
   BatchDeleteResult,
+  UserOwnedResourceCounts,
   ListPage,
   PaginationParams,
   InstanceUserListFilter,
@@ -634,6 +635,16 @@ export class SqliteMetadataStore implements IMetadataStore {
   countTeams(): number {
     const row = this.get<{ c: number }>("SELECT COUNT(*) AS c FROM meta_teams");
     return row?.c ?? 0;
+  }
+
+  getUserOwnedResourceCounts(userId: string): UserOwnedResourceCounts {
+    const count = (sql: string): number => this.get<{ c: number }>(sql, userId)?.c ?? 0;
+    return {
+      teams: count("SELECT COUNT(*) AS c FROM meta_teams WHERE owner_user_id = ?"),
+      agents: count("SELECT COUNT(*) AS c FROM meta_agents WHERE owner_user_id = ?"),
+      tasks: count("SELECT COUNT(*) AS c FROM meta_tasks WHERE creator_user_id = ?"),
+      assets: count("SELECT COUNT(*) AS c FROM meta_assets WHERE owner_user_id = ?"),
+    };
   }
 
   // ============================================================
