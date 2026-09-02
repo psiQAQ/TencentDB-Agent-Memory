@@ -147,16 +147,26 @@ export function filterManagedUserKeys(
 
 export type KeyRevokeBlockReason = 'system_admin' | 'last_active_key' | null;
 
-/** 镜像 Core 的最后一把有效 Key 保护，并额外禁止在 Panel 吊销 system_admin Key。 */
+export interface KeyRevokeContext {
+  callerUserId?: string;
+  callerIsSystemAdmin: boolean;
+}
+
+/** 镜像 Core：禁止 system_admin Key；仅 system_admin 可吊销其他普通用户的最后一把 Key。 */
 export function getKeyRevokeBlockReason(
   key: ManagedUserKey,
   activeKeys: ManagedUserKey[],
+  context: KeyRevokeContext = { callerIsSystemAdmin: false },
 ): KeyRevokeBlockReason {
   if (key.ownerUserType === 'system_admin') return 'system_admin';
   const ownerActiveKeyCount = activeKeys.filter(
     (candidate) => candidate.ownerUserId === key.ownerUserId && !candidate.revoked_at,
   ).length;
-  return ownerActiveKeyCount <= 1 ? 'last_active_key' : null;
+  const systemAdminManagingAnotherUser =
+    context.callerIsSystemAdmin && context.callerUserId !== key.ownerUserId;
+  return ownerActiveKeyCount <= 1 && !systemAdminManagingAnotherUser
+    ? 'last_active_key'
+    : null;
 }
 
 export function getPrivilegedMemberships(key: ManagedUserKey): ApiKeyTeamMembership[] {

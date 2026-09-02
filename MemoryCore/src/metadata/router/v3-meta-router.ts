@@ -118,10 +118,7 @@ const routeTable: Record<string, Handler> = {
     s.getUserKeyForCaller(d.key_id, c.userId, c.isAdmin, c.isSystemAdmin),
   ),
   [`${V3_PREFIX}/user-key/revoke`]: bind(S.userKeyRevokeSchema, async (d, c, s) => {
-    const entity = await s.rawStore.getUserKeyById(d.key_id);
-    if (!entity) throw new MetadataError("user_key_not_found", `user key not found: ${d.key_id}`);
-    s.assertUserScope(entity.user_id, c.userId, c.isAdmin, c.isSystemAdmin);
-    await s.revokeUserKey(d.key_id);
+    await s.revokeUserKeyForCaller(d.key_id, c);
     return OK;
   }),
   [`${V3_PREFIX}/user-key/update`]: bind(S.userKeyUpdateSchema, async (d, c, s) => {
@@ -330,6 +327,7 @@ function mapErrorCode(code: string): number {
     case "user_limit_exceeded":
     case "team_limit_exceeded":
     case "last_key_cannot_revoke":
+    case "system_admin_key_cannot_revoke":
     case "already_initialized":
     case "last_system_admin":
     case "member_already_exists":

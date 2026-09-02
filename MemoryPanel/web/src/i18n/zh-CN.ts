@@ -1128,8 +1128,12 @@ export const zhCN = {
   'apiKey.confirm.revoke': '确认吊销 Key「{{name}}」？',
   'apiKey.confirm.revoke.desc':
     '吊销后使用此 Key 的客户端将立即失效，且不可恢复；不会删除用户或团队成员身份。',
+  'apiKey.confirm.revoke.last.desc':
+    '这是该成员最后一把有效 Key。吊销后该用户将无法再通过 User Key 登录或调用服务；不会删除用户或团队成员身份。',
   'apiKey.confirm.revoke.privileged.desc':
     '该成员在以下团队承担管理角色：{{teams}}。吊销此 Key 不会删除其成员身份或角色，但使用此 Key 的客户端或 Agent 将立即失效，可能造成团队管理中断。',
+  'apiKey.confirm.revoke.privilegedLast.desc':
+    '这是该成员最后一把有效 Key，且其在以下团队承担管理角色：{{teams}}。吊销后该用户将无法再通过 User Key 登录或调用服务；其成员身份和角色仍会保留，可能造成团队管理中断。',
   'apiKey.confirm.revoke.ok': '吊销',
   'apiKey.revoke.disabled.system_admin': 'system_admin 的 Key 不可在此面板中吊销。',
   'apiKey.revoke.disabled.last_active_key':

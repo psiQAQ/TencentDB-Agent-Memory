@@ -128,7 +128,7 @@ describe("API Key system-admin inventory", () => {
     );
   });
 
-  it("blocks system_admin and a member's last active Key from Panel revocation", () => {
+  it("protects system_admin and self-revocation but lets system_admin disable another normal user", () => {
     const systemKey = {
       key_id: "system",
       ownerUserId: "admin",
@@ -149,6 +149,18 @@ describe("API Key system-admin inventory", () => {
       "system_admin",
     );
     expect(getKeyRevokeBlockReason(onlyKey, [onlyKey])).toBe("last_active_key");
+    expect(
+      getKeyRevokeBlockReason(onlyKey, [onlyKey], {
+        callerUserId: "admin",
+        callerIsSystemAdmin: true,
+      }),
+    ).toBeNull();
+    expect(
+      getKeyRevokeBlockReason(systemKey, [systemKey, { ...systemKey, key_id: "system-2" }], {
+        callerUserId: "admin",
+        callerIsSystemAdmin: true,
+      }),
+    ).toBe("system_admin");
     expect(getKeyRevokeBlockReason(onlyKey, [onlyKey, secondKey])).toBeNull();
   });
 

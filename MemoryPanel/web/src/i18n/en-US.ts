@@ -1162,8 +1162,12 @@ export const enUS = {
   'apiKey.confirm.revoke': 'Revoke Key "{{name}}"?',
   'apiKey.confirm.revoke.desc':
     'Clients using this Key will immediately lose access. This is irreversible and does not delete the user or Team membership.',
+  'apiKey.confirm.revoke.last.desc':
+    'This is the member\'s last active Key. Revoking it prevents the user from signing in or calling services with a User Key, but does not delete the user or Team memberships.',
   'apiKey.confirm.revoke.privileged.desc':
     'This member has management roles in: {{teams}}. Revoking this Key does not delete their membership or roles, but clients or Agents using it will immediately lose access and Team administration may be interrupted.',
+  'apiKey.confirm.revoke.privilegedLast.desc':
+    'This is the member\'s last active Key, and the member has management roles in: {{teams}}. Revoking it prevents User Key sign-in and service access. Memberships and roles remain, so Team administration may be interrupted.',
   'apiKey.confirm.revoke.ok': 'Revoke',
   'apiKey.revoke.disabled.system_admin':
     'A system_admin Key cannot be revoked from this panel.',

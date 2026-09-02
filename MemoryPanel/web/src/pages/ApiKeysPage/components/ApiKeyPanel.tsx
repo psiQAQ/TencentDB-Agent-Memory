@@ -185,11 +185,17 @@ export default function ApiKeyPanel() {
   }
 
   async function handleDelete(key: ManagedUserKey) {
-    const blockReason = getKeyRevokeBlockReason(key, keys);
+    const revokeContext = {
+      callerUserId: auth?.user_id,
+      callerIsSystemAdmin: isSystemAdmin,
+    };
+    const blockReason = getKeyRevokeBlockReason(key, keys, revokeContext);
     if (blockReason) {
       tea.notify.warning(t(`apiKey.revoke.disabled.${blockReason}`));
       return;
     }
+    const isLastActiveKey =
+      keys.filter((candidate) => candidate.ownerUserId === key.ownerUserId).length === 1;
     const privilegedMemberships = getPrivilegedMemberships(key);
     const roleLabel = (role: ApiKeyTeamRole) => t(`apiKey.role.${role}`);
     const managedTeams = privilegedMemberships
@@ -204,8 +210,17 @@ export default function ApiKeyPanel() {
     const ok = await tea.confirm({
       message: t('apiKey.confirm.revoke', { name: key.key_prefix || key.key_id }),
       description: privilegedMemberships.length
-        ? t('apiKey.confirm.revoke.privileged.desc', { teams: managedTeams })
-        : t('apiKey.confirm.revoke.desc'),
+        ? t(
+            isLastActiveKey
+              ? 'apiKey.confirm.revoke.privilegedLast.desc'
+              : 'apiKey.confirm.revoke.privileged.desc',
+            { teams: managedTeams },
+          )
+        : t(
+            isLastActiveKey
+              ? 'apiKey.confirm.revoke.last.desc'
+              : 'apiKey.confirm.revoke.desc',
+          ),
       okText: t('apiKey.confirm.revoke.ok'),
     });
     if (!ok) return;
@@ -442,7 +457,10 @@ export default function ApiKeyPanel() {
               width: isSystemAdmin ? '7%' : '10%',
               align: 'right',
               render: (key) => {
-                const blockReason = getKeyRevokeBlockReason(key, keys);
+                const blockReason = getKeyRevokeBlockReason(key, keys, {
+                  callerUserId: auth?.user_id,
+                  callerIsSystemAdmin: isSystemAdmin,
+                });
                 return (
                   <span
                     className="_memory-apikey-action"

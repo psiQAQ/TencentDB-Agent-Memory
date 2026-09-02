@@ -31,6 +31,7 @@ import {
   type MemorySystemUserConfig,
 } from "../system-user.js";
 import { resolveUserId } from "./resolve-user-id.js";
+import { getUserKeyRevocationBlockReason } from "./user-key-revocation-policy.js";
 import type { V3AuthContext } from "../router/auth.js";
 import { DEFAULT_INSTANCE_ID, DEFAULT_AUTH_PROVIDER } from "../constants.js";
 import {
@@ -737,15 +738,30 @@ export class MetadataService {
     return this.toPublicUserKey(entity);
   }
 
-  async revokeUserKey(keyId: string): Promise<void> {
+  async revokeUserKeyForCaller(keyId: string, ctx: V3AuthContext): Promise<void> {
     const entity = await this.store.getUserKeyById(keyId);
     if (!entity) throw new MetadataError("user_key_not_found", `user key not found: ${keyId}`);
-    if (!(await this.getUserById(entity.user_id))) {
+    const owner = await this.getUserById(entity.user_id);
+    if (!owner) {
       throw new MetadataError("user_key_not_found", `user key not found: ${keyId}`);
     }
+    this.assertUserScope(entity.user_id, ctx.userId, ctx.isAdmin, ctx.isSystemAdmin);
 
     const active = await this.store.countActiveUserKeys(entity.user_id);
-    if (active <= 1) {
+    const blockReason = getUserKeyRevocationBlockReason({
+      ownerUserId: entity.user_id,
+      ownerUserType: owner.user_type,
+      activeKeyCount: active,
+      callerUserId: ctx.userId,
+      callerIsSystemAdmin: ctx.isSystemAdmin,
+    });
+    if (blockReason === "system_admin_key") {
+      throw new MetadataError(
+        "system_admin_key_cannot_revoke",
+        "cannot revoke a system_admin user key",
+      );
+    }
+    if (blockReason === "last_active_key") {
       throw new MetadataError("last_key_cannot_revoke", "cannot revoke the last active user key");
     }
 
