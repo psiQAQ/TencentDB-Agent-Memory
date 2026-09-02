@@ -121,7 +121,7 @@ Coding agent 用记忆必须落到具体 `team / agent / task` 三元组上：
 2. **Agent**（智能体）：左侧“Agents 管理”→ “新建 Agent”
    - 给它填一段清晰的 `description` + `system prompt`（就是这个 agent 的角色说明）
    - 例：`bug-fix 工程师`、`前端评审 agent`、`SQL 优化师`
-3. **Task**（任务，可选）：左侧工作台看板 → “新建任务”
+3. **Task**（任务，可选）：左侧“任务看板”→“新建 Task”
    - Task 是**这一次工作的抓手**，比如「修复登录页 XSS」「上线 v1.4 灰度」
    - 记忆会关联到 Task；不建 Task 也能用，但 L2/L3 会缺 Task 维度
 
@@ -150,7 +150,7 @@ claude --model <PROXY_UPSTREAM_MODEL 里配的上游模型>
   本地部署固定叫 `default`
 - `ANTHROPIC_AUTH_TOKEN` 是**业务用户**的 user_key（就是第 1.5 步创建
   用户时返回的 `default_user_key`）；proxy 会用它去 core 反查 user_id，
-  只有这个 user own 的 team/agent/task 才会出现在下一步表单里
+  只有该用户已加入的 Team 以及其中按现有权限可见的 Agent/Task，才会出现在下一步表单里
 - `--model` 用你在 `.env` 里 `PROXY_UPSTREAM_MODEL` 配的那个上游模型名
   （proxy 会把请求转发到 `PROXY_UPSTREAM_URL`）
 
