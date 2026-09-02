@@ -34,24 +34,23 @@ PROXY_BASE_URL="${KNOWLEDGE_LLM_PROXY_BASE_URL:-}"
 #   - 已设置 → 写入 proxy_endpoint；此时 UI 卡片显示的接入地址会切到 proxy，
 #     但 Panel 后端 → Kernel 的转发地址仍走 gateway_endpoint（不受影响）
 if [[ "$USER_PROVIDED_INSTANCES" -ne 1 ]]; then
-# 只有非空时才拼一行 proxy_endpoint 到 dict 字面量里；空则完全不出现，保持老行为。
-PROXY_ENDPOINT_LINE=""
-if [[ -n "${REMOTE_INSTANCE_PROXY_URL:-}" ]]; then
-  PROXY_ENDPOINT_LINE="    'proxy_endpoint': '${REMOTE_INSTANCE_PROXY_URL}',"
-fi
-python3 - <<PY
+# 通过进程环境传值，避免 URL、模型名或凭据中的引号进入 Python 源码。
+INSTANCES_FILE="$INSTANCES_FILE" INSTANCE_ID="$INSTANCE_ID" INSTANCE_NAME="$INSTANCE_NAME" python3 - <<'PY'
 import json
+import os
 from pathlib import Path
-p=Path('$INSTANCES_FILE')
-p.write_text(json.dumps({
-  'instances': [{
-    'id': '${INSTANCE_ID}',
-    'name': '${INSTANCE_NAME}',
-    'gateway_endpoint': '${REMOTE_INSTANCE_URL}',
-${PROXY_ENDPOINT_LINE}
-    'api_key': '${REMOTE_INSTANCE_KEY}',
-  }]
-}, ensure_ascii=False, indent=2) + '\n')
+p = Path(os.environ['INSTANCES_FILE'])
+instance = {
+  'id': os.environ['INSTANCE_ID'],
+  'name': os.environ['INSTANCE_NAME'],
+  'gateway_endpoint': os.environ['REMOTE_INSTANCE_URL'],
+  'api_key': os.environ['REMOTE_INSTANCE_KEY'],
+}
+if os.environ.get('REMOTE_INSTANCE_PROXY_URL'):
+  instance['proxy_endpoint'] = os.environ['REMOTE_INSTANCE_PROXY_URL']
+if os.environ.get('REMOTE_INSTANCE_UPSTREAM_MODEL'):
+  instance['upstream_model'] = os.environ['REMOTE_INSTANCE_UPSTREAM_MODEL']
+p.write_text(json.dumps({'instances': [instance]}, ensure_ascii=False, indent=2) + '\n')
 PY
 fi
 

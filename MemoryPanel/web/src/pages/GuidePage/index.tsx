@@ -314,6 +314,7 @@ export function GuidePage() {
         if (current) {
           setInstanceId(current.instance_id);
           setProxyBase((current.proxy_endpoint || fallback).replace(/\/$/, ''));
+          if (current.upstream_model) setModelId(current.upstream_model);
           setUrlHint(
             current.proxy_endpoint
               ? t('guide.proxyHint.fromInstance', { name: current.name })

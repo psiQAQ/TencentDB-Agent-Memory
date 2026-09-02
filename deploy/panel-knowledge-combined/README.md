@@ -123,6 +123,7 @@ docker run -d --name memory-hub \
 | `KNOWLEDGE_TIMEOUT_MS` | `15000` | Panel 调 KS 的请求超时 |
 | `METADATA_REMOTE_TIMEOUT_MS` | `15000` | Panel 调远端 Gateway 的请求超时 |
 | `REMOTE_INSTANCE_PROXY_URL` | 空 | Panel UI "客户端接入地址"卡片显示的 base URL。开源本地部署 core+proxy 分开跑时填 proxy 的外部地址（如 `http://host.docker.internal:8096`），Panel UI 复制的 CodeBuddy/ClaudeCode 接入地址就会指向 proxy。留空则老行为 —— UI 回落到 `gateway_endpoint`。**Panel 后端 → Kernel 的转发始终走 `REMOTE_INSTANCE_URL`，与此变量无关。**（挂载了 `metadata-instances.json` 时忽略此变量，直接在 JSON 里加 `proxy_endpoint` 字段） |
+| `REMOTE_INSTANCE_UPSTREAM_MODEL` | 空 | Proxy 当前实际使用的模型 ID；非 secret。Panel 用它生成各客户端的可复制配置。（挂载 `metadata-instances.json` 时改填 `upstream_model`） |
 
 ### TLS 证书
 

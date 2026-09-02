@@ -17,6 +17,8 @@ export interface MetadataInstance {
   name: string;
   gateway_endpoint: string;
   proxy_endpoint?: string;
+  /** Proxy 当前实际转发使用的模型 ID；公开配置，不含凭据。 */
+  upstream_model?: string;
 }
 
 export const metaInstancesApi = {

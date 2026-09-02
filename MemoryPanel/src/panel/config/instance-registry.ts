@@ -14,6 +14,8 @@ const instanceSchema = z.object({
   //     线上部署时 gateway 前置了 proxy，两个值合一（缺省即可，回落到 gateway_endpoint 保持老行为）；
   //     开源本地部署时 core 和 proxy 分开跑，客户端要接的是 proxy，才需要显式填这个字段。
   proxy_endpoint: z.string().url().optional(),
+  /** 仅供前端生成客户端配置；非 secret，来源为实际 PROXY_UPSTREAM_MODEL。 */
+  upstream_model: z.string().min(1).optional(),
   api_key: z.string().min(1),
 });
 
@@ -27,6 +29,7 @@ export interface InstanceEntry {
   gateway_endpoint: string;
   /** 见 instanceSchema.proxy_endpoint 上方注释；未配置则前端回落 gateway_endpoint。 */
   proxy_endpoint?: string;
+  upstream_model?: string;
   api_key: string;
 }
 
@@ -45,6 +48,8 @@ export interface PublicInstance {
    * 缺省时前端回落到 `gateway_endpoint`，等同老行为。**Panel 转发链路不使用**。
    */
   proxy_endpoint?: string;
+  /** 当前实例 Proxy 实际转发使用的模型 ID；非 secret。 */
+  upstream_model?: string;
 }
 
 export class InstanceRegistryError extends Error {
@@ -88,6 +93,7 @@ export class InstanceRegistry {
       name: row.name,
       gateway_endpoint: row.gateway_endpoint,
       proxy_endpoint: row.proxy_endpoint,
+      upstream_model: row.upstream_model,
       api_key: row.api_key,
     }));
     return new InstanceRegistry(entries);
@@ -102,12 +108,13 @@ export class InstanceRegistry {
   }
 
   listPublic(): PublicInstance[] {
-    return [...this.byId.values()].map(({ instance_id, name, gateway_endpoint, proxy_endpoint }) => ({
+    return [...this.byId.values()].map(({ instance_id, name, gateway_endpoint, proxy_endpoint, upstream_model }) => ({
       instance_id,
       name,
       gateway_endpoint,
       // 不填就不下发字段（不是显式 undefined，前端 `??` 回落更干净）
       ...(proxy_endpoint ? { proxy_endpoint } : {}),
+      ...(upstream_model ? { upstream_model } : {}),
     }));
   }
 

@@ -54,6 +54,7 @@ import {
   type ApiKeyTeamRole,
   type ManagedUserKey,
 } from '../api-key-inventory';
+import { buildClientAccessConfigs } from '../client-access-config';
 import '../styles/api-key-panel.css';
 
 const { autotip } = Table.addons;
@@ -72,11 +73,13 @@ export default function ApiKeyPanel() {
   // 优先取 proxy_endpoint —— 开源本地部署 core+proxy 分开时客户端要接的是 proxy；
   // 未配置时回落 gateway_endpoint，等同老行为（线上 gateway 前置 proxy，两者合一）。
   const [clientBaseUrl, setClientBaseUrl] = useState<string | null>(null);
+  const [clientUpstreamModel, setClientUpstreamModel] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
     if (!auth?.instance_id) {
       setClientBaseUrl(null);
+      setClientUpstreamModel(null);
       return;
     }
     void metaInstancesApi
@@ -85,9 +88,13 @@ export default function ApiKeyPanel() {
         if (cancelled) return;
         const hit = list.find((i) => i.instance_id === auth.instance_id);
         setClientBaseUrl(hit?.proxy_endpoint ?? hit?.gateway_endpoint ?? null);
+        setClientUpstreamModel(hit?.upstream_model ?? null);
       })
       .catch(() => {
-        if (!cancelled) setClientBaseUrl(null);
+        if (!cancelled) {
+          setClientBaseUrl(null);
+          setClientUpstreamModel(null);
+        }
       });
     return () => {
       cancelled = true;
@@ -263,6 +270,10 @@ export default function ApiKeyPanel() {
     () => filterManagedUserKeys(keys, filteredSubjects),
     [filteredSubjects, keys],
   );
+  const clientAccessConfigs = useMemo(() => {
+    if (!clientBaseUrl || !clientUpstreamModel || !auth?.instance_id) return [];
+    return buildClientAccessConfigs(clientBaseUrl, auth.instance_id, clientUpstreamModel);
+  }, [auth?.instance_id, clientBaseUrl, clientUpstreamModel]);
   return (
     <div className="_memory-apikey-body">
       {/* ===== 刚创建的 Key 提示（仅展示一次） ===== */}
@@ -513,7 +524,7 @@ export default function ApiKeyPanel() {
         </div>
       </Card>
 
-      {/* ===== 接入指引 ===== */}
+      {/* ===== 各客户端完整接入配置（Key 只展示占位符，model 来自实例运行配置） ===== */}
       {/*
         instance-id 从当前登录态注入（auth.instance_id）—— 用户不用再手工替换
         [instance-id] 占位符，也不用去别处找自己现在连的是哪个实例。
@@ -528,69 +539,41 @@ export default function ApiKeyPanel() {
               {t('apiKey.endpoint.current')}
               <code>{auth.instance_name}</code>
               <span style={{ opacity: 0.6, marginLeft: 6 }}>({auth.instance_id})</span>
+              {clientUpstreamModel && (
+                <>
+                  <span style={{ marginLeft: 12 }}>{t('apiKey.endpoint.model')}</span>
+                  <code>{clientUpstreamModel}</code>
+                </>
+              )}
             </div>
           )}
           <div className="_memory-apikey-endpoints">
-            {(() => {
-              // base 未拉到就显示加载中；防止用户误抄硬编码 URL
-              if (!clientBaseUrl) {
-                return (
-                  <Text theme="weak" style={{ fontSize: 11 }}>
-                    {t('apiKey.endpoint.loading')}
-                  </Text>
-                );
-              }
-              // 去掉结尾斜杠，避免 base + /path 拼成双斜杠（! 绕过闭包窄化）
-              const base = clientBaseUrl!.replace(/\/+$/, '');
-              const iid = auth?.instance_id ?? '[instance-id]';
-              const endpoints: Array<{ label: string; url: string }> = [
-                { label: 'CodeBuddy', url: `${base}/codebuddy/${iid}` },
-                { label: 'Claude Code', url: `${base}/claude-code/${iid}` },
-                // WorkBuddy 走 /workbuddy/<spaceId>（spaceId=instance_id，与 codebuddy 对称）。
-                // 网页版底层 OpenAI ChatCompletions、桌面版 Responses API，proxy 均已适配。
-                { label: 'WorkBuddy', url: `${base}/workbuddy/${iid}` },
-                // codex 用 OpenAI Responses API（POST /v1/responses）；proxy 侧
-                // 同时注册了 v1/无v1 两种路径，惯例用不带 /v1 的 base，客户端
-                // config.toml 里 base_url 直接填这个地址即可，wire_api="responses"。
-                { label: 'Codex', url: `${base}/codex/${iid}` },
-                // dsh (deepseek-harness) — DeepSeek 官方 agent harness,Web UI 会话
-                // 走 OpenAI Chat Completions。**尾巴不带 /v1** —— dsh 客户端
-                // hardcoded 拼 ${baseURL}/chat/completions,与 CB 同族;proxy 侧
-                // 路由 /dsh/{spaceId}/chat/completions 已对齐。用户填的 baseURL
-                // 直接是这里的地址,不要在后面再加 /v1。
-                { label: 'DeepSeek Harness (dsh)', url: `${base}/dsh/${iid}` },
-                // OpenCode — sst/opencode 通用终端 AI 编程 Agent，协议 = 标准
-                // OpenAI Chat Completions（POST /v1/chat/completions），与 CB/dsh 同族。
-                // proxy 侧 agent-adapters/opencode.ts 已适配 form 回填 + mem: 命令族全套。
-                { label: 'OpenCode', url: `${base}/opencode/${iid}` },
-                { label: 'OpenClaw', url: `${base}/openclaw/default` },
-                { label: 'Hermes', url: `${base}/hermes/default` },
-              ];
-              return endpoints.map((ep) => (
-                <div className="_memory-apikey-endpoint" key={ep.label}>
-                  <Text theme="label" parent="div" style={{ marginBottom: 4 }}>
-                    {ep.label}
-                  </Text>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                    <code
-                      style={{
-                        flex: 1,
-                        fontSize: 11,
-                        wordBreak: 'break-all',
-                        background: 'var(--tea-color-bg-secondary-default)',
-                        padding: '4px 8px',
-                        borderRadius: 4,
-                      }}
-                    >
-                      {ep.url}
-                    </code>
-                    <Copy text={ep.url}>
-                      <Button>{t('apiKey.endpoint.copy')}</Button>
+            {!clientBaseUrl ? (
+              <Text theme="weak" style={{ fontSize: 11 }}>
+                {t('apiKey.endpoint.loading')}
+              </Text>
+            ) : !clientUpstreamModel ? (
+              <Alert type="warning">{t('apiKey.endpoint.modelMissing')}</Alert>
+            ) : (
+              clientAccessConfigs.map((config) => (
+                <div className="_memory-apikey-endpoint" key={config.id}>
+                  <div className="_memory-apikey-endpoint-header">
+                    <div>
+                      <Text theme="label" parent="div">
+                        {config.name}
+                      </Text>
+                      <Text theme="weak" parent="code" className="_memory-apikey-endpoint-target">
+                        {t(`apiKey.endpoint.kind.${config.kind}`)} · {config.target}
+                      </Text>
+                    </div>
+                    <Copy text={config.content}>
+                      <Button>{t('apiKey.endpoint.copyConfig')}</Button>
                     </Copy>
                   </div>
+                  <pre className="_memory-apikey-endpoint-code">{config.content}</pre>
                 </div>
-              ));
-            })()}
+              ))
+            )}
           </div>
         </Card.Body>
       </Card>
