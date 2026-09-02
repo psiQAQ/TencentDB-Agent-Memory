@@ -188,7 +188,7 @@ export const zhCN = {
   'login.placeholder.instance': '加载记忆实例中…',
   'login.placeholder.instanceError': '加载失败，请刷新重试',
   'login.placeholder.userKey': 'user_key，如 sk-mem-xxxxxxxxxxxxxxxx',
-  'login.hint.userKey': '请使用管理员为你分配的 user_key；若还没有，请联系团队管理员开号。',
+  'login.hint.userKey': '请使用 system_admin 为你创建的 User_Key；Team 管理员只能邀请已有账号加入 Team。',
   'login.submit': '登录',
   'login.submitting': '登录中…',
   'login.error.loadInstances': '加载记忆实例列表失败，请刷新页面重试{{detail}}',
@@ -1061,7 +1061,7 @@ export const zhCN = {
   // ===== MemberSection =====
   'member.title': '成员（{{count}}）',
   'member.subtitle':
-    '「{{name}}」的人类成员；admin 可管理 team 资产，member 可使用资产并创建 task · 点击卡片查看详情',
+    '「{{name}}」的人类成员；admin 可管理 Team，member/reviewer 按现有业务规则使用 Team 资源 · 点击卡片查看详情',
   'member.add': '添加成员',
   'member.add.tooltip': '按 user_id 邀请成员加入',
   'member.remove.confirm': '移除成员 {{userId}}？',
@@ -1105,7 +1105,7 @@ export const zhCN = {
 
   // ===== CreatedUserKeyModal =====
   'createdUserKey.caption': '用户创建成功',
-  'createdUserKey.success': '用户 {{username}}（{{userId}}）已创建并加入团队。',
+  'createdUserKey.success': '用户 {{username}}（{{userId}}）已创建。',
   'createdUserKey.warning':
     '以下 User_Key 仅显示这一次，请立即复制并安全地发送给该用户。关闭此弹窗后无法再次查看该 Key。',
   'createdUserKey.keyLabel': 'User_Key',
@@ -1404,6 +1404,9 @@ export const zhCN = {
   'onboarding.guide.start.member.title': '欢迎使用 TDAI 面板',
   'onboarding.guide.start.member.desc':
     '你是团队成员：可在团队内管理 Agent 与资产。接下来将带你了解面板核心能力，按「下一步」开始。',
+  'onboarding.guide.start.teamless.title': '欢迎使用 TDAI 面板',
+  'onboarding.guide.start.teamless.desc':
+    '你的账号类型是 normal，目前尚未加入 Team。可从左上角新建自己的 Team，或等待 Team owner/admin 邀请。',
   // 登录身份（Admin / Member 共有）
   'onboarding.guide.login.title': '你的登录身份',
   'onboarding.guide.login.desc':

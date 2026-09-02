@@ -396,19 +396,18 @@ export function OnboardingGuide({
   );
 
   const startContent: GuideStep = useMemo(
-    () => ({
-      element: () => resolveElement(FALLBACK_SELECTOR),
-      // 欢迎页高亮 header 品牌区：按实际位置动态计算方向
-      placement: computePlacement(FALLBACK_SELECTOR, 'bottom-start'),
-      title: t(
-        isSystemAdmin ? 'onboarding.guide.start.admin.title' : 'onboarding.guide.start.member.title',
-      ),
-      description: t(
-        isSystemAdmin ? 'onboarding.guide.start.admin.desc' : 'onboarding.guide.start.member.desc',
-      ),
-    }),
+    () => {
+      const audience = isSystemAdmin ? 'admin' : userRole ? 'member' : 'teamless';
+      return {
+        element: () => resolveElement(FALLBACK_SELECTOR),
+        // 欢迎页高亮 header 品牌区：按实际位置动态计算方向
+        placement: computePlacement(FALLBACK_SELECTOR, 'bottom-start'),
+        title: t(`onboarding.guide.start.${audience}.title`),
+        description: t(`onboarding.guide.start.${audience}.desc`),
+      };
+    },
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [isSystemAdmin, t, visible],
+    [isSystemAdmin, userRole, t, visible],
   );
 
   // ===== 自定义精确高亮层 =====

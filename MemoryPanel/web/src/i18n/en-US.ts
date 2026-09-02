@@ -192,7 +192,7 @@ export const enUS = {
   'login.placeholder.instanceError': 'Load failed, please refresh and retry',
   'login.placeholder.userKey': 'user_key, e.g. sk-mem-xxxxxxxxxxxxxxxx',
   'login.hint.userKey':
-    "Use the user_key assigned by your admin. If you don't have one, contact your team admin.",
+    'Use a User_Key created for you by the system_admin. Team admins can only invite existing accounts to a Team.',
   'login.submit': 'Log In',
   'login.submitting': 'Logging in…',
   'login.error.loadInstances':
@@ -1085,7 +1085,7 @@ export const enUS = {
   // ===== MemberSection =====
   'member.title': 'Members ({{count}})',
   'member.subtitle':
-    'Human members of "{{name}}". Admins manage team assets, members use assets and create tasks · Click cards for details',
+    'Human members of "{{name}}". Admins manage the Team; members and reviewers use Team resources under the existing business rules · Click cards for details',
   'member.add': 'Add Member',
   'member.add.tooltip': 'Invite a member by user_id',
   'member.remove.confirm': 'Remove member {{userId}}?',
@@ -1137,7 +1137,7 @@ export const enUS = {
   // ===== CreatedUserKeyModal =====
   'createdUserKey.caption': 'User Created Successfully',
   'createdUserKey.success':
-    'User {{username}} ({{userId}}) has been created and added to the team.',
+    'User {{username}} ({{userId}}) has been created.',
   'createdUserKey.warning':
     'The following User_Key is shown only once. Please copy and securely send it to the user immediately. You will not be able to view this key again after closing this dialog.',
   'createdUserKey.keyLabel': 'User_Key',
@@ -1442,6 +1442,9 @@ export const enUS = {
   'onboarding.guide.start.member.title': 'Welcome to TDAI Panel',
   'onboarding.guide.start.member.desc':
     'You are a team member: you can manage Agents and assets within the team. Let\'s walk through the core features — click "Next" to begin.',
+  'onboarding.guide.start.teamless.title': 'Welcome to TDAI Panel',
+  'onboarding.guide.start.teamless.desc':
+    'Your account type is normal and you are not in a Team yet. Create your own Team from the top-left switcher, or wait for an invitation from a Team owner/admin.',
   // Login identity (shared by Admin / Member)
   'onboarding.guide.login.title': 'Your login identity',
   'onboarding.guide.login.desc':
