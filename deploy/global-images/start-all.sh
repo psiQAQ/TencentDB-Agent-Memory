@@ -62,17 +62,21 @@ PROXY_FULL_STACK="${PROXY_FULL_STACK:-1}" "$SCRIPT_DIR/start-proxy.sh"
 ok "═══ 全部服务已就绪 ═════════════════════════════════════════"
 print_endpoints
 
-# 打印 Claude Code / proxy 使用命令
+# bootstrap Key 只用于登录 Panel 做账号/凭证管理；业务 Agent 使用 normal 用户 Key。
 ADMIN_KEY_FILE="${MEMORY_CORE_ADMIN_KEY_FILE:-$SCRIPT_DIR/.admin-key}"
 if [[ -s "$ADMIN_KEY_FILE" ]]; then
   UPSTREAM_MODEL="${PROXY_UPSTREAM_MODEL:-<your-model>}"
   echo ""
-  echo "  ┌─ 通过 proxy 用 Claude Code ─────────────────────────────────────┐"
+  echo "  ┌─ 下一步：用 Panel 创建业务用户 ─────────────────────────────────┐"
+  echo "  │  1. 用 $ADMIN_KEY_FILE 中的 bootstrap Key 登录 Panel"
+  echo "  │  2. 在「用户管理」创建 normal 用户并保存一次性 Key"
+  echo "  │  3. normal 用户登录 Panel，创建 Team / Agent / Task"
+  echo "  │  4. coding agent 使用 normal 用户 Key："
   echo "  │  export ANTHROPIC_BASE_URL=http://127.0.0.1:${PROXY_PORT}/claude-code/default"
-  echo "  │  export ANTHROPIC_AUTH_TOKEN=\"\$(cat '$ADMIN_KEY_FILE')\""
+  echo "  │  export ANTHROPIC_AUTH_TOKEN='<normal-user-key>'"
   echo "  │  claude --model ${UPSTREAM_MODEL}"
   echo "  │"
-  echo "  │  admin user_key 保存在: $ADMIN_KEY_FILE"
+  echo "  │  bootstrap Key 只用于运维，不要分发给业务用户"
   echo "  └────────────────────────────────────────────────────────────────┘"
 fi
 echo ""

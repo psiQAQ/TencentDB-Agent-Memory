@@ -39,14 +39,16 @@ cd TencentDB-Agent-Memory/deploy/global-images
 
 1. 首次启动时用 `init-admin` 生成 admin user，`user_key` 随机 32 位、持久化到
    `./.admin-key`（同一 volume 下每次重启复用）；
-2. 立即跑一次 `POST /v3/meta/auth/verify` 校验这把 key，通过后打印一段可直接
-   `export`+`claude` 的运行命令，形如：
+2. 立即跑一次 `POST /v3/meta/auth/verify` 校验这把 Key；
+3. 打印 Panel 建业务用户的下一步，以及供业务用户 Key 使用的 Claude Code 模板：
 
     ```bash
     export ANTHROPIC_BASE_URL=http://127.0.0.1:8096/claude-code/default
-    export ANTHROPIC_AUTH_TOKEN='sk-mem-<随机32位>'
+    export ANTHROPIC_AUTH_TOKEN='<normal-user-key>'
     claude --model <PROXY_UPSTREAM_MODEL 里配的模型>
     ```
+
+bootstrap `.admin-key` 只用于登录 Panel 管理账号和凭证，不要分发或用作日常 Agent Key。
 
 三个服务默认端口：
 
