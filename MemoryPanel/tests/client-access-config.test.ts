@@ -28,10 +28,21 @@ describe('API Key client access configuration', () => {
       expect(config.content).toContain(USER_KEY_PLACEHOLDER);
       expect(config.content).not.toContain('PROXY_UPSTREAM_MODEL 里配的模型');
     }
-    expect(configs[0]?.content).toContain(
-      "export ANTHROPIC_BASE_URL='http://127.0.0.1:8096/claude-code/default'",
-    );
-    expect(configs[0]?.content).toContain("claude --model 'runtime-model-v2'");
+    expect(configs[0]).toMatchObject({
+      kind: 'file',
+      target: '~/.claude/settings.json',
+    });
+    expect(JSON.parse(configs[0]!.content)).toEqual({
+      env: {
+        ANTHROPIC_BASE_URL: 'http://127.0.0.1:8096/claude-code/default',
+        ANTHROPIC_AUTH_TOKEN: USER_KEY_PLACEHOLDER,
+        ANTHROPIC_MODEL: 'runtime-model-v2',
+        ANTHROPIC_DEFAULT_HAIKU_MODEL: 'runtime-model-v2',
+        ANTHROPIC_DEFAULT_SONNET_MODEL: 'runtime-model-v2',
+        ANTHROPIC_DEFAULT_OPUS_MODEL: 'runtime-model-v2',
+        CLAUDE_CODE_SUBAGENT_MODEL: 'runtime-model-v2',
+      },
+    });
   });
 
   it('uses the protocol-specific endpoint form from each agent document', () => {

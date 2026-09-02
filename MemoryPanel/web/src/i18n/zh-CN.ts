@@ -1161,7 +1161,6 @@ export const zhCN = {
   'apiKey.endpoint.loading': '正在加载接入地址…',
   'apiKey.endpoint.modelMissing':
     '当前实例未提供 PROXY_UPSTREAM_MODEL，无法生成准确配置。请检查 Panel 部署配置。',
-  'apiKey.endpoint.kind.command': '启动命令',
   'apiKey.endpoint.kind.file': '配置文件',
   'apiKey.endpoint.copyConfig': '复制配置',
   'apiKey.create.caption': '新建 User_Key',

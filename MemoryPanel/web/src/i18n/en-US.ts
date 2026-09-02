@@ -1195,7 +1195,6 @@ export const enUS = {
   'apiKey.endpoint.loading': 'Loading access endpoint…',
   'apiKey.endpoint.modelMissing':
     'This instance does not expose PROXY_UPSTREAM_MODEL, so an accurate configuration cannot be generated. Check the Panel deployment configuration.',
-  'apiKey.endpoint.kind.command': 'Launch command',
   'apiKey.endpoint.kind.file': 'Configuration file',
   'apiKey.endpoint.copyConfig': 'Copy configuration',
   'apiKey.create.caption': 'New User_Key',

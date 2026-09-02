@@ -1,4 +1,4 @@
-export type ClientAccessConfigKind = 'command' | 'file';
+export type ClientAccessConfigKind = 'file';
 
 export interface ClientAccessConfig {
   id: string;
@@ -12,10 +12,6 @@ export const USER_KEY_PLACEHOLDER = 'sk-mem-<你的 User Key>';
 
 function endpoint(base: string, agent: string, instanceId: string, withV1 = false): string {
   return `${base.replace(/\/+$/, '')}/${agent}/${instanceId}${withV1 ? '/v1' : ''}`;
-}
-
-function shellQuote(value: string): string {
-  return `'${value.replace(/'/g, `'\\''`)}'`;
 }
 
 function quoted(value: string): string {
@@ -44,13 +40,23 @@ export function buildClientAccessConfigs(
     {
       id: 'claude-code',
       name: 'Claude Code',
-      kind: 'command',
-      target: 'Shell',
-      content: [
-        `export ANTHROPIC_BASE_URL=${shellQuote(claudeEndpoint)}`,
-        `export ANTHROPIC_AUTH_TOKEN=${shellQuote(USER_KEY_PLACEHOLDER)}`,
-        `claude --model ${shellQuote(model)}`,
-      ].join('\n'),
+      kind: 'file',
+      target: '~/.claude/settings.json',
+      content: JSON.stringify(
+        {
+          env: {
+            ANTHROPIC_BASE_URL: claudeEndpoint,
+            ANTHROPIC_AUTH_TOKEN: USER_KEY_PLACEHOLDER,
+            ANTHROPIC_MODEL: model,
+            ANTHROPIC_DEFAULT_HAIKU_MODEL: model,
+            ANTHROPIC_DEFAULT_SONNET_MODEL: model,
+            ANTHROPIC_DEFAULT_OPUS_MODEL: model,
+            CLAUDE_CODE_SUBAGENT_MODEL: model,
+          },
+        },
+        null,
+        2,
+      ),
     },
     {
       id: 'codebuddy',
