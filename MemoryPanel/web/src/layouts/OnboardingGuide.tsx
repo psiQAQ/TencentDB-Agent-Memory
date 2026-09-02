@@ -196,8 +196,8 @@ function buildSteps(role: 'admin' | 'member'): OnboardingStep[] {
   };
 
   // Admin 与 Member 的 Agent / 资产操作能力一致（都可编辑），仅成员管理不同：
-  //   - admin：可新建团队、新建用户并发放 user_key（member 无此权限）
-  //   - member：只能按 user_id 邀请已有用户加入团队；但可管理自己的 User_Key（admin 无此入口）
+  //   - system_admin：可新建团队、新建用户，并管理各团队成员的 User_Key
+  //   - member / Team admin：只能按 user_id 邀请已有用户加入团队，且只管理自己的 User_Key
   // placement 选择：右侧元素用 bottom-end（向左展开），左侧元素用 bottom-start（向右展开）
   if (role === 'admin') {
     return [

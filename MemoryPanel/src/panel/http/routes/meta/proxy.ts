@@ -176,8 +176,12 @@ export function registerMetaProxyRoutes(api: Hono, deps: PanelDeps): void {
       reqId: c.get('reqId'),
     };
 
+    // user/create 只有 system_admin 有权调用。普通用户直接交由内核返回 403，
+    // 不先发一个缺少 team_id、注定失败的 user/list 查重请求。
+    const isUserCreate = action === 'user/create' || action === 'user/create-with-key';
+    const canCheckDuplicate = !isUserCreate || await isCallerSystemAdmin(deps, ctx);
     // create 类 action：先查重
-    const duplicateMsg = await checkDuplicate(action, body, ctx, deps);
+    const duplicateMsg = canCheckDuplicate ? await checkDuplicate(action, body, ctx, deps) : null;
     if (duplicateMsg) {
       return respondControlError(c, 409, duplicateMsg);
     }

@@ -15,6 +15,9 @@ export const teamsApi = {
     return metaListAll<Team>('team/list', { user_id: me.user_id });
   },
 
+  /** 列出指定用户所属的 Team；仅供 system_admin 的跨用户管理视图使用。 */
+  listForUser: (userId: string) => metaListAll<Team>('team/list', { user_id: userId }),
+
   /** team 详情 */
   get: (teamId: string) => metaPost<Team>('team/get', { team_id: teamId }),
 

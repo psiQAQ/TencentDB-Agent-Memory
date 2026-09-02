@@ -70,8 +70,13 @@ export interface UserKey {
 }
 
 export const userKeysApi = {
-  /** 列出当前登录用户的全部 API Key（按内核分页拉全量） */
-  list: () => dedupeInFlight('user-key/list', () => metaListAll<UserKey>('user-key/list', {})),
+  /**
+   * 列出 API Key。普通用户省略 userId 时只查询自己；system_admin 可显式查询指定用户。
+   */
+  list: (userId?: string) =>
+    dedupeInFlight(`user-key/list:${userId ?? 'self'}`, () =>
+      metaListAll<UserKey>('user-key/list', userId ? { user_id: userId } : {}),
+    ),
 
   /** 创建一把新 Key；返回值里的 key_value 明文只展示这一次，调用方需立即展示给用户 */
   create: (data: { name?: string; expires_at?: string; user_id?: string }) => metaPost<UserKey>('user-key/create', data),

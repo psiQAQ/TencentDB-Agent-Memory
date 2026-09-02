@@ -1,15 +1,15 @@
 /**
  * ApiKeyPanel — User_Key 管理（组织与权限分组）。
  *
- * 精简版：列表只展示 4 个核心字段——key_id / user_id / key_prefix / 创建时间，
- * 不再展示「名称」「过期时间」两列（对应地，新建弹窗也不再要求填写名称）。
+ * 普通用户列表展示自己的 Key；system_admin 额外展示用户与所属 Team，
+ * 并可为指定成员创建或吊销 Key。
  * Tea 组件：列表用 Table + autotip，头部用 Justify + H3，
  * 破坏性操作统一走 Modal.confirm 二次确认，新建弹窗复用全站统一的 Modal 外壳。
  *
  * 后端链路：新面板（stateless）走 meta action `user-key/list|create|revoke`，
  * 由 Control 透明代理到内核 /v3/meta。前端不直接调内核，也不走旧 REST 路径。
- * owner 由登录 user_key 推断，前端不用也不能传别人的 user_id —— 天然满足
- * 「用户只能看到 / 管理自己的 key」。
+ * 普通用户不传 user_id，只能管理自己的 Key；system_admin 显式传 user_id，
+ * 可管理所有 Team 成员的 Key。两种路径都由内核 assertUserScope 最终鉴权。
  *
  * 安全设计（内核既有行为，不是本组件的取舍）：
  *   - key 明文只在 `create` 响应里出现这一次，之后 list/get 都不会再回传；
@@ -18,7 +18,7 @@
  *   - 因此列表里已存在的 key 无法「展开显示完整 key」，只能吊销。
  */
 
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import type { Moment } from 'moment';
 import moment from 'moment';
@@ -34,21 +34,30 @@ import {
   H3,
   Form,
   Modal,
+  Select,
 } from 'tea-component';
 import { AddIcon } from 'tea-icons-react';
-import { userKeysApi, metaInstancesApi, type UserKey } from '@/lib/teamApi';
-import { useCurrentRole } from '@/services/useCurrentRole';
+import { userKeysApi, usersApi, teamsApi, metaInstancesApi } from '@/lib/teamApi';
 import { useAuthStore } from '@/stores/auth';
 import { tea } from '@/lib/tea-bridge';
+import {
+  buildManagedUserKeys,
+  loadSystemAdminApiKeyInventory,
+  type ApiKeySubject,
+  type ManagedUserKey,
+} from '../api-key-inventory';
 import '../styles/api-key-panel.css';
 
 const { autotip } = Table.addons;
 
 export default function ApiKeyPanel() {
   const { t } = useTranslation();
-  const role = useCurrentRole();
   const { auth } = useAuthStore();
-  const [keys, setKeys] = useState<UserKey[]>([]);
+  const isSystemAdmin = auth?.isAdmin === true;
+  const [keys, setKeys] = useState<ManagedUserKey[]>([]);
+  const [subjects, setSubjects] = useState<ApiKeySubject[]>([]);
+  const [selectedUserId, setSelectedUserId] = useState(auth?.user_id ?? '');
+  const [filterUserId, setFilterUserId] = useState('*');
   const [loading, setLoading] = useState(true);
   // 客户端接入 base 地址（来自当前登录的 instance 元数据；每个实例不同）。
   // 优先取 proxy_endpoint —— 开源本地部署 core+proxy 分开时客户端要接的是 proxy；
@@ -77,20 +86,50 @@ export default function ApiKeyPanel() {
   }, [auth?.instance_id]);
 
   const refresh = useCallback(async () => {
+    if (!auth) return;
     setLoading(true);
     try {
-      const list = await userKeysApi.list();
-      // 按创建时间倒序（内核未必保证顺序）
-      list.sort((a, b) => (b.created_at ?? '').localeCompare(a.created_at ?? ''));
-      // 已吊销的 key 不再展示
-      setKeys(list.filter((k) => !k.revoked_at));
+      if (!isSystemAdmin) {
+        const ownSubject: ApiKeySubject = {
+          userId: auth.user_id,
+          username: auth.user,
+          teams: [],
+        };
+        const ownKeys = await userKeysApi.list();
+        setSubjects([ownSubject]);
+        setSelectedUserId(auth.user_id);
+        setKeys(buildManagedUserKeys([ownSubject], new Map([[auth.user_id, ownKeys]])));
+        return;
+      }
+
+      // 内核没有“列出所有 Team”端点：先列出实例用户，再按 user_id 拉所属 Team，
+      // 由 user_id 去重后即可覆盖所有 Team 的所有成员。
+      const inventory = await loadSystemAdminApiKeyInventory(auth.user_id, {
+        listUsers: usersApi.list,
+        listTeamsForUser: teamsApi.listForUser,
+        listKeysForUser: userKeysApi.list,
+      });
+      const nextSubjects = inventory.subjects;
+      setSubjects(nextSubjects);
+      setFilterUserId((current) =>
+        current === '*' || nextSubjects.some((subject) => subject.userId === current)
+          ? current
+          : '*',
+      );
+      setSelectedUserId((current) =>
+        nextSubjects.some((subject) => subject.userId === current)
+          ? current
+          : (nextSubjects[0]?.userId ?? auth.user_id),
+      );
+      setKeys(inventory.keys);
     } catch (e) {
       tea.notify.error(e);
+      setSubjects([]);
       setKeys([]);
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [auth, isSystemAdmin]);
 
   useEffect(() => {
     void refresh();
@@ -102,18 +141,29 @@ export default function ApiKeyPanel() {
   const [newExpiresAt, setNewExpiresAt] = useState<Moment | null>(null);
   const [creating, setCreating] = useState(false);
   // 刚创建出来的 key（含完整明文，仅展示一次）
-  const [freshKey, setFreshKey] = useState<{ keyId: string; secret: string } | null>(null);
+  const [freshKey, setFreshKey] = useState<{
+    keyId: string;
+    secret: string;
+    ownerName: string;
+  } | null>(null);
 
   async function handleCreate() {
+    const target = subjects.find((subject) => subject.userId === selectedUserId);
+    if (!target) return;
     setCreating(true);
     try {
       const key = await userKeysApi.create({
         expires_at: newExpiresAt ? newExpiresAt.endOf('day').toISOString() : undefined,
+        user_id: isSystemAdmin ? target.userId : undefined,
       });
       setNewExpiresAt(null);
       setShowCreate(false);
       if (key.key_value) {
-        setFreshKey({ keyId: key.key_id, secret: key.key_value });
+        setFreshKey({
+          keyId: key.key_id,
+          secret: key.key_value,
+          ownerName: target.displayName || target.username,
+        });
       }
       await refresh();
     } catch (e) {
@@ -123,7 +173,7 @@ export default function ApiKeyPanel() {
     }
   }
 
-  async function handleDelete(key: UserKey) {
+  async function handleDelete(key: ManagedUserKey) {
     const ok = await tea.confirm({
       message: t('apiKey.confirm.revoke', { name: key.key_prefix || key.key_id }),
       description: t('apiKey.confirm.revoke.desc'),
@@ -144,6 +194,10 @@ export default function ApiKeyPanel() {
     if (Number.isNaN(d.getTime())) return iso;
     return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')} ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
   };
+  const visibleKeys = useMemo(
+    () => (filterUserId === '*' ? keys : keys.filter((key) => key.ownerUserId === filterUserId)),
+    [filterUserId, keys],
+  );
   return (
     <div className="_memory-apikey-body">
       {/* ===== 刚创建的 Key 提示（仅展示一次） ===== */}
@@ -153,6 +207,11 @@ export default function ApiKeyPanel() {
             <p className="_memory-apikey-fresh-desc">
               {t('apiKey.fresh.desc', { keyId: freshKey.keyId })}
             </p>
+            {isSystemAdmin && (
+              <p className="_memory-apikey-fresh-desc">
+                {t('apiKey.fresh.owner', { name: freshKey.ownerName })}
+              </p>
+            )}
             <div className="_memory-apikey-fresh-code-row">
               <code className="_memory-apikey-fresh-code">{freshKey.secret}</code>
               <Copy
@@ -173,34 +232,89 @@ export default function ApiKeyPanel() {
           <div>
             <H3>{t('apiKey.title')}</H3>
             <Text theme="text" parent="div" style={{ marginTop: 4 }}>
-              {t('apiKey.desc')}
+              {t(isSystemAdmin ? 'apiKey.desc.admin' : 'apiKey.desc')}
             </Text>
           </div>
         }
         right={
-          role !== 'admin' ? (
-            <Button
-              type="primary"
-              onClick={() => {
-                setShowCreate(true);
-                setNewExpiresAt(null);
-              }}
-              data-guide="create-key"
-            >
-              <AddIcon size={14} />
-              {t('apiKey.create')}
-            </Button>
-          ) : null
+          <Button
+            type="primary"
+            disabled={subjects.length === 0}
+            onClick={() => {
+              setShowCreate(true);
+              setNewExpiresAt(null);
+            }}
+            data-guide="create-key"
+          >
+            <AddIcon size={14} />
+            {t('apiKey.create')}
+          </Button>
         }
       />
+
+      {isSystemAdmin && (
+        <Card>
+          <Card.Body title={t('apiKey.scope.title')}>
+            <Form>
+              <Form.Item label={t('apiKey.scope.user')}>
+                <Select
+                  size="full"
+                  searchable
+                  value={filterUserId}
+                  onChange={setFilterUserId}
+                  options={[
+                    { value: '*', text: t('apiKey.scope.all', { count: subjects.length }) },
+                    ...subjects.map((subject) => ({
+                      value: subject.userId,
+                      text: `${subject.displayName || subject.username} (${subject.userId}) · ${
+                        subject.teams.length
+                          ? subject.teams.map((team) => team.name).join(', ')
+                          : t('apiKey.noTeam')
+                      }`,
+                    })),
+                  ]}
+                />
+              </Form.Item>
+            </Form>
+          </Card.Body>
+        </Card>
+      )}
 
       {/* ===== Key 列表：key_id / key_prefix / 创建时间 + 操作 ===== */}
       <Card>
         <Table
           verticalTop
-          records={keys}
+          records={visibleKeys}
           recordKey="key_id"
           columns={[
+            ...(isSystemAdmin
+              ? [
+                  {
+                    key: 'owner',
+                    header: t('apiKey.table.owner'),
+                    width: 220,
+                    render: (key: ManagedUserKey) => (
+                      <div>
+                        <Text theme="strong" parent="div">
+                          {key.ownerName}
+                        </Text>
+                        <Text theme="weak" parent="code" style={{ fontSize: 11 }}>
+                          {key.ownerUserId}
+                        </Text>
+                      </div>
+                    ),
+                  },
+                  {
+                    key: 'teams',
+                    header: t('apiKey.table.teams'),
+                    render: (key: ManagedUserKey) => (
+                      <Text theme={key.teamNames.length ? 'text' : 'weak'}>
+                        {key.teamNames.length ? key.teamNames.join(', ') : t('apiKey.noTeam')}
+                      </Text>
+                    ),
+                  },
+                ]
+              : []),
             {
               key: 'key_id',
               header: t('apiKey.table.keyId'),
@@ -269,8 +383,12 @@ export default function ApiKeyPanel() {
               isLoading: loading,
               emptyText: (
                 <div className="_memory-apikey-empty">
-                  <div className="_memory-apikey-empty-title">{t('apiKey.empty.title')}</div>
-                  <div className="_memory-apikey-empty-desc">{t('apiKey.empty.desc')}</div>
+                  <div className="_memory-apikey-empty-title">
+                    {t(isSystemAdmin ? 'apiKey.empty.admin.title' : 'apiKey.empty.title')}
+                  </div>
+                  <div className="_memory-apikey-empty-desc">
+                    {t(isSystemAdmin ? 'apiKey.empty.admin.desc' : 'apiKey.empty.desc')}
+                  </div>
                 </div>
               ),
               onRetry: () => void refresh(),
@@ -288,7 +406,9 @@ export default function ApiKeyPanel() {
       <Card>
         <Card.Body title={t('apiKey.endpoint.title')}>
           {auth?.instance_name && (
-            <div style={{ marginBottom: 8, fontSize: 11, color: 'var(--tea-color-text-secondary)' }}>
+            <div
+              style={{ marginBottom: 8, fontSize: 11, color: 'var(--tea-color-text-secondary)' }}
+            >
               {t('apiKey.endpoint.current')}
               <code>{auth.instance_name}</code>
               <span style={{ opacity: 0.6, marginLeft: 6 }}>({auth.instance_id})</span>
@@ -369,6 +489,24 @@ export default function ApiKeyPanel() {
         >
           <Modal.Body>
             <Form>
+              {isSystemAdmin && (
+                <Form.Item label={t('apiKey.create.user')} extra={t('apiKey.create.user.extra')}>
+                  <Select
+                    size="full"
+                    searchable
+                    value={selectedUserId}
+                    onChange={setSelectedUserId}
+                    options={subjects.map((subject) => ({
+                      value: subject.userId,
+                      text: `${subject.displayName || subject.username} (${subject.userId}) · ${
+                        subject.teams.length
+                          ? subject.teams.map((team) => team.name).join(', ')
+                          : t('apiKey.noTeam')
+                      }`,
+                    }))}
+                  />
+                </Form.Item>
+              )}
               <Form.Item
                 label={t('apiKey.create.expiresAt')}
                 extra={t('apiKey.create.expiresAt.extra')}
@@ -386,7 +524,7 @@ export default function ApiKeyPanel() {
             <Button
               type="primary"
               onClick={() => void handleCreate()}
-              disabled={creating}
+              disabled={creating || !selectedUserId}
               loading={creating}
             >
               {t('apiKey.create.submit')}
