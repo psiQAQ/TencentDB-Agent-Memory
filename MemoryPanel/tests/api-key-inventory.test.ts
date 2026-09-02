@@ -128,14 +128,16 @@ describe("API Key system-admin inventory", () => {
     );
   });
 
-  it("protects system_admin and self-revocation but lets system_admin disable another normal user", () => {
-    const systemKey = {
-      key_id: "system",
+  it("protects only the bootstrap admin Key and lets system_admin revoke other Keys", () => {
+    const bootstrapKey = {
+      key_id: "bootstrap",
       ownerUserId: "admin",
       ownerName: "admin",
       ownerUserType: "system_admin",
+      is_default: true,
       teamMemberships: [],
     };
+    const systemKey = { ...bootstrapKey, key_id: "system", is_default: false };
     const onlyKey = {
       key_id: "only",
       ownerUserId: "alice",
@@ -145,9 +147,15 @@ describe("API Key system-admin inventory", () => {
     };
     const secondKey = { ...onlyKey, key_id: "second" };
 
-    expect(getKeyRevokeBlockReason(systemKey, [systemKey])).toBe(
-      "system_admin",
+    expect(getKeyRevokeBlockReason(bootstrapKey, [bootstrapKey, systemKey])).toBe(
+      "bootstrap_admin_key",
     );
+    expect(
+      getKeyRevokeBlockReason(systemKey, [bootstrapKey, systemKey], {
+        callerUserId: "admin",
+        callerIsSystemAdmin: true,
+      }),
+    ).toBeNull();
     expect(getKeyRevokeBlockReason(onlyKey, [onlyKey])).toBe("last_active_key");
     expect(
       getKeyRevokeBlockReason(onlyKey, [onlyKey], {
@@ -155,12 +163,6 @@ describe("API Key system-admin inventory", () => {
         callerIsSystemAdmin: true,
       }),
     ).toBeNull();
-    expect(
-      getKeyRevokeBlockReason(systemKey, [systemKey, { ...systemKey, key_id: "system-2" }], {
-        callerUserId: "admin",
-        callerIsSystemAdmin: true,
-      }),
-    ).toBe("system_admin");
     expect(getKeyRevokeBlockReason(onlyKey, [onlyKey, secondKey])).toBeNull();
   });
 

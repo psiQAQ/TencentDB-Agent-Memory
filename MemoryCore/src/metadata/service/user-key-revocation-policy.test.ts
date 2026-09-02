@@ -7,6 +7,7 @@ describe("user Key revocation policy", () => {
       getUserKeyRevocationBlockReason({
         ownerUserId: "normal-user",
         ownerUserType: "normal",
+        isDefaultKey: true,
         activeKeyCount: 1,
         callerUserId: "system-admin",
         callerIsSystemAdmin: true,
@@ -19,6 +20,7 @@ describe("user Key revocation policy", () => {
       getUserKeyRevocationBlockReason({
         ownerUserId: "normal-user",
         ownerUserType: "normal",
+        isDefaultKey: true,
         activeKeyCount: 1,
         callerUserId: "normal-user",
         callerIsSystemAdmin: false,
@@ -31,6 +33,7 @@ describe("user Key revocation policy", () => {
       getUserKeyRevocationBlockReason({
         ownerUserId: "normal-user",
         ownerUserType: "normal",
+        isDefaultKey: true,
         activeKeyCount: 2,
         callerUserId: "normal-user",
         callerIsSystemAdmin: false,
@@ -38,24 +41,26 @@ describe("user Key revocation policy", () => {
     ).toBeNull();
   });
 
-  it("protects every system_admin Key regardless of caller or active count", () => {
+  it("protects only the bootstrap system_admin Key", () => {
     expect(
       getUserKeyRevocationBlockReason({
         ownerUserId: "system-admin",
         ownerUserType: "system_admin",
+        isDefaultKey: true,
         activeKeyCount: 2,
         callerUserId: "system-admin",
         callerIsSystemAdmin: true,
       }),
-    ).toBe("system_admin_key");
+    ).toBe("bootstrap_admin_key");
     expect(
       getUserKeyRevocationBlockReason({
         ownerUserId: "system-admin",
         ownerUserType: "system_admin",
-        activeKeyCount: 2,
-        callerUserId: "another-system-admin",
+        isDefaultKey: false,
+        activeKeyCount: 1,
+        callerUserId: "system-admin",
         callerIsSystemAdmin: true,
       }),
-    ).toBe("system_admin_key");
+    ).toBeNull();
   });
 });

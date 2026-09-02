@@ -1117,6 +1117,7 @@ export const zhCN = {
   'apiKey.fresh.owner': '所属用户：{{name}}',
   'apiKey.table.owner': '用户',
   'apiKey.table.teams': '所属团队',
+  'apiKey.table.name': '备注名',
   'apiKey.table.keyId': 'Key ID',
   'apiKey.table.keyPrefix': 'Key Prefix',
   'apiKey.table.createdAt': '创建时间',
@@ -1135,7 +1136,8 @@ export const zhCN = {
   'apiKey.confirm.revoke.privilegedLast.desc':
     '这是该成员最后一把有效 Key，且其在以下团队承担管理角色：{{teams}}。吊销后该用户将无法再通过 User Key 登录或调用服务；其成员身份和角色仍会保留，可能造成团队管理中断。',
   'apiKey.confirm.revoke.ok': '吊销',
-  'apiKey.revoke.disabled.system_admin': 'system_admin 的 Key 不可在此面板中吊销。',
+  'apiKey.revoke.disabled.bootstrap_admin_key':
+    '这是部署 .admin-key 对应的 bootstrap Key，不可吊销。',
   'apiKey.revoke.disabled.last_active_key':
     '这是该成员最后一把有效 Key。请先新建另一把 Key，再吊销此 Key。',
   'apiKey.empty.title': '你还没有任何 User Key',
@@ -1143,6 +1145,7 @@ export const zhCN = {
   'apiKey.empty.admin.title': '团队成员暂无可用 User Key',
   'apiKey.empty.admin.desc': '点击右上角「新建 Key」为指定成员创建 Key',
   'apiKey.noTeam': '未加入团队',
+  'apiKey.noName': '未填写',
   'apiKey.scope.title': '管理范围',
   'apiKey.scope.team': '团队',
   'apiKey.scope.allTeams': '全部团队',
@@ -1159,6 +1162,9 @@ export const zhCN = {
   'apiKey.create.caption': '新建 User_Key',
   'apiKey.create.user': '所属用户',
   'apiKey.create.user.extra': '仅 system_admin 可以为其他团队成员创建 Key',
+  'apiKey.create.name': '备注名',
+  'apiKey.create.name.extra': '可选，最多 128 个字符，由本次 Key 的创建者填写',
+  'apiKey.create.name.placeholder': '例如：Codex 开发环境',
   'apiKey.create.expiresAt': '过期时间',
   'apiKey.create.expiresAt.extra': '留空表示永不过期',
   'apiKey.create.expiresAt.placeholder': '留空表示永不过期',

@@ -854,7 +854,7 @@ upsert 知识明细（幂等）。
 
 **create 请求体**：`user_id?`、`name?`(≤128)、`expires_at?`。
 
-**UserKeyPublic 响应**：`{ key_id, user_id, key_prefix, name?, status: "active"\|"revoked", is_default, last_used_at?, expires_at?, created_at, revoked_at? }`。create 额外返回 `key_value`（仅此一次完整 key）。
+**UserKeyPublic 响应**：`{ key_id, user_id, key_prefix, name?, status: "active"\|"revoked", is_default, last_used_at?, expires_at?, created_at, revoked_at? }`。create 额外返回 `key_value`（仅此一次完整 key）。`key_id` 由服务生成且不可自定义；`name` 是创建者可填写的可选备注名（最长 128 字符）。`init-admin` 创建的 `system_admin` 默认 Key（`is_default=true`）对应部署持久化的 `.admin-key`，不可吊销；其他 `system_admin` Key 可吊销。
 
 ### 3.7.3 Team（5）
 

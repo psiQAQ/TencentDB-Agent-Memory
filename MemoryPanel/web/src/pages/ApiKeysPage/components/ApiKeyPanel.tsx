@@ -30,6 +30,7 @@ import {
   Copy,
   Text,
   DatePicker,
+  Input,
   Justify,
   H3,
   Form,
@@ -147,8 +148,8 @@ export default function ApiKeyPanel() {
   }, [refresh]);
 
   // ---- 新建弹窗 ----
-  // 不再收集「名称」——列表本身也不展示名称列，创建时无需再让用户填写。
   const [showCreate, setShowCreate] = useState(false);
+  const [newKeyName, setNewKeyName] = useState('');
   const [newExpiresAt, setNewExpiresAt] = useState<Moment | null>(null);
   const [creating, setCreating] = useState(false);
   // 刚创建出来的 key（含完整明文，仅展示一次）
@@ -164,10 +165,12 @@ export default function ApiKeyPanel() {
     setCreating(true);
     try {
       const key = await userKeysApi.create({
+        name: newKeyName.trim() || undefined,
         expires_at: newExpiresAt ? newExpiresAt.endOf('day').toISOString() : undefined,
         user_id: isSystemAdmin ? target.userId : undefined,
       });
       setNewExpiresAt(null);
+      setNewKeyName('');
       setShowCreate(false);
       if (key.key_value) {
         setFreshKey({
@@ -304,6 +307,7 @@ export default function ApiKeyPanel() {
             disabled={subjects.length === 0}
             onClick={() => {
               setShowCreate(true);
+              setNewKeyName('');
               setNewExpiresAt(null);
             }}
             data-guide="create-key"
@@ -367,7 +371,7 @@ export default function ApiKeyPanel() {
                   {
                     key: 'owner',
                     header: t('apiKey.table.owner'),
-                    width: '20%',
+                    width: '15%',
                     render: (key: ManagedUserKey) => (
                       <div className="_memory-apikey-cell">
                         <Text theme="strong" parent="div">
@@ -382,7 +386,7 @@ export default function ApiKeyPanel() {
                   {
                     key: 'teams',
                     header: t('apiKey.table.teams'),
-                    width: '22%',
+                    width: '16%',
                     render: (key: ManagedUserKey) => (
                       <div className="_memory-apikey-cell _memory-apikey-team-list">
                         {key.teamMemberships.length ? (
@@ -403,9 +407,20 @@ export default function ApiKeyPanel() {
                 ]
               : []),
             {
+              key: 'name',
+              header: t('apiKey.table.name'),
+              width: isSystemAdmin ? '14%' : '18%',
+              render: (key) =>
+                key.name ? (
+                  <Text className="_memory-apikey-cell">{key.name}</Text>
+                ) : (
+                  <Text theme="weak">{t('apiKey.noName')}</Text>
+                ),
+            },
+            {
               key: 'key_id',
               header: t('apiKey.table.keyId'),
-              width: isSystemAdmin ? '15%' : '25%',
+              width: isSystemAdmin ? '15%' : '23%',
               render: (key) => (
                 <Text
                   parent="code"
@@ -419,7 +434,7 @@ export default function ApiKeyPanel() {
             {
               key: 'key_prefix',
               header: t('apiKey.table.keyPrefix'),
-              width: isSystemAdmin ? '13%' : '25%',
+              width: isSystemAdmin ? '14%' : '22%',
               render: (key) => (
                 <Text parent="code" className="_memory-apikey-cell _memory-apikey-code-cell">
                   {key.key_prefix || '—'}
@@ -429,7 +444,7 @@ export default function ApiKeyPanel() {
             {
               key: 'created_at',
               header: t('apiKey.table.createdAt'),
-              width: isSystemAdmin ? '12%' : '20%',
+              width: isSystemAdmin ? '10%' : '14%',
               render: (key) => (
                 <Text theme="text" className="_memory-apikey-time">
                   {formatTime(key.created_at)}
@@ -439,7 +454,7 @@ export default function ApiKeyPanel() {
             {
               key: 'expires_at',
               header: t('apiKey.table.expiresAt'),
-              width: isSystemAdmin ? '11%' : '20%',
+              width: isSystemAdmin ? '9%' : '14%',
               render: (key) => {
                 if (key.revoked_at) return <Text theme="weak">{t('apiKey.revoked')}</Text>;
                 return key.expires_at ? (
@@ -454,7 +469,7 @@ export default function ApiKeyPanel() {
             {
               key: 'actions',
               header: t('apiKey.table.actions'),
-              width: isSystemAdmin ? '7%' : '10%',
+              width: isSystemAdmin ? '7%' : '9%',
               align: 'right',
               render: (key) => {
                 const blockReason = getKeyRevokeBlockReason(key, keys, {
@@ -579,7 +594,7 @@ export default function ApiKeyPanel() {
           </div>
         </Card.Body>
       </Card>
-      {/* ===== 新建弹窗：只需设置「过期时间」（可留空＝永不过期），不再需要名称 ===== */}
+      {/* ===== 新建弹窗：备注名可选，过期时间留空表示永不过期 ===== */}
       {showCreate && (
         <Modal
           visible
@@ -608,6 +623,14 @@ export default function ApiKeyPanel() {
                   />
                 </Form.Item>
               )}
+              <Form.Item label={t('apiKey.create.name')} extra={t('apiKey.create.name.extra')}>
+                <Input
+                  size="full"
+                  value={newKeyName}
+                  onChange={(value) => setNewKeyName(value.slice(0, 128))}
+                  placeholder={t('apiKey.create.name.placeholder')}
+                />
+              </Form.Item>
               <Form.Item
                 label={t('apiKey.create.expiresAt')}
                 extra={t('apiKey.create.expiresAt.extra')}

@@ -1151,6 +1151,7 @@ export const enUS = {
   'apiKey.fresh.owner': 'Owner: {{name}}',
   'apiKey.table.owner': 'User',
   'apiKey.table.teams': 'Teams',
+  'apiKey.table.name': 'Note',
   'apiKey.table.keyId': 'Key ID',
   'apiKey.table.keyPrefix': 'Key Prefix',
   'apiKey.table.createdAt': 'Created At',
@@ -1169,8 +1170,8 @@ export const enUS = {
   'apiKey.confirm.revoke.privilegedLast.desc':
     'This is the member\'s last active Key, and the member has management roles in: {{teams}}. Revoking it prevents User Key sign-in and service access. Memberships and roles remain, so Team administration may be interrupted.',
   'apiKey.confirm.revoke.ok': 'Revoke',
-  'apiKey.revoke.disabled.system_admin':
-    'A system_admin Key cannot be revoked from this panel.',
+  'apiKey.revoke.disabled.bootstrap_admin_key':
+    'This is the bootstrap Key persisted in the deployment .admin-key file and cannot be revoked.',
   'apiKey.revoke.disabled.last_active_key':
     "This is the member's last active Key. Create another Key before revoking this one.",
   'apiKey.empty.title': "You don't have any User Keys yet",
@@ -1178,6 +1179,7 @@ export const enUS = {
   'apiKey.empty.admin.title': 'No active User Keys for Team members',
   'apiKey.empty.admin.desc': 'Click "New Key" to create one for a selected member',
   'apiKey.noTeam': 'No Team',
+  'apiKey.noName': 'Not set',
   'apiKey.scope.title': 'Management Scope',
   'apiKey.scope.team': 'Team',
   'apiKey.scope.allTeams': 'All Teams',
@@ -1194,6 +1196,9 @@ export const enUS = {
   'apiKey.create.caption': 'New User_Key',
   'apiKey.create.user': 'Owner',
   'apiKey.create.user.extra': 'Only system_admin can create a Key for another Team member',
+  'apiKey.create.name': 'Note',
+  'apiKey.create.name.extra': 'Optional, up to 128 characters, set by the Key creator',
+  'apiKey.create.name.placeholder': 'For example: Codex development',
   'apiKey.create.expiresAt': 'Expires At',
   'apiKey.create.expiresAt.extra': 'Leave empty for never expires',
   'apiKey.create.expiresAt.placeholder': 'Leave empty for never expires',

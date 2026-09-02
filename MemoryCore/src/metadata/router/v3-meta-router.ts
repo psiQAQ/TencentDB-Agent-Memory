@@ -327,7 +327,7 @@ function mapErrorCode(code: string): number {
     case "user_limit_exceeded":
     case "team_limit_exceeded":
     case "last_key_cannot_revoke":
-    case "system_admin_key_cannot_revoke":
+    case "bootstrap_admin_key_cannot_revoke":
     case "already_initialized":
     case "last_system_admin":
     case "member_already_exists":

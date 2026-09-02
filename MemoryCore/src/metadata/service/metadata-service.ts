@@ -751,14 +751,15 @@ export class MetadataService {
     const blockReason = getUserKeyRevocationBlockReason({
       ownerUserId: entity.user_id,
       ownerUserType: owner.user_type,
+      isDefaultKey: entity.is_default,
       activeKeyCount: active,
       callerUserId: ctx.userId,
       callerIsSystemAdmin: ctx.isSystemAdmin,
     });
-    if (blockReason === "system_admin_key") {
+    if (blockReason === "bootstrap_admin_key") {
       throw new MetadataError(
-        "system_admin_key_cannot_revoke",
-        "cannot revoke a system_admin user key",
+        "bootstrap_admin_key_cannot_revoke",
+        "cannot revoke the bootstrap system_admin user key",
       );
     }
     if (blockReason === "last_active_key") {

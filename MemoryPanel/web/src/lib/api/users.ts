@@ -59,6 +59,8 @@ export interface UserKey {
   key_id: string;
   user_id?: string;
   name?: string;
+  /** init-admin 创建的默认 Key 为 true；system_admin 的该 Key 对应部署 `.admin-key`。 */
+  is_default?: boolean;
   /** key 的可展示前缀（如 `sk-mem-ab12****`），内核 list/get 返回，用于免密识别具体是哪把 key */
   key_prefix?: string;
   /** 明文 key —— 仅创建响应里出现这一次，之后（list/get）内核不会再回传，安全设计如此 */

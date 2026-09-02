@@ -145,20 +145,22 @@ export function filterManagedUserKeys(
   return keys.filter((key) => userIds.has(key.ownerUserId));
 }
 
-export type KeyRevokeBlockReason = 'system_admin' | 'last_active_key' | null;
+export type KeyRevokeBlockReason = 'bootstrap_admin_key' | 'last_active_key' | null;
 
 export interface KeyRevokeContext {
   callerUserId?: string;
   callerIsSystemAdmin: boolean;
 }
 
-/** 镜像 Core：禁止 system_admin Key；仅 system_admin 可吊销其他普通用户的最后一把 Key。 */
+/** 镜像 Core：只保护部署 bootstrap Key；system_admin 可吊销其他 Key。 */
 export function getKeyRevokeBlockReason(
   key: ManagedUserKey,
   activeKeys: ManagedUserKey[],
   context: KeyRevokeContext = { callerIsSystemAdmin: false },
 ): KeyRevokeBlockReason {
-  if (key.ownerUserType === 'system_admin') return 'system_admin';
+  if (key.ownerUserType === 'system_admin') {
+    return key.is_default ? 'bootstrap_admin_key' : null;
+  }
   const ownerActiveKeyCount = activeKeys.filter(
     (candidate) => candidate.ownerUserId === key.ownerUserId && !candidate.revoked_at,
   ).length;
