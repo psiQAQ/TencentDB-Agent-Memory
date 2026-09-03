@@ -143,24 +143,46 @@ Coding agent 用记忆必须落到具体 `team / agent / task` 三元组上：
 添加成员只建立 membership，**不会静默创建 Agent 或 Asset**。新成员首次登录后，
 自行进入“Agents 管理”，选择“从 Team 默认模板创建”并确认，或使用普通表单手动创建。
 
-### 第 2.6 步：安全离组和删除账号
+### 第 2.6 步：交接后安全离组和删除账号
 
 ownership 不随 membership 自动转移或删除。移除成员或删除账号前按以下顺序处理：
 
-1. 用户在左侧“我的资源依赖”查看自己拥有的 Team、Agent、Task、Asset；inactive、
-   archived 状态也会显示并计入 blocker。
+1. 用户在左侧“我的资源依赖”查看自己拥有的 Team、Agent、Task、Skill、Wiki、
+   Code Graph、Chat Memory 和其他 Asset；inactive、archived 状态也会显示并计入 blocker。
 2. 如果页面标记 `membership=absent`，由该 Team owner/admin 在“成员管理”按
    `user_id` 恢复 membership。恢复不会自动生成默认资源。
-3. 用户本人在 active membership 下选择当前 Team 的业务资源，二次确认“永久清理”。
-   这会清 backing data、metadata 和关系；普通 Agent“归档”不等于解除 ownership。
-4. 资源依赖归零后，Team owner/admin 才能移除 membership；随后 `system_admin`
-   才能在“用户管理”删除账号。
+3. 用户本人在 active membership 下逐项或批量选择处理方式：
+   - “转移 ownership”：Agent、Task、Wiki、Code Graph 可直接转给同 Team 任意 active
+     member；Team ownership 只能转给 active `admin`。接收者无需确认。
+   - Agent 是聚合根：转移 Agent 时，其自有 Skill、self Chat Memory 以及 L0/L1 当前
+     owner 一并转移；历史 `user_id`/`creator_user_id` 不改写。
+   - “永久清理”：先清 backing data，再清 metadata 和关系。普通 Agent“归档”不等于
+     解除 ownership。
+4. ownership 和活动授权归零后，成员可点击“退出当前 Team”，Team owner/admin 也可再次
+   点击“移出 Team”。最终提交会在事务中重新检查；若期间又创建了资源，离组被拒绝且
+   membership 保持 active。
+5. membership 移除后，`system_admin` 才能在“用户管理”删除账号。
 
-`team-member/remove` 会在写入前重新检查目标用户在当前 Team 所有状态的 Agent、Task、
-Asset；有依赖时返回 `409 member_has_owned_resources` 且 membership 保持不变。
+`team-member/leave` 和 `team-member/remove` 会在写入事务内重新检查目标用户在当前 Team
+所有状态的 Agent、Task、细分 Asset、活动 ACL 和未完成 lifecycle operation；有依赖时
+返回结构化 `409` 且 membership 保持不变。成员不能带着资源主动退出，也不能被 admin
+强制移出。
 `user/delete` 同样检查所有状态的 Team、Agent、Task、Asset，批量请求中任一用户有依赖
 都会整批拒绝。`system_admin` 可在用户详情查看依赖名称、状态、Team 和 membership，
 但页面不提供业务资源清理或 membership 修改按钮；它也不能代替资源 owner 清理。
+
+### 第 2.7 步：安全解散 Team 与僵尸治理
+
+- TeamSwitcher 只负责切换和创建，不再放删除图标。永久解散位于 Team 设置的
+  Danger Zone，且仅 Team owner 可见。
+- 解散前必须只剩 owner 一名 active member，并且 Agent、Task、全部 Asset subtype、
+  活动关系、未完成 operation 和 operational integrity finding 全部归零。输入完整 Team
+  名称并使用最新 preview revision 后才会删除空 Team；Team admin 调用返回 403。
+- `system_admin` 左侧菜单顺序为“用户管理 → 僵尸资源 → 成员管理 → Agents 管理 →
+  我的资源依赖 → API Key”。“僵尸资源”先扫描再人工处置，只允许清理重新验证后仍为
+  `operational_orphan` 或 `cache_residue` 的条目。
+- Alice 这类 Team 和 owner 仍存在、只是 membership 缺失的资源属于
+  `recoverable_dependency`：僵尸页只展示恢复路径，`system_admin` 不能借此代删。
 
 ### 第 3 步：把 Claude Code 指向 Proxy
 
