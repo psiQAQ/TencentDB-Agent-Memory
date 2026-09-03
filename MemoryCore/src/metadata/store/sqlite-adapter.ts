@@ -1168,27 +1168,23 @@ export class SqliteMetadataStore implements IMetadataStore {
       const implicitAssetIds: string[] = [];
       const removedBindingIds: string[] = [];
       if (input.resource_type === "agent") {
-        const memoryId = buildChatMemoryAssetId(input.team_id, input.resource_id);
-        const skillRows = this.db.prepare(
+        const brokenBinding = this.get<Row>(
+          `SELECT fa.id FROM meta_agent_fixed_assets fa
+             LEFT JOIN meta_assets x ON x.asset_id = fa.asset_id
+            WHERE fa.agent_id = ? AND (x.asset_id IS NULL OR x.team_id <> ?) LIMIT 1`,
+          input.resource_id, input.team_id,
+        );
+        if (brokenBinding) return fail("bound_asset_invalid");
+        const ownedAssetRows = this.db.prepare(
           `SELECT DISTINCT x.asset_id FROM meta_assets x
              JOIN meta_agent_fixed_assets fa ON fa.asset_id = x.asset_id
-            WHERE fa.agent_id = ? AND x.asset_type = 'skill' AND x.owner_user_id = ?`,
-        ).all(input.resource_id, input.from_user_id) as Row[];
-        implicitAssetIds.push(memoryId, ...skillRows.map((row) => String(row.asset_id)));
-        const existingImplicit = implicitAssetIds.filter((id) => !!this.get("SELECT 1 FROM meta_assets WHERE asset_id = ?", id));
-        if (existingImplicit.length) {
-          const ph = existingImplicit.map(() => "?").join(",");
+            WHERE fa.agent_id = ? AND x.team_id = ? AND x.owner_user_id = ?`,
+        ).all(input.resource_id, input.team_id, input.from_user_id) as Row[];
+        implicitAssetIds.push(...ownedAssetRows.map((row) => String(row.asset_id)));
+        if (implicitAssetIds.length) {
+          const ph = implicitAssetIds.map(() => "?").join(",");
           this.run(`UPDATE meta_assets SET owner_user_id = ?, updated_at = ? WHERE asset_id IN (${ph})`,
-            input.to_user_id, nowIso(), ...existingImplicit);
-        }
-        const invalid = this.db.prepare(
-          `SELECT fa.id FROM meta_agent_fixed_assets fa JOIN meta_assets x ON x.asset_id = fa.asset_id
-            WHERE fa.agent_id = ? AND x.visibility = 'private' AND x.owner_user_id <> ?`,
-        ).all(input.resource_id, input.to_user_id) as Row[];
-        removedBindingIds.push(...invalid.map((row) => String(row.id)));
-        if (removedBindingIds.length) {
-          const ph = removedBindingIds.map(() => "?").join(",");
-          this.run(`DELETE FROM meta_agent_fixed_assets WHERE id IN (${ph})`, ...removedBindingIds);
+            input.to_user_id, nowIso(), ...implicitAssetIds);
         }
       }
       this.run(`UPDATE ${table} SET owner_user_id = ?${input.resource_type === "team" ? ", updated_at = ?" : ", updated_at = ?"} WHERE ${idColumn} = ?`,

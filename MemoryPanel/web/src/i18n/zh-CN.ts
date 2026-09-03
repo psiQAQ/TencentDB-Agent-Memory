@@ -15,7 +15,7 @@ export const zhCN = {
   'menu.team_agents': 'Agents 管理',
   'menu.owned_resources': '我的资源依赖',
   'menu.user_management': '用户管理',
-  'menu.zombie_resources': '僵尸资源',
+  'menu.zombie_resources': '孤立资源治理',
   'menu.api_keys': 'API Key',
   'menu.group.workbench': '工作台',
   'menu.group.organization': '组织与权限',
@@ -112,8 +112,8 @@ export const zhCN = {
   'menu.desc.owned_resources': '查看 ownership 与永久清理',
   'menu.desc.user_management': '全局账号 / 类型 / 创建与安全删除',
   'menu.desc.api_keys': '管理你的 API Key，用于外部客户端接入',
-  'menu.desc.zombie_resources': '扫描并治理失去合法归属路径的残留数据',
-  'orphans.title': '僵尸资源治理',
+  'menu.desc.zombie_resources': '扫描并治理失去合法归属路径的孤立数据',
+  'orphans.title': '孤立资源治理',
   'orphans.desc': '查看来源、原 Team/owner 和可执行动作；扫描结果不包含业务内容或凭证。',
   'orphans.scan': '重新扫描',
   'orphans.boundary':
@@ -122,11 +122,13 @@ export const zhCN = {
   'orphans.history': '历史保留',
   'orphans.empty': '没有可处置的完整性问题。',
   'orphans.reason': '填写治理原因（至少 3 个字符）',
-  'orphans.purge.action': '清理选中僵尸',
-  'orphans.purge.confirm': '确认清理 {{count}} 项真正僵尸？',
+  'orphans.selectAll': '全选可彻底清理项',
+  'orphans.clearSelection': '取消全选',
+  'orphans.purge.action': '批量彻底清理',
+  'orphans.purge.confirm': '确认彻底清理 {{count}} 项已验证的孤立资源？',
   'orphans.purge.desc': '服务端会按 finding fingerprint 重新验证；状态变化的条目将拒绝清理。',
   'orphans.purge.partial': '{{failed}} 项因状态变化或清理失败而保留。',
-  'orphans.purge.success': '已清理 {{count}} 项僵尸关系。',
+  'orphans.purge.success': '已彻底清理 {{count}} 项孤立资源。',
 
   // ===== 用户管理（仅 system_admin）=====
   'users.title': '用户管理',
@@ -166,7 +168,7 @@ export const zhCN = {
   'resources.transfer.action': '转移 ownership',
   'resources.transfer.confirm': '将 {{count}} 项资源直接转给 {{target}}？',
   'resources.transfer.desc':
-    '接收者无需确认。Agent 会连同 self Chat Memory 和 Agent-owned Skills 一并转移；Team 只能转给 active admin。',
+    '接收者无需确认。Agent 是聚合根：所有固定绑定保持附着；其中与原 Agent owner 相同 owner 的 Skill、Wiki、Code Graph、Chat Memory 会一并转移，其他 owner 的共享资产只保留绑定。Team 只能转给 active admin。',
   'resources.transfer.partial': '{{failed}} 项转移失败，请刷新后仅重试失败项。',
   'resources.transfer.success': '已转移 {{count}} 项资源。',
   'resources.desc':

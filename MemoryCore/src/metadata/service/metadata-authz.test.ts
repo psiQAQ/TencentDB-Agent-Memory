@@ -334,6 +334,25 @@ describe("MetadataService caller-scoped personnel and Team authorization", () =>
     const team = await service.createTeam({ name: "agent-handoff", owner_user_id: owner.user_id });
     await service.addTeamMember({ team_id: team.team_id, user_id: recipient.user_id, role: "member" });
     const agent = await service.createAgent({ team_id: team.team_id, owner_user_id: owner.user_id, name: "agent" });
+    const sourceAgent = await service.createAgent({ team_id: team.team_id, owner_user_id: owner.user_id, name: "source-agent" });
+    const selfMemoryId = `chat_memory-${team.team_id}-${agent.agent_id}`;
+    const borrowedMemoryId = `chat_memory-${team.team_id}-${sourceAgent.agent_id}`;
+    for (const assetId of [selfMemoryId, borrowedMemoryId]) {
+      if (!await service.getAssetById(assetId)) {
+        await service.createAsset({
+          asset_id: assetId,
+          team_id: team.team_id,
+          asset_type: "chat_memory",
+          name: assetId,
+          owner_user_id: owner.user_id,
+          source_type: "auto",
+        });
+      }
+    }
+    await service.setAgentFixedAssets(agent.agent_id, [
+      { asset_id: selfMemoryId, asset_type: "chat_memory", created_by: owner.user_id },
+      { asset_id: borrowedMemoryId, asset_type: "chat_memory", created_by: owner.user_id },
+    ]);
     const calls: Array<{ fromOwnerUserId: string; toOwnerUserId: string }> = [];
     service.setChatMemoryOwnerTransfer(async (input) => {
       calls.push(input);
@@ -347,9 +366,42 @@ describe("MetadataService caller-scoped personnel and Team authorization", () =>
     }, ctx(owner.user_id));
 
     expect(result.items[0]).toMatchObject({ transferred: true, resource_id: agent.agent_id });
-    expect(calls).toEqual([{ teamId: team.team_id, agentId: agent.agent_id,
-      fromOwnerUserId: owner.user_id, toOwnerUserId: recipient.user_id }]);
+    expect(calls).toEqual([
+      { teamId: team.team_id, agentId: agent.agent_id,
+        fromOwnerUserId: owner.user_id, toOwnerUserId: recipient.user_id },
+      { teamId: team.team_id, agentId: sourceAgent.agent_id,
+        fromOwnerUserId: owner.user_id, toOwnerUserId: recipient.user_id },
+    ]);
     expect(await service.getAgentById(agent.agent_id)).toMatchObject({ owner_user_id: recipient.user_id });
+    expect(await service.getAssetById(selfMemoryId)).toMatchObject({ owner_user_id: recipient.user_id });
+    expect(await service.getAssetById(borrowedMemoryId)).toMatchObject({ owner_user_id: recipient.user_id });
+  });
+
+  it("refuses a direct Agent metadata commit while owned Knowledge backing is uncoordinated", async () => {
+    const owner = await user("knowledge-agent-owner");
+    const recipient = await user("knowledge-agent-recipient");
+    const team = await service.createTeam({ name: "knowledge-agent-handoff", owner_user_id: owner.user_id });
+    await service.addTeamMember({ team_id: team.team_id, user_id: recipient.user_id, role: "member" });
+    const agent = await service.createAgent({ team_id: team.team_id, owner_user_id: owner.user_id, name: "agent" });
+    const wiki = await service.createAsset({
+      asset_id: `wiki-${Math.random()}`,
+      team_id: team.team_id,
+      asset_type: "llm_wiki",
+      name: "wiki",
+      owner_user_id: owner.user_id,
+      source_type: "manual",
+    });
+    await service.setAgentFixedAssets(agent.agent_id, [
+      { asset_id: wiki.asset_id, asset_type: "llm_wiki", created_by: owner.user_id },
+    ]);
+    service.setChatMemoryOwnerTransfer(async () => ({ l0Updated: 0, l1Updated: 0 }));
+
+    await expect(service.transferOwnershipForCaller({
+      team_id: team.team_id,
+      transfers: [{ resource_type: "agent", resource_id: agent.agent_id, to_user_id: recipient.user_id }],
+      idempotency_key: "55555555-5555-4555-8555-555555555555",
+    }, ctx(owner.user_id))).rejects.toMatchObject({ code: "managed_resource_requires_lifecycle" });
+    expect(await service.getAgentById(agent.agent_id)).toMatchObject({ owner_user_id: owner.user_id });
   });
 
   it("only deletes an empty Team by owner with a fresh preview", async () => {

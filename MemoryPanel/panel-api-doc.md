@@ -107,7 +107,7 @@
 | POST | `/api/v1/agent/create-default` | 本人确认后幂等创建 Team 默认 Agent/资产 |
 | POST | `/api/v1/account/owned-resources/purge` | owner-only 永久清理业务资源 |
 | POST | `/api/v1/account/ownership/transfer` | owner 本人在 Team 内直接转移 ownership |
-| POST | `/api/v1/admin/orphans/scan/start` 等 | system_admin 僵尸扫描与受控清理 |
+| POST | `/api/v1/admin/orphans/scan/start` 等 | system_admin 孤立资源扫描与批量彻底清理 |
 | POST | `/api/v1/knowledge/wiki/*` | Wiki 知识库业务路由（14 个，见 §3.8） |
 | POST | `/api/v1/knowledge/code-graph/*` | Code-Graph 业务路由（8 个，见 §3.9） |
 | POST | `/api/v1/knowledge/allocate` 等 | 知识分配/授权（5 个，见 §3.10） |
@@ -848,8 +848,10 @@ active member，并且必须是请求中每项资源的 owner/creator；先校�
 
 owner 本人在当前 Team 内直接转移最多 100 项 ownership；每项可选择不同接收者，接收者
 无需确认。Team 仅可转给 active admin；Agent、Task、Wiki、Code Graph 可转给同 Team
-任意 active member。Agent 是聚合根，Chat Memory 与 Agent-owned Skill 随 Agent 转移，
-不能独立转给用户。
+任意 active member。Agent 是聚合根：所有固定绑定保持附着；绑定的 Skill、Wiki、
+Code Graph、Chat Memory 中，owner 与原 Agent owner 相同的资产随 Agent 一并迁移
+ownership，其他 owner 的共享资产保留 owner 和绑定。Agent 子资产不能脱离聚合根单独
+转移；请求同时包含 Agent 与子资产时，Panel 会将其折叠为一次 Agent 聚合转移。
 
 ```json
 {
@@ -864,10 +866,10 @@ owner 本人在当前 Team 内直接转移最多 100 项 ownership；每项可�
 }
 ```
 
-Wiki/Code Graph 使用 operation journal 协调 Knowledge backing 与 Core metadata；Agent
-同时迁移 L0/L1 当前 owner。失败时优先补偿，补偿失败进入
-`inconsistent_retryable` 并继续阻止离组。响应逐项包含 transferred、隐式资产和解除的
-private binding，可用同一幂等键重试失败项。
+Wiki/Code Graph 使用 operation journal 或 Agent 聚合补偿协调 Knowledge backing 与 Core
+metadata；Agent 同时迁移它所拥有的绑定 Chat Memory 的 L0/L1 当前 owner。失败时优先
+补偿，补偿失败进入 `inconsistent_retryable` 并继续阻止离组。响应逐项包含
+`transferred` 和隐式资产；固定绑定不会因 owner 转移而解除，可用同一幂等键重试失败项。
 
 ### POST /admin/orphans/*
 
@@ -877,8 +879,10 @@ private binding，可用同一幂等键重试失败项。
 `retained_history`。响应只含来源、ID、原 Team/owner、类型、状态、计数/大小和原因，
 不返回 prompt、描述、内容、content_ref、凭证或绝对路径。
 
-purge 只提交 finding ID/fingerprint，要求治理原因和 `PURGE_ZOMBIES`；服务端重新扫描并
-验证 snapshot，过期返回 `409 stale_integrity_scan`。Alice 这类仍有正常恢复路径的
+治理页名称为“孤立资源治理”。system_admin 可勾选或全选允许处置的 finding 批量彻底
+清理；Panel 按 API 每批最多 100 项自动分批。purge 只提交 finding ID/fingerprint，要求治理原因和兼容确认词
+`PURGE_ZOMBIES`；服务端逐项重新扫描并验证 snapshot，过期返回
+`409 stale_integrity_scan`。Alice 这类仍有正常恢复路径的
 `recoverable_dependency` 只可查看，不允许 system_admin purge。
 
 ---

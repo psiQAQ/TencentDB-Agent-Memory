@@ -2161,6 +2161,25 @@ export class MetadataService {
         const agent = await this.getAgentById(transfer.resource_id);
         if (!agent || agent.team_id !== input.team_id) throw new MetadataError("agent_not_found", "agent not found");
         this.assertCallerIsResourceOwner(ctx, agent.owner_user_id);
+        for (let offset = 0; ; offset += 100) {
+          const page = await this.store.listAgentFixedAssets(transfer.resource_id, { limit: 100, offset });
+          for (const binding of page.items) {
+            const asset = await this.getAssetById(binding.asset_id);
+            if (!asset || asset.team_id !== input.team_id) {
+              throw new MetadataError("bound_asset_invalid", `invalid Agent binding: ${binding.asset_id}`);
+            }
+            if (
+              asset.owner_user_id === callerId
+              && (asset.asset_type === "llm_wiki" || asset.asset_type === "code_graph")
+            ) {
+              throw new MetadataError(
+                "managed_resource_requires_lifecycle",
+                `${asset.asset_type} backing ownership must be transferred before the Agent metadata commit`,
+              );
+            }
+          }
+          if (page.items.length === 0 || offset + page.items.length >= page.total) break;
+        }
       } else if (transfer.resource_type === "task") {
         const task = await this.getTaskById(transfer.resource_id);
         if (!task || task.team_id !== input.team_id) throw new MetadataError("task_not_found", "task not found");
@@ -2198,34 +2217,73 @@ export class MetadataService {
             "Agent ownership transfer requires the chat-memory lifecycle coordinator",
           );
         }
+        // The Agent's own runtime scope always follows the Agent, even when its
+        // chat_memory metadata has not been materialized yet. Additional owned
+        // Chat Memory assets fixed to this Agent follow as aggregate children.
+        const boundMemoryAgentIds: string[] = [transfer.resource_id];
+        const boundMemoryAssets: AssetEntity[] = [];
+        for (let offset = 0; ; offset += 100) {
+          const page = await this.store.listAgentFixedAssets(
+            transfer.resource_id,
+            { limit: 100, offset },
+            { assetTypes: ["chat_memory"] },
+          );
+          for (const binding of page.items) {
+            const asset = await this.getAssetById(binding.asset_id);
+            if (asset?.owner_user_id === callerId) boundMemoryAssets.push(asset);
+          }
+          if (page.items.length === 0 || offset + page.items.length >= page.total) break;
+        }
+        if (boundMemoryAssets.length > 0) {
+          const teamAgentIds: string[] = [];
+          for (let offset = 0; ; offset += 100) {
+            const page = await this.store.listAgentsByTeam(input.team_id, { limit: 100, offset });
+            teamAgentIds.push(...page.items.map((item) => item.agent_id));
+            if (page.items.length === 0 || offset + page.items.length >= page.total) break;
+          }
+          for (const asset of boundMemoryAssets) {
+            const memoryAgentId = resolveChatMemoryAgentId(asset.asset_id, input.team_id, teamAgentIds);
+            if (!memoryAgentId) {
+              throw new MetadataError(
+                "chat_memory_scope_not_found",
+                `bound Chat Memory scope cannot be resolved: ${asset.asset_id}`,
+              );
+            }
+            if (!boundMemoryAgentIds.includes(memoryAgentId)) boundMemoryAgentIds.push(memoryAgentId);
+          }
+        }
         const prepared = await this.store.prepareOwnershipTransfer(operationInput);
         if (prepared.status === "succeeded") {
           items.push(await this.store.transferOwnership(operationInput));
           continue;
         }
 
-        let memoryMoved = false;
+        const movedMemoryAgentIds: string[] = [];
         try {
-          await this._chatMemoryOwnerTransfer({
-            teamId: input.team_id,
-            agentId: transfer.resource_id,
-            fromOwnerUserId: callerId,
-            toOwnerUserId: transfer.to_user_id,
-          });
-          memoryMoved = true;
+          for (const memoryAgentId of boundMemoryAgentIds) {
+            await this._chatMemoryOwnerTransfer({
+              teamId: input.team_id,
+              agentId: memoryAgentId,
+              fromOwnerUserId: callerId,
+              toOwnerUserId: transfer.to_user_id,
+            });
+            movedMemoryAgentIds.push(memoryAgentId);
+          }
           const result = await this.store.transferOwnership(operationInput);
           if (!result.transferred) throw new Error(result.reason ?? "metadata_transfer_failed");
           items.push(result);
         } catch (error) {
           let compensationFailed = false;
-          if (memoryMoved) {
+          if (movedMemoryAgentIds.length > 0) {
             try {
-              await this._chatMemoryOwnerTransfer({
-                teamId: input.team_id,
-                agentId: transfer.resource_id,
-                fromOwnerUserId: transfer.to_user_id,
-                toOwnerUserId: callerId,
-              });
+              for (const memoryAgentId of [...movedMemoryAgentIds].reverse()) {
+                await this._chatMemoryOwnerTransfer({
+                  teamId: input.team_id,
+                  agentId: memoryAgentId,
+                  fromOwnerUserId: transfer.to_user_id,
+                  toOwnerUserId: callerId,
+                });
+              }
             } catch {
               compensationFailed = true;
             }

@@ -1,4 +1,5 @@
 /** Owner-only permanent cleanup used to finish Team offboarding safely. */
+import { randomUUID } from 'node:crypto';
 import type { Hono } from 'hono';
 import type { PanelDeps } from '../../panel-deps.js';
 import { toKernelCredentials, type MetaCallContext } from '../../kernel/types.js';
@@ -37,6 +38,105 @@ interface SkillRow {
 interface DeleteResult {
   deleted_ids?: string[];
   failed?: Array<{ id: string; reason: string }>;
+}
+
+interface BoundAsset {
+  asset_id: string;
+  team_id: string;
+  owner_user_id: string;
+  asset_type: 'skill' | 'llm_wiki' | 'code_graph' | 'chat_memory' | string;
+}
+
+async function listAgentBoundAssets(
+  deps: PanelDeps,
+  ctx: MetaCallContext,
+  agentId: string,
+): Promise<BoundAsset[]> {
+  const assets: BoundAsset[] = [];
+  for (let offset = 0; ; offset += 100) {
+    const env = await deps.metaKernel.invoke(
+      'agent-fixed-asset/list',
+      { agent_id: agentId, limit: 100, offset },
+      ctx,
+    );
+    if (env.code !== 0) throw new Error(env.message || 'AGENT_FIXED_ASSET_LIST_FAILED');
+    const bindings = extractListItems<{ asset_id: string }>(env);
+    for (const binding of bindings) {
+      const assetEnv = await deps.metaKernel.invoke('asset/get', { asset_id: binding.asset_id }, ctx);
+      if (assetEnv.code === 404) throw new Error(`BOUND_ASSET_NOT_FOUND: ${binding.asset_id}`);
+      if (assetEnv.code !== 0) throw new Error(assetEnv.message || 'ASSET_LOOKUP_FAILED');
+      const asset = assetEnv.data as BoundAsset | null;
+      if (!asset) throw new Error(`BOUND_ASSET_NOT_FOUND: ${binding.asset_id}`);
+      assets.push(asset);
+    }
+    const total = (env.data as { total?: number } | null)?.total ?? assets.length;
+    if (bindings.length === 0 || offset + bindings.length >= total) break;
+  }
+  return assets;
+}
+
+async function transferKnowledgeWithJournal(
+  deps: PanelDeps,
+  ctx: MetaCallContext,
+  input: {
+    team_id: string;
+    asset_id: string;
+    asset_type: 'llm_wiki' | 'code_graph';
+    from_owner_user_id: string;
+    to_owner_user_id: string;
+    idempotency_key: string;
+  },
+): Promise<Record<string, unknown>> {
+  const operationBody = {
+    team_id: input.team_id,
+    asset_id: input.asset_id,
+    from_owner_user_id: input.from_owner_user_id,
+    to_owner_user_id: input.to_owner_user_id,
+    idempotency_key: input.idempotency_key,
+  };
+  const prepareEnv = await deps.kernelHttp.postEnvelope<{ operation_id: string; status: string }>(
+    '/v3/internal/meta/asset/prepare-transfer',
+    operationBody,
+    toKernelCredentials(ctx, { timeoutMs: deps.config.metadataRemoteTimeoutMs }, { omitUserKey: true }),
+  );
+  if (prepareEnv.code !== 0) throw new Error(prepareEnv.message || 'CORE_PREPARE_FAILED');
+  const kc = deps.knowledgeClientFactory(ctx.instanceId);
+  try {
+    await kc.transferOwnership({
+      resource_type: input.asset_type,
+      resource_id: input.asset_id,
+      from_owner_user_id: input.from_owner_user_id,
+      to_owner_user_id: input.to_owner_user_id,
+    });
+  } catch (err) {
+    await resolveKnowledgeTransfer(deps, ctx, operationBody, 'failed', 'KNOWLEDGE_TRANSFER_FAILED').catch(() => {});
+    throw err;
+  }
+  const coreEnv = await deps.kernelHttp.postEnvelope<Record<string, unknown>>(
+    '/v3/internal/meta/asset/finalize-transfer',
+    operationBody,
+    toKernelCredentials(ctx, { timeoutMs: deps.config.metadataRemoteTimeoutMs }, { omitUserKey: true }),
+  );
+  if (coreEnv.code === 0) return coreEnv.data ?? { resource_type: 'asset', resource_id: input.asset_id, transferred: true };
+  try {
+    await kc.transferOwnership({
+      resource_type: input.asset_type,
+      resource_id: input.asset_id,
+      from_owner_user_id: input.to_owner_user_id,
+      to_owner_user_id: input.from_owner_user_id,
+    });
+  } catch {
+    await resolveKnowledgeTransfer(
+      deps,
+      ctx,
+      operationBody,
+      'inconsistent_retryable',
+      'CORE_FINALIZE_AND_COMPENSATION_FAILED',
+    ).catch(() => {});
+    throw new Error('INCONSISTENT_RETRYABLE');
+  }
+  await resolveKnowledgeTransfer(deps, ctx, operationBody, 'failed', 'CORE_FINALIZE_FAILED');
+  throw new Error(coreEnv.message || 'CORE_FINALIZE_FAILED');
 }
 
 function assertDeletedOrAbsent(result: DeleteResult, id: string, label: string): void {
@@ -246,8 +346,8 @@ export function registerAccountOwnedResourceRoutes(api: Hono, deps: PanelDeps): 
     const callerId = await resolveCallerUserId(deps, ctx);
     if (!callerId) return respondControlError(c, 401, 'INVALID_USER_KEY');
     type Transfer = { resource_type: 'team' | 'agent' | 'task' | 'asset'; resource_id: string; to_user_id: string };
-    const regular: Transfer[] = [];
-    const knowledge: Array<Transfer & { asset_type: 'llm_wiki' | 'code_graph' }> = [];
+    const requested: Transfer[] = [];
+    const assetById = new Map<string, BoundAsset>();
 
     // Validate the complete batch before the first backing-store mutation.
     for (const raw of body.transfers) {
@@ -269,16 +369,67 @@ export function registerAccountOwnedResourceRoutes(api: Hono, deps: PanelDeps): 
       if ((targetEnv.data as { status?: string } | null)?.status !== 'active') {
         return respondControlError(c, 409, 'TARGET_NOT_ACTIVE_MEMBER');
       }
-      if (resourceType !== 'asset') {
+      if (resourceType === 'asset') {
+        const assetEnv = await deps.metaKernel.invoke('asset/get', { asset_id: resourceId }, ctx);
+        if (assetEnv.code !== 0) return respondEnvelope(c, assetEnv);
+        const asset = assetEnv.data as BoundAsset | null;
+        if (!asset || asset.team_id !== teamId) return respondControlError(c, 400, 'RESOURCE_TEAM_MISMATCH');
+        if (asset.owner_user_id !== callerId) return respondControlError(c, 403, 'NOT_RESOURCE_OWNER');
+        assetById.set(asset.asset_id, asset);
+      }
+      requested.push(transfer);
+    }
+
+    // Agent is the aggregate root. Every fixed binding remains attached. Assets
+    // owned by the old Agent owner follow the Agent; assets owned by somebody
+    // else keep their owner and remain shared bindings. An explicitly selected
+    // child is therefore folded into its selected Agent instead of being sent as
+    // an illegal standalone managed-asset transfer.
+    const aggregateChildren = new Map<string, {
+      asset: BoundAsset;
+      to_user_id: string;
+      agent_id: string;
+    }>();
+    try {
+      for (const transfer of requested.filter((item) => item.resource_type === 'agent')) {
+        for (const asset of await listAgentBoundAssets(deps, ctx, transfer.resource_id)) {
+          if (asset.team_id !== teamId) {
+            return respondControlError(c, 409, 'BOUND_ASSET_TEAM_MISMATCH');
+          }
+          assetById.set(asset.asset_id, asset);
+          if (asset.owner_user_id !== callerId) continue;
+          const existing = aggregateChildren.get(asset.asset_id);
+          if (existing && existing.to_user_id !== transfer.to_user_id) {
+            return respondControlError(c, 409, 'AGGREGATE_TRANSFER_TARGET_CONFLICT');
+          }
+          aggregateChildren.set(asset.asset_id, {
+            asset,
+            to_user_id: transfer.to_user_id,
+            agent_id: transfer.resource_id,
+          });
+        }
+      }
+    } catch (err) {
+      return respondControlError(c, 502, err instanceof Error ? err.message : 'AGGREGATE_PREFLIGHT_FAILED');
+    }
+
+    for (const transfer of requested.filter((item) => item.resource_type === 'asset')) {
+      const child = aggregateChildren.get(transfer.resource_id);
+      if (child && child.to_user_id !== transfer.to_user_id) {
+        return respondControlError(c, 409, 'AGGREGATE_TRANSFER_TARGET_CONFLICT');
+      }
+    }
+
+    const regular: Transfer[] = [];
+    const knowledge: Array<Transfer & { asset_type: 'llm_wiki' | 'code_graph' }> = [];
+    for (const transfer of requested) {
+      if (transfer.resource_type !== 'asset') {
         regular.push(transfer);
         continue;
       }
-      const assetEnv = await deps.metaKernel.invoke('asset/get', { asset_id: resourceId }, ctx);
-      if (assetEnv.code !== 0) return respondEnvelope(c, assetEnv);
-      const asset = assetEnv.data as { team_id?: string; owner_user_id?: string; asset_type?: string } | null;
-      if (!asset || asset.team_id !== teamId) return respondControlError(c, 400, 'RESOURCE_TEAM_MISMATCH');
-      if (asset.owner_user_id !== callerId) return respondControlError(c, 403, 'NOT_RESOURCE_OWNER');
-      if (asset.asset_type === 'llm_wiki' || asset.asset_type === 'code_graph') {
+      if (aggregateChildren.has(transfer.resource_id)) continue;
+      const asset = assetById.get(transfer.resource_id);
+      if (asset?.asset_type === 'llm_wiki' || asset?.asset_type === 'code_graph') {
         knowledge.push({ ...transfer, asset_type: asset.asset_type });
       } else {
         regular.push(transfer);
@@ -286,69 +437,100 @@ export function registerAccountOwnedResourceRoutes(api: Hono, deps: PanelDeps): 
     }
 
     const items: Array<Record<string, unknown>> = [];
+    const movedAggregateKnowledge: Array<{
+      asset: BoundAsset;
+      to_user_id: string;
+      agent_id: string;
+    }> = [];
+    try {
+      for (const child of aggregateChildren.values()) {
+        if (child.asset.asset_type !== 'llm_wiki' && child.asset.asset_type !== 'code_graph') continue;
+        await transferKnowledgeWithJournal(deps, ctx, {
+          team_id: teamId,
+          asset_id: child.asset.asset_id,
+          asset_type: child.asset.asset_type,
+          from_owner_user_id: callerId,
+          to_owner_user_id: child.to_user_id,
+          idempotency_key: idempotencyKey,
+        });
+        movedAggregateKnowledge.push(child);
+      }
+    } catch (err) {
+      let compensationFailed = false;
+      for (const child of [...movedAggregateKnowledge].reverse()) {
+        try {
+          await transferKnowledgeWithJournal(deps, ctx, {
+            team_id: teamId,
+            asset_id: child.asset.asset_id,
+            asset_type: child.asset.asset_type as 'llm_wiki' | 'code_graph',
+            from_owner_user_id: child.to_user_id,
+            to_owner_user_id: callerId,
+            idempotency_key: randomUUID(),
+          });
+        } catch {
+          compensationFailed = true;
+        }
+      }
+      if (compensationFailed) return respondControlError(c, 500, 'INCONSISTENT_RETRYABLE');
+      return respondControlError(c, 502, err instanceof Error ? err.message : 'AGGREGATE_BACKING_TRANSFER_FAILED');
+    }
+
     if (regular.length > 0) {
       const env = await deps.metaKernel.invoke('ownership/transfer', {
         team_id: teamId,
         transfers: regular,
         idempotency_key: idempotencyKey,
+        confirmation: 'TRANSFER_OWNERSHIP',
       }, ctx);
-      if (env.code !== 0) return respondEnvelope(c, env);
-      const resultItems = (env.data as { items?: Array<Record<string, unknown>> } | null)?.items ?? [];
+      const resultItems = ((env.data as { items?: Array<Record<string, unknown>> } | null)?.items ?? []).map((item) => {
+        if (item.resource_type !== 'agent' || typeof item.resource_id !== 'string') return item;
+        const childIds = [...aggregateChildren.values()]
+          .filter((child) => child.agent_id === item.resource_id)
+          .map((child) => child.asset.asset_id);
+        return {
+          ...item,
+          implicit_asset_ids: [...new Set([
+            ...((item.implicit_asset_ids as string[] | undefined) ?? []),
+            ...childIds,
+          ])],
+        };
+      });
+      const aggregateFailed = env.code !== 0 || resultItems.some(
+        (item) => item.resource_type === 'agent' && item.transferred === false,
+      );
+      if (aggregateFailed) {
+        let compensationFailed = false;
+        for (const child of [...movedAggregateKnowledge].reverse()) {
+          try {
+            await transferKnowledgeWithJournal(deps, ctx, {
+              team_id: teamId,
+              asset_id: child.asset.asset_id,
+              asset_type: child.asset.asset_type as 'llm_wiki' | 'code_graph',
+              from_owner_user_id: child.to_user_id,
+              to_owner_user_id: callerId,
+              idempotency_key: randomUUID(),
+            });
+          } catch {
+            compensationFailed = true;
+          }
+        }
+        if (compensationFailed) return respondControlError(c, 500, 'INCONSISTENT_RETRYABLE');
+        if (env.code !== 0) return respondEnvelope(c, env);
+      }
       items.push(...resultItems);
     }
 
-    const kc = deps.knowledgeClientFactory(ctx.instanceId);
     for (const transfer of knowledge) {
-      const operationBody = {
-        team_id: teamId,
-        asset_id: transfer.resource_id,
-        from_owner_user_id: callerId,
-        to_owner_user_id: transfer.to_user_id,
-        idempotency_key: idempotencyKey,
-      };
       try {
-        const prepareEnv = await deps.kernelHttp.postEnvelope<{ operation_id: string; status: string }>(
-          '/v3/internal/meta/asset/prepare-transfer',
-          operationBody,
-          toKernelCredentials(ctx, { timeoutMs: deps.config.metadataRemoteTimeoutMs }, { omitUserKey: true }),
-        );
-        if (prepareEnv.code !== 0) {
-          items.push({ ...transfer, transferred: false, reason: prepareEnv.message || 'CORE_PREPARE_FAILED' });
-          continue;
-        }
-        await kc.transferOwnership({
-          resource_type: transfer.asset_type,
-          resource_id: transfer.resource_id,
+        items.push(await transferKnowledgeWithJournal(deps, ctx, {
+          team_id: teamId,
+          asset_id: transfer.resource_id,
+          asset_type: transfer.asset_type,
           from_owner_user_id: callerId,
           to_owner_user_id: transfer.to_user_id,
-        });
-        const coreEnv = await deps.kernelHttp.postEnvelope<Record<string, unknown>>(
-          '/v3/internal/meta/asset/finalize-transfer',
-          operationBody,
-          toKernelCredentials(ctx, { timeoutMs: deps.config.metadataRemoteTimeoutMs }, { omitUserKey: true }),
-        );
-        if (coreEnv.code !== 0) {
-          try {
-            await kc.transferOwnership({
-              resource_type: transfer.asset_type,
-              resource_id: transfer.resource_id,
-              from_owner_user_id: transfer.to_user_id,
-              to_owner_user_id: callerId,
-            });
-          } catch {
-            await resolveKnowledgeTransfer(
-              deps, ctx, operationBody, 'inconsistent_retryable', 'CORE_FINALIZE_AND_COMPENSATION_FAILED',
-            ).catch(() => {});
-            items.push({ ...transfer, transferred: false, reason: 'INCONSISTENT_RETRYABLE' });
-            continue;
-          }
-          await resolveKnowledgeTransfer(deps, ctx, operationBody, 'failed', 'CORE_FINALIZE_FAILED');
-          items.push({ ...transfer, transferred: false, reason: coreEnv.message || 'CORE_FINALIZE_FAILED' });
-          continue;
-        }
-        items.push(coreEnv.data ?? { ...transfer, transferred: true });
+          idempotency_key: idempotencyKey,
+        }));
       } catch (err) {
-        await resolveKnowledgeTransfer(deps, ctx, operationBody, 'failed', 'KNOWLEDGE_TRANSFER_FAILED').catch(() => {});
         items.push({
           ...transfer,
           transferred: false,

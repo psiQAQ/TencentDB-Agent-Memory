@@ -154,8 +154,11 @@ ownership 不随 membership 自动转移或删除。移除成员或删除账号�
 3. 用户本人在 active membership 下逐项或批量选择处理方式：
    - “转移 ownership”：Agent、Task、Wiki、Code Graph 可直接转给同 Team 任意 active
      member；Team ownership 只能转给 active `admin`。接收者无需确认。
-   - Agent 是聚合根：转移 Agent 时，其自有 Skill、self Chat Memory 以及 L0/L1 当前
-     owner 一并转移；历史 `user_id`/`creator_user_id` 不改写。
+   - Agent 是聚合根：转移 Agent 时保留它的全部固定绑定；四类绑定资产（Skill、Wiki、
+     Code Graph、Chat Memory）中，owner 与原 Agent owner 相同的资产及相应 backing
+     ownership 一并转移，其他成员拥有的共享资产保留原 owner 和绑定。历史
+     `user_id`/`creator_user_id` 不改写。即使同时勾选 Agent 和其子资产，Panel 也会归一化
+     为一次 Agent 聚合转移，不会把 Chat Memory/Skill 当作独立转移提交。
    - “永久清理”：先清 backing data，再清 metadata 和关系。普通 Agent“归档”不等于
      解除 ownership。
 4. ownership 和活动授权归零后，成员可点击“退出当前 Team”，Team owner/admin 也可再次
@@ -171,18 +174,19 @@ ownership 不随 membership 自动转移或删除。移除成员或删除账号�
 都会整批拒绝。`system_admin` 可在用户详情查看依赖名称、状态、Team 和 membership，
 但页面不提供业务资源清理或 membership 修改按钮；它也不能代替资源 owner 清理。
 
-### 第 2.7 步：安全解散 Team 与僵尸治理
+### 第 2.7 步：安全解散 Team 与孤立资源治理
 
 - TeamSwitcher 只负责切换和创建，不再放删除图标。永久解散位于 Team 设置的
   Danger Zone，且仅 Team owner 可见。
 - 解散前必须只剩 owner 一名 active member，并且 Agent、Task、全部 Asset subtype、
   活动关系、未完成 operation 和 operational integrity finding 全部归零。输入完整 Team
   名称并使用最新 preview revision 后才会删除空 Team；Team admin 调用返回 403。
-- `system_admin` 左侧菜单顺序为“用户管理 → 僵尸资源 → 成员管理 → Agents 管理 →
-  我的资源依赖 → API Key”。“僵尸资源”先扫描再人工处置，只允许清理重新验证后仍为
-  `operational_orphan` 或 `cache_residue` 的条目。
+- `system_admin` 左侧菜单顺序为“用户管理 → 孤立资源治理 → 成员管理 → Agents 管理 →
+  我的资源依赖 → API Key”。“孤立资源治理”先扫描再人工处置；可全选允许处置的条目并
+  批量彻底清理，但服务端会逐项重新验证，只清理仍为 `operational_orphan` 或
+  `cache_residue` 的条目。
 - Alice 这类 Team 和 owner 仍存在、只是 membership 缺失的资源属于
-  `recoverable_dependency`：僵尸页只展示恢复路径，`system_admin` 不能借此代删。
+  `recoverable_dependency`：治理页只展示恢复路径，`system_admin` 不能借此代删。
 
 ### 第 3 步：把 Claude Code 指向 Proxy
 

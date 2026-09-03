@@ -19,6 +19,15 @@ export function OrphansPage() {
     () => scan?.findings.filter((item) => item.category === 'retained_history') ?? [],
     [scan],
   );
+  const purgeableIds = useMemo(
+    () =>
+      pending
+        .filter((item) => item.allowed_actions.includes('purge'))
+        .map((item) => item.finding_id),
+    [pending],
+  );
+  const allPurgeableSelected =
+    purgeableIds.length > 0 && purgeableIds.every((id) => selected.has(id));
   const refresh = useCallback(async () => {
     setLoading(true);
     try {
@@ -44,13 +53,20 @@ export function OrphansPage() {
     });
     if (!ok) return;
     try {
-      const result = await orphansApi.purge(
-        findings.map(({ finding_id, fingerprint }) => ({ finding_id, fingerprint })),
-        reason.trim(),
-      );
-      if (result.failed.length)
-        tea.notify.warning(t('orphans.purge.partial', { failed: result.failed.length }));
-      else tea.notify.success(t('orphans.purge.success', { count: result.deleted.length }));
+      const deleted: string[] = [];
+      const failed: Array<{ finding_id: string; reason: string }> = [];
+      for (let offset = 0; offset < findings.length; offset += 100) {
+        const result = await orphansApi.purge(
+          findings
+            .slice(offset, offset + 100)
+            .map(({ finding_id, fingerprint }) => ({ finding_id, fingerprint })),
+          reason.trim(),
+        );
+        deleted.push(...result.deleted);
+        failed.push(...result.failed);
+      }
+      if (failed.length) tea.notify.warning(t('orphans.purge.partial', { failed: failed.length }));
+      else tea.notify.success(t('orphans.purge.success', { count: deleted.length }));
       await refresh();
     } catch (err) {
       tea.notify.error(getErrorMessage(err));
@@ -123,6 +139,13 @@ export function OrphansPage() {
           {pending.map((item) => renderFinding(item, item.allowed_actions.includes('purge')))}
           {!loading && !pending.length && <Alert type="success">{t('orphans.empty')}</Alert>}
           <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
+            <Button
+              disabled={!purgeableIds.length}
+              onClick={() => setSelected(allPurgeableSelected ? new Set() : new Set(purgeableIds))}
+            >
+              {t(allPurgeableSelected ? 'orphans.clearSelection' : 'orphans.selectAll')} (
+              {purgeableIds.length})
+            </Button>
             <Input value={reason} onChange={setReason} placeholder={t('orphans.reason')} />
             <Button
               type="primary"

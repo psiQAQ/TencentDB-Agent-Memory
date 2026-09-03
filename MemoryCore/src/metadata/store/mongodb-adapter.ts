@@ -1034,25 +1034,17 @@ export class MongoMetadataStore implements IMetadataStore {
         const assets = await this.col<AssetEntity>("meta_assets").find(
           { asset_id: { $in: assetIds } } as Document, { ...PROJECT_NO_ID, session },
         ).toArray();
-        const memoryId = buildChatMemoryAssetId(input.team_id, input.resource_id);
-        implicitAssetIds.push(memoryId, ...assets
-          .filter((asset) => asset.asset_type === "skill" && asset.owner_user_id === input.from_user_id)
+        if (new Set(assetIds).size !== assets.length || assets.some((asset) => asset.team_id !== input.team_id)) {
+          return fail("bound_asset_invalid");
+        }
+        implicitAssetIds.push(...assets
+          .filter((asset) => asset.owner_user_id === input.from_user_id)
           .map((asset) => asset.asset_id));
         await this.col("meta_assets").updateMany(
           { asset_id: { $in: implicitAssetIds }, owner_user_id: input.from_user_id } as Document,
           { $set: { owner_user_id: input.to_user_id, updated_at: nowIso() } },
           { session },
         );
-        const invalidAssetIds = assets
-          .filter((asset) => asset.visibility === "private" && asset.owner_user_id !== input.to_user_id
-            && !implicitAssetIds.includes(asset.asset_id))
-          .map((asset) => asset.asset_id);
-        removedBindingIds.push(...bindings
-          .filter((binding) => invalidAssetIds.includes(binding.asset_id))
-          .map((binding) => binding.id));
-        if (removedBindingIds.length) {
-          await this.col("meta_agent_fixed_assets").deleteMany({ id: { $in: removedBindingIds } }, { session });
-        }
       }
       await this.col("meta_teams").updateOne(
         { team_id: input.team_id },

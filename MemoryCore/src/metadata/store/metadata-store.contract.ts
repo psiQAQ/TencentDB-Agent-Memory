@@ -639,6 +639,66 @@ export function runMetadataStoreContract(
       });
     });
 
+    describe("Ownership aggregate transfer", () => {
+      it("moves every bound asset owned by the Agent owner and preserves all bindings", async () => {
+        const owner = await store.createUser(uniqueUserInput());
+        const recipient = await store.createUser(uniqueUserInput());
+        const sharedOwner = await store.createUser(uniqueUserInput());
+        const team = await store.createTeam(teamInput(owner.user_id));
+        await store.addTeamMember({ team_id: team.team_id, user_id: recipient.user_id, role: "member" });
+        await store.addTeamMember({ team_id: team.team_id, user_id: sharedOwner.user_id, role: "member" });
+        const agent = await store.createAgent({
+          team_id: team.team_id,
+          owner_user_id: owner.user_id,
+          name: "aggregate-root",
+        });
+        const ownedAssets = await Promise.all(
+          (["skill", "llm_wiki", "code_graph", "chat_memory"] as const).map((asset_type) =>
+            store.createAsset({
+              asset_id: newAssetId(asset_type),
+              team_id: team.team_id,
+              asset_type,
+              name: asset_type,
+              owner_user_id: owner.user_id,
+              source_type: "manual",
+              visibility: "private",
+            })),
+        );
+        const shared = await store.createAsset({
+          asset_id: newAssetId("skill"),
+          team_id: team.team_id,
+          asset_type: "skill",
+          name: "shared",
+          owner_user_id: sharedOwner.user_id,
+          source_type: "manual",
+          visibility: "private",
+        });
+        await store.setAgentFixedAssets(agent.agent_id, [...ownedAssets, shared].map((asset) => ({
+          asset_id: asset.asset_id,
+          asset_type: asset.asset_type,
+          created_by: owner.user_id,
+        })));
+
+        const result = await store.transferOwnership({
+          team_id: team.team_id,
+          resource_type: "agent",
+          resource_id: agent.agent_id,
+          from_user_id: owner.user_id,
+          to_user_id: recipient.user_id,
+          idempotency_key: `aggregate-${Math.random()}`,
+        });
+
+        expect(result.transferred).toBe(true);
+        expect(result.implicit_asset_ids.sort()).toEqual(ownedAssets.map((asset) => asset.asset_id).sort());
+        expect(result.removed_binding_ids).toEqual([]);
+        expect((await store.listAgentFixedAssets(agent.agent_id, P)).items).toHaveLength(5);
+        for (const asset of ownedAssets) {
+          expect(await store.getAssetById(asset.asset_id)).toMatchObject({ owner_user_id: recipient.user_id });
+        }
+        expect(await store.getAssetById(shared.asset_id)).toMatchObject({ owner_user_id: sharedOwner.user_id });
+      });
+    });
+
     // ── Delete Cascade (N1) ──
     describe("Delete Cascade", () => {
       it("deleteUsers 级联清理 team_members + ACL", async () => {

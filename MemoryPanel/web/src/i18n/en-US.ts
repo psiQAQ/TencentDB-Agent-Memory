@@ -27,7 +27,9 @@ export const enUS = {
   'orphans.history': 'Retained history',
   'orphans.empty': 'No actionable integrity findings.',
   'orphans.reason': 'Governance reason (at least 3 characters)',
-  'orphans.purge.action': 'Purge selected orphans',
+  'orphans.selectAll': 'Select all purgeable',
+  'orphans.clearSelection': 'Clear selection',
+  'orphans.purge.action': 'Batch permanently purge',
   'orphans.purge.confirm': 'Purge {{count}} verified orphan findings?',
   'orphans.purge.desc': 'The server revalidates every fingerprint and rejects stale findings.',
   'orphans.purge.partial': '{{failed}} findings were retained after revalidation or failure.',
@@ -170,7 +172,7 @@ export const enUS = {
   'resources.transfer.action': 'Transfer ownership',
   'resources.transfer.confirm': 'Transfer {{count}} resources directly to {{target}}?',
   'resources.transfer.desc':
-    'The recipient does not confirm. Agents include self Chat Memory and Agent-owned Skills; Teams require an active admin.',
+    'The recipient does not confirm. An Agent keeps every fixed binding and transfers all bound Skill, Wiki, Code Graph, and Chat Memory assets owned by the old Agent owner. Shared assets owned by others remain bound. Teams require an active admin.',
   'resources.transfer.partial': '{{failed}} transfers failed. Refresh and retry failed items only.',
   'resources.transfer.success': 'Transferred {{count}} resources.',
   'resources.desc':

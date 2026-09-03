@@ -8,6 +8,7 @@ function buildApp(options: {
   resourceCode?: number;
   clearCode?: number;
   assetType?: 'chat_memory' | 'llm_wiki' | 'code_graph';
+  boundAssets?: Array<{ asset_id: string; asset_type: 'skill' | 'chat_memory' | 'llm_wiki' | 'code_graph'; owner_user_id?: string }>;
 } = {}) {
   const invoke = vi.fn(async (action: string, body: Record<string, unknown>) => {
     if (action === 'auth/verify') {
@@ -16,12 +17,27 @@ function buildApp(options: {
     if (action === 'team-member/get') {
       return { code: 0, message: 'ok', data: { user_id: 'caller', role: 'member', status: options.membership ?? 'active' } };
     }
+    if (action === 'agent-fixed-asset/list') {
+      return {
+        code: 0,
+        message: 'ok',
+        data: {
+          items: (options.boundAssets ?? []).map(({ asset_id, asset_type }) => ({ asset_id, asset_type })),
+          total: options.boundAssets?.length ?? 0,
+        },
+      };
+    }
     if (action === 'task/get') {
       if (options.resourceCode === 404) return { code: 404, message: 'not found', data: null };
       return { code: 0, message: 'ok', data: { task_id: body.task_id, team_id: 'team-1', owner_user_id: options.owner ?? 'caller', creator_user_id: 'original-creator' } };
     }
     if (action === 'asset/get') {
-      return { code: 0, message: 'ok', data: { asset_id: body.asset_id, team_id: 'team-1', owner_user_id: options.owner ?? 'caller', asset_type: options.assetType ?? 'chat_memory' } };
+      const bound = options.boundAssets?.find((item) => item.asset_id === body.asset_id);
+      return { code: 0, message: 'ok', data: { asset_id: body.asset_id, team_id: 'team-1', owner_user_id: bound?.owner_user_id ?? options.owner ?? 'caller', asset_type: bound?.asset_type ?? options.assetType ?? 'chat_memory' } };
+    }
+    if (action === 'ownership/transfer') {
+      const transfers = body.transfers as Array<Record<string, unknown>>;
+      return { code: 0, message: 'ok', data: { items: transfers.map((item) => ({ ...item, transferred: true })) } };
     }
     if (action === 'task/delete' || action === 'asset/delete') {
       const ids = (body.task_ids ?? body.asset_ids) as string[];
@@ -99,6 +115,74 @@ describe('owner-only owned resource purge', () => {
 });
 
 describe('ownership transfer lifecycle', () => {
+  it('folds selected Agent children into one aggregate transfer and forwards confirmation', async () => {
+    const fixture = buildApp({
+      boundAssets: [
+        { asset_id: 'memory-1', asset_type: 'chat_memory' },
+        { asset_id: 'skill-1', asset_type: 'skill' },
+      ],
+    });
+    const response = await fixture.app.request('/account/ownership/transfer', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'X-Tdai-Service-Id': 'local',
+        'X-Tdai-User-Key': 'key',
+      },
+      body: JSON.stringify({
+        team_id: 'team-1',
+        transfers: [
+          { resource_type: 'agent', resource_id: 'agent-1', to_user_id: 'target' },
+          { resource_type: 'asset', resource_id: 'memory-1', to_user_id: 'target' },
+        ],
+        idempotency_key: '22222222-2222-4222-8222-222222222222',
+        confirmation: 'TRANSFER_OWNERSHIP',
+      }),
+    });
+    expect(response.status).toBe(200);
+    const call = fixture.invoke.mock.calls.find(([action]) => action === 'ownership/transfer');
+    expect(call?.[1]).toMatchObject({
+      confirmation: 'TRANSFER_OWNERSHIP',
+      transfers: [{ resource_type: 'agent', resource_id: 'agent-1', to_user_id: 'target' }],
+    });
+  });
+
+  it('journals bound Knowledge backing before committing the Agent aggregate', async () => {
+    const fixture = buildApp({
+      boundAssets: [{ asset_id: 'wiki-1', asset_type: 'llm_wiki' }],
+    });
+    const response = await fixture.app.request('/account/ownership/transfer', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'X-Tdai-Service-Id': 'local',
+        'X-Tdai-User-Key': 'key',
+      },
+      body: JSON.stringify({
+        team_id: 'team-1',
+        transfers: [{ resource_type: 'agent', resource_id: 'agent-1', to_user_id: 'target' }],
+        idempotency_key: '44444444-4444-4444-8444-444444444444',
+        confirmation: 'TRANSFER_OWNERSHIP',
+      }),
+    });
+    expect(response.status).toBe(200);
+    expect(fixture.kernelPost.mock.calls.map(([path]) => path)).toEqual([
+      '/v3/internal/meta/asset/prepare-transfer',
+      '/v3/internal/meta/asset/finalize-transfer',
+    ]);
+    expect(fixture.transferOwnership).toHaveBeenCalledWith(expect.objectContaining({
+      resource_type: 'llm_wiki',
+      resource_id: 'wiki-1',
+      from_owner_user_id: 'caller',
+      to_owner_user_id: 'target',
+    }));
+    const coreCall = fixture.invoke.mock.calls.find(([action]) => action === 'ownership/transfer');
+    expect(coreCall?.[1]).toMatchObject({
+      transfers: [{ resource_type: 'agent', resource_id: 'agent-1', to_user_id: 'target' }],
+      confirmation: 'TRANSFER_OWNERSHIP',
+    });
+  });
+
   it('prepares Core, CAS-transfers knowledge backing, then finalizes Core metadata', async () => {
     const fixture = buildApp({ assetType: 'llm_wiki' });
     const response = await fixture.app.request('/account/ownership/transfer', {

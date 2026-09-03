@@ -1018,9 +1018,11 @@ delete 返回 `managed_resource_requires_lifecycle`，必须先走 backing-first
 
 Panel 对本人暴露统一 `/api/v1/account/ownership/transfer`，Core 元数据提交使用
 `POST /ownership/transfer`。每批最多 100 项，caller 必须是每项当前 owner，接收者必须是
-同 Team active member；Team 只可转给 active admin。Agent 转移是聚合操作：Agent、self
-Chat Memory metadata、Agent-owned Skill 与 L0/L1 `owner_user_id` 同步迁移，原始 `user_id`
-保持不变；不再合法的 private binding 会解除。Task 只改 `owner_user_id`。
+同 Team active member；Team 只可转给 active admin。Agent 转移是聚合操作：全部固定绑定
+保持附着；绑定的 Skill、Wiki、Code Graph、Chat Memory 中，当前 owner 与原 Agent owner
+相同的资产 metadata 同步迁移，其他 owner 的共享资产保持不变。Agent 所拥有的绑定 Chat
+Memory 对应 L0/L1 `owner_user_id` 先迁移并在失败时补偿，原始 `user_id` 保持不变。Task
+只改 `owner_user_id`。
 
 跨服务 Wiki/Code Graph 与 Agent Chat Memory 使用持久化 operation，内部路由为
 `/v3/internal/meta/ownership/{prepare-transfer,finalize-transfer,resolve-transfer}` 与
