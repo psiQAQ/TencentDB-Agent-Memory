@@ -107,6 +107,12 @@ export interface IStorageBackend {
   putObject(key: string, content: string | Buffer, opts?: PutObjectOptions): Promise<void>;
 
   /**
+   * Atomically replace an object when the backend can guarantee it. Lifecycle
+   * compaction must fail closed when this capability is unavailable.
+   */
+  replaceObject?(key: string, content: string | Buffer, opts?: PutObjectOptions): Promise<void>;
+
+  /**
    * Append content to the end of an object.
    *
    * Semantics (CR-1 fix, 2026-05-19):

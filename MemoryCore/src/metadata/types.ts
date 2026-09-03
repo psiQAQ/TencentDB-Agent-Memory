@@ -113,6 +113,8 @@ export interface AgentEntity {
 export interface TaskEntity {
   task_id: string;
   team_id: string;
+  /** 当前可变 ownership；creator_user_id 永久保留创建事实。 */
+  owner_user_id: string;
   creator_user_id: string;
   title: string;
   description?: string | null;
@@ -382,6 +384,8 @@ export interface CreateTaskInput {
   task_id?: string;
   team_id: string;
   creator_user_id: string;
+  /** API 未显式传入时由 service 固定为 caller/creator。 */
+  owner_user_id?: string;
   title: string;
   description?: string | null;
   source_type?: TaskSourceType;
@@ -514,6 +518,14 @@ export interface UserOwnedResourceCounts {
   assets: number;
 }
 
+export interface UserOwnedAssetCounts {
+  skill: number;
+  llm_wiki: number;
+  code_graph: number;
+  chat_memory: number;
+  other: number;
+}
+
 export type UserOwnedResourceType = "team" | "agent" | "task" | "asset";
 export type UserDependencyMembershipStatus = MemberStatus | "absent";
 
@@ -534,17 +546,92 @@ export interface UserOwnedResourceDependency {
   created_at: string;
   membership_role?: TeamRole | null;
   membership_status: UserDependencyMembershipStatus;
+  team_status: string;
 }
 
 export interface UserOwnedResourceFilter {
   team_id?: string;
   resource_type?: UserOwnedResourceType;
   status?: string;
+  asset_type?: AssetType;
 }
 
 export interface UserDependenciesResult extends PaginatedResult<UserOwnedResourceDependency> {
   counts: UserOwnedResourceCounts & { total: number };
+  asset_counts: UserOwnedAssetCounts;
 }
+
+export interface MemberRemovalResult {
+  removed: boolean;
+  counts: UserOwnedResourceCounts;
+  asset_counts: UserOwnedAssetCounts;
+  active_associations: number;
+  blocker_code?: "member_has_owned_resources" | "member_has_active_associations" | "lifecycle_operation_in_progress";
+}
+
+export interface SafeUserDeleteResult {
+  deleted: BatchDeleteResult | null;
+  blockers: Array<{ user_id: string; counts: UserOwnedResourceCounts }>;
+  last_system_admin: boolean;
+}
+
+export interface TeamDeletePreview {
+  team_id: string;
+  team_name: string;
+  revision: string;
+  active_members: number;
+  counts: UserOwnedResourceCounts;
+  asset_counts: UserOwnedAssetCounts;
+  active_associations: number;
+  ready: boolean;
+}
+
+export type OwnershipResourceType = "team" | "agent" | "task" | "asset";
+
+export interface OwnershipTransferInput {
+  team_id: string;
+  resource_type: OwnershipResourceType;
+  resource_id: string;
+  from_user_id: string;
+  to_user_id: string;
+  idempotency_key: string;
+}
+
+export interface OwnershipTransferResult {
+  resource_type: OwnershipResourceType;
+  resource_id: string;
+  transferred: boolean;
+  implicit_asset_ids: string[];
+  removed_binding_ids: string[];
+  reason?: string;
+}
+
+export type IntegrityFindingCategory =
+  | "recoverable_dependency"
+  | "operational_orphan"
+  | "cache_residue"
+  | "inconsistent"
+  | "retained_history";
+
+export interface IntegrityFinding {
+  finding_id: string;
+  fingerprint: string;
+  category: IntegrityFindingCategory;
+  source_service: string;
+  resource_type: string;
+  resource_id: string;
+  team_id: string | null;
+  owner_user_id: string | null;
+  reason: string;
+  allowed_actions: Array<"inspect" | "purge">;
+  first_seen_at: string;
+  last_seen_at: string;
+  name?: string;
+  status?: string;
+  item_count?: number;
+  size_bytes?: number;
+}
+
 
 // ============================
 // ConfigParam 类型

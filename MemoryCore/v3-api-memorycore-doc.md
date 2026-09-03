@@ -804,7 +804,7 @@ upsert 知识明细（幂等）。
 
 ---
 
-## 3.7 Meta 元数据（56）
+## 3.7 Meta 元数据
 
 > 元数据面 `/v3/meta/*`，鉴权 `Bearer + x-tdai-service-id + x-tdai-user-key`（`auth/verify` 免 user-key）。
 > 失败 message 格式 `"{error_code}: {detail}"`，HTTP 状态由 mapErrorCode 映射（见 §4.2）。
@@ -842,7 +842,9 @@ Team 更新、删除及人员变更仅限真实 Team owner/admin。
 必须传自己管理的 `team_id`；`system_admin` 可跨 Team 只读查询。`counts` 统计权限范围
 内所有状态，不受 items 的 `resource_type/status` 筛选影响。items 仅包含资源类型、ID、
 Team/名称、状态、asset_type、创建时间及 membership role/status；不会返回 prompt、
-描述、内容、content_ref、业务 metadata 或凭证。该接口不授予资源 CRUD 权限。
+描述、内容、content_ref、业务 metadata 或凭证。响应保留 `counts.assets` 兼容字段，并
+新增 `asset_counts: { skill, llm_wiki, code_graph, chat_memory, other }`；缺失 Team 使用
+安全占位并返回 `team_status:"missing"`。该接口不授予资源 CRUD 权限。
 
 **UserPublic 响应**：`{ user_id, user_type: "normal"\|"system_admin", username, created_at }`。
 
@@ -878,35 +880,46 @@ Team/名称、状态、asset_type、创建时间及 membership role/status；不
 
 **UserKeyPublic 响应**：`{ key_id, user_id, key_prefix, name?, status: "active"\|"revoked", is_default, last_used_at?, expires_at?, created_at, revoked_at? }`。create 额外返回 `key_value`（仅此一次完整 key）。`key_id` 由服务生成且不可自定义；`name` 是创建者可填写的可选备注名（最长 128 字符）。`init-admin` 创建的 `system_admin` 默认 Key（`is_default=true`）对应部署持久化的 `.admin-key`，不可吊销；其他 `system_admin` Key 可吊销。
 
-### 3.7.3 Team（5）
+### 3.7.3 Team
 
 | 接口 | 说明 |
 |---|---|
 | `POST /team/create` | 任意已认证用户为自己建 Team，创建后为 owner/admin |
 | `POST /team/get` | active member 按 team_id 查 |
 | `POST /team/update` | Team owner/admin 更新（owner 不可改） |
-| `POST /team/delete` | Team owner/admin 批量删除 |
+| `POST /team/delete-preview` | Team owner 获取空 Team 删除预检与 revision |
+| `POST /team/delete` | 仅 Team owner，按单 Team + 精确名称 + revision 安全删除 |
 | `POST /team/list` | 本人列所属 Team；system_admin 可按任意用户只读查询关系 |
 
 **create 请求体**：`name`、`owner_user_id`、`description?`、`status?`(active/archived)、`metadata_json?`。
 **update 请求体**：`team_id`、`name?`、`description?`、`status?`、`metadata_json?`（owner 传入被 strip）。
 **list 请求体**：`user_id`/`user_key`(二选一) + `name?` + 分页。
 `team/create.owner_user_id` 必须等于 caller，不允许代他人创建。
+Team 删除仅允许只剩 owner 一名 active member、Agent/Task/所有 Asset subtype、活动关系、
+未完成 operation 和 operational finding 全部为零；否则返回
+`409 team_not_ready_for_deletion`。Team admin 删除返回 403。
 
 **TeamEntity 响应**：`{ team_id, name, description?, owner_user_id, status, created_at, updated_at, metadata_json }`。
 
-### 3.7.4 Team-Member（4）
+### 3.7.4 Team-Member
 
 | 接口 | 说明 |
 |---|---|
 | `POST /team-member/add` | Team admin 添加已有账号或更新其角色 |
 | `POST /team-member/remove` | Team admin 移除非 owner、非自己的成员 |
+| `POST /team-member/leave` | 非 owner 本人确认后退出 Team |
+| `POST /team-member/update-role` | owner/admin 修改非 owner、非自己的成员角色 |
 | `POST /team-member/list` | active member；system_admin 跨 Team 只读例外 |
 | `POST /team-member/get` | active member；system_admin 跨 Team 只读例外 |
 
-**add 请求体**：`team_id`、`user_id`、`role?`(admin/member/reviewer)、`status?`。
+**add 请求体**：`team_id`、`user_id`、`role?`(admin/member/reviewer)。公开接口不接受
+`status`，添加和恢复固定写为 `active`，不能借 add 绕过安全离组。
 owner 角色不可降级，Team admin 不可用 add 修改自己的角色。
 **list 请求体**：`team_id` + 分页。
+
+leave/remove 的最终写入与资源 create/transfer 共用 revision/事务保护。Team owner 未转移、
+任一状态的 Agent/Task/Asset ownership、活动 ACL、未完成 lifecycle operation 或 operational
+finding 存在时均拒绝，membership 不变。
 
 **TeamMemberView 响应**：`{ id, team_id, user_id, role, joined_at, status, username }`（username 为 JOIN 所得）。
 
@@ -922,6 +935,8 @@ owner 角色不可降级，Team admin 不可用 add 修改自己的角色。
 | `POST /agent/archive` | 归档 |
 
 **create 请求体**：`team_id`、`owner_user_id`、`name`、`description?`、`prompt?`、`visibility?`、`status?`、`metadata_json?`。
+创建者只能把 owner 设为 caller。存在派生 Chat Memory/Skill/backing 的 Agent 不能通过公开
+delete 绕过 lifecycle coordinator。
 **list 请求体**：`team_id`/`owner_user_id`/`owner_user_key`(至少一) + `status?`、`name?` + 分页。
 
 **AgentEntity 响应**：`{ agent_id, team_id, owner_user_id, name, description?, prompt?, visibility, status, created_at, updated_at, metadata_json }`。
@@ -954,7 +969,7 @@ owner 角色不可降级，Team admin 不可用 add 修改自己的角色。
 
 **create 请求体**：`team_id`、`creator_user_id`、`title`、`description?`、`source_type?`(manual/tapd/github/other)、`source_url?`、`status?`(running/completed)、`auto_assign_floating_assets?`、`risk_level?`、`metadata_json?`、`linked_agents?`(`[{ agent_id, role_in_task? }]`)。
 
-**TaskEntity 响应**：`{ task_id, team_id, creator_user_id, title, description?, source_type, source_url?, status, auto_assign_floating_assets, risk_level?, created_at, updated_at, metadata_json }`。
+**TaskEntity 响应**：`{ task_id, team_id, creator_user_id, owner_user_id, title, description?, source_type, source_url?, status, auto_assign_floating_assets, risk_level?, created_at, updated_at, metadata_json }`。`creator_user_id` 只读保留创建事实；权限、依赖和转移使用 `owner_user_id`。
 
 ### 3.7.7 Task-Agent（3）
 
@@ -991,11 +1006,26 @@ owner 角色不可降级，Team admin 不可用 add 修改自己的角色。
 | `POST /asset/touch-usage` | 触碰使用（更新 last_used_at） |
 
 **create 请求体**：`asset_id`、`team_id`、`asset_type`(skill/llm_wiki/code_graph/chat_memory)、`name`、`owner_user_id`、`source_type`、`description?`、`source_ref?`、`visibility?`、`status?`、`confidence?`、`expires_at?`、`content_ref?`、`metadata_json?`。
+创建者只能把 owner 设为 caller。受管 Asset（Skill/Wiki/Code Graph/Chat Memory）的公开
+delete 返回 `managed_resource_requires_lifecycle`，必须先走 backing-first lifecycle。
 **list 请求体**：`team_id`、`asset_type?`、`status?`、`owner_user_id?`、`visibility?` + 分页。
 **list-accessible 请求体**：`user_id`/`user_key`(二选一) + `team_id?`、`action?`、`asset_type?`、`agent_id?`、`visibility?`(单值或数组) + 分页。
 请求身份必须解析为 caller；显式 `team_id` 时 caller 还必须是该 Team 的 active member。
 
 **AssetEntity 响应**：`{ asset_id, team_id, asset_type, name, description?, owner_user_id, source_type, source_ref?, version, visibility, status, confidence?, expires_at?, last_used_at?, usage_count, content_ref?, created_at, updated_at, metadata_json }`。
+
+### 3.7.9.1 Ownership 与内部 lifecycle
+
+Panel 对本人暴露统一 `/api/v1/account/ownership/transfer`，Core 元数据提交使用
+`POST /ownership/transfer`。每批最多 100 项，caller 必须是每项当前 owner，接收者必须是
+同 Team active member；Team 只可转给 active admin。Agent 转移是聚合操作：Agent、self
+Chat Memory metadata、Agent-owned Skill 与 L0/L1 `owner_user_id` 同步迁移，原始 `user_id`
+保持不变；不再合法的 private binding 会解除。Task 只改 `owner_user_id`。
+
+跨服务 Wiki/Code Graph 与 Agent Chat Memory 使用持久化 operation，内部路由为
+`/v3/internal/meta/ownership/{prepare-transfer,finalize-transfer,resolve-transfer}` 与
+`/v3/internal/meta/asset/{get,finalize-delete}`。这些路由只接受 gateway Bearer，不属于普通
+用户 API；operation 未完成或 `inconsistent_retryable` 会继续阻止成员离组。
 
 ### 3.7.10 Agent-Fixed-Asset（4）
 

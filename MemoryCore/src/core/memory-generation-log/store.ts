@@ -186,4 +186,81 @@ export class MemoryGenerationLogStore {
         : {}),
     };
   }
+
+  /**
+   * Permanently remove content-bearing provenance for one Agent scope.
+   * Malformed logs are retained and fail the lifecycle operation closed.
+   */
+  async purgeScope(teamId: string, agentId: string): Promise<number> {
+    if (!teamId.trim() || !agentId.trim()) {
+      throw new Error("purgeScope requires non-empty teamId and agentId");
+    }
+    let marker: string | undefined;
+    let deleted = 0;
+    do {
+      const page = await this.storage.getBackend().listObjects(`${ROOT}/`, {
+        maxKeys: 1000,
+        marker,
+        recursive: true,
+      });
+      for (const entry of page.entries) {
+        if (entry.isDirectory) continue;
+        const raw = await this.storage.readFile(entry.key);
+        if (raw === null) continue;
+        let log: MemoryGenerationLog;
+        try {
+          log = JSON.parse(raw) as MemoryGenerationLog;
+        } catch {
+          throw new Error(`malformed generation log prevents safe purge: ${entry.key}`);
+        }
+        if (log.instance_id !== this.instanceId) continue;
+        if (log.team_id !== teamId || log.agent_id !== agentId) continue;
+        await this.storage.unlink(entry.key);
+        deleted++;
+      }
+      marker = page.nextMarker;
+    } while (marker);
+    return deleted;
+  }
+
+  async listIntegrityScopes(): Promise<Array<{
+    teamId: string;
+    agentId: string;
+    count: number;
+    sizeBytes: number;
+  }>> {
+    const scopes = new Map<string, { teamId: string; agentId: string; count: number; sizeBytes: number }>();
+    let marker: string | undefined;
+    do {
+      const page = await this.storage.getBackend().listObjects(`${ROOT}/`, {
+        maxKeys: 1000,
+        marker,
+        recursive: true,
+      });
+      for (const entry of page.entries) {
+        if (entry.isDirectory) continue;
+        const raw = await this.storage.readFile(entry.key);
+        if (raw === null) continue;
+        let log: MemoryGenerationLog;
+        try {
+          log = JSON.parse(raw) as MemoryGenerationLog;
+        } catch {
+          continue;
+        }
+        if (log.instance_id !== this.instanceId || !log.team_id || !log.agent_id) continue;
+        const key = `${log.team_id}\0${log.agent_id}`;
+        const current = scopes.get(key) ?? {
+          teamId: log.team_id,
+          agentId: log.agent_id,
+          count: 0,
+          sizeBytes: 0,
+        };
+        current.count++;
+        current.sizeBytes += entry.size;
+        scopes.set(key, current);
+      }
+      marker = page.nextMarker;
+    } while (marker);
+    return [...scopes.values()];
+  }
 }

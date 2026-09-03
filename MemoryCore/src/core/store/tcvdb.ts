@@ -135,13 +135,13 @@ const QUERY_PAGE_SIZE = 100;
 /** All L1 output fields returned by query/search (excludes vector/sparse_vector). */
 const L1_OUTPUT_FIELDS = [
   "id", "text", "type", "priority", "scene_name",
-  "team_id", "user_id", "agent_id", "session_key", "session_id", "task_id", "version", "timestamp_str", "timestamp_start",
+  "team_id", "user_id", "owner_user_id", "agent_id", "session_key", "session_id", "task_id", "version", "timestamp_str", "timestamp_start",
   "timestamp_end", "metadata_json", "created_time_ms", "updated_time_ms",
 ];
 
 /** All L0 output fields returned by query/search. */
 const L0_OUTPUT_FIELDS = [
-  "id", "message_text", "team_id", "user_id", "agent_id", "session_key", "session_id", "task_id", "role",
+  "id", "message_text", "team_id", "user_id", "owner_user_id", "agent_id", "session_key", "session_id", "task_id", "role",
   "recorded_at_ms", "timestamp",
 ];
 
@@ -191,7 +191,7 @@ function buildIsolationConditions(filter?: IsolationFilter): string[] {
   // teamId 与 isolation.ts buildIsolationWhere 对齐：team 级隔离过滤必须最先出现，
   // 否则跨 team 的 L0/L1 记录会在 search/query 时漏过滤（团队记忆隔离失效）。
   if (filter.teamId !== undefined) conditions.push(eqFilter("team_id", filter.teamId));
-  if (filter.userId !== undefined) conditions.push(eqFilter("user_id", filter.userId));
+  if (filter.userId !== undefined) conditions.push(eqFilter("owner_user_id", filter.userId));
   if (filter.agentId !== undefined) conditions.push(eqFilter("agent_id", filter.agentId));
   if (filter.sessionId !== undefined) conditions.push(eqFilter("session_id", filter.sessionId));
   if (filter.taskId !== undefined) conditions.push(eqFilter("task_id", filter.taskId));
@@ -409,6 +409,7 @@ export class TcvdbMemoryStore implements IMemoryStore {
           { fieldName: "scene_name",      fieldType: "string", indexType: "filter" },
           { fieldName: "team_id",       fieldType: "string", indexType: "filter" },
           { fieldName: "user_id",         fieldType: "string", indexType: "filter" },
+          { fieldName: "owner_user_id",   fieldType: "string", indexType: "filter" },
           { fieldName: "agent_id",        fieldType: "string", indexType: "filter" },
           { fieldName: "session_key",     fieldType: "string", indexType: "filter" },
           { fieldName: "session_id",      fieldType: "string", indexType: "filter" },
@@ -440,6 +441,7 @@ export class TcvdbMemoryStore implements IMemoryStore {
         [
           { fieldName: "team_id",        fieldType: "string", indexType: "filter" },
           { fieldName: "user_id",        fieldType: "string", indexType: "filter" },
+          { fieldName: "owner_user_id",  fieldType: "string", indexType: "filter" },
           { fieldName: "agent_id",       fieldType: "string", indexType: "filter" },
           { fieldName: "session_key",    fieldType: "string", indexType: "filter" },
           { fieldName: "session_id",     fieldType: "string", indexType: "filter" },
@@ -669,6 +671,14 @@ export class TcvdbMemoryStore implements IMemoryStore {
     const tsEnd = record.timestamps.length > 0
       ? record.timestamps.reduce((a, b) => (a > b ? a : b)) : tsStr;
 
+    const existing = await this.client.query(this.l1Collection, {
+      documentIds: [record.id], retrieveVector: false, outputFields: ["user_id", "owner_user_id"], limit: 1,
+    });
+    const currentOwner = String(existing.documents?.[0]?.owner_user_id
+      ?? existing.documents?.[0]?.user_id
+      ?? record.ownerUserId
+      ?? record.userId
+      ?? "");
     const doc: Record<string, unknown> = {
       id: record.id,
       text: record.content,
@@ -677,6 +687,7 @@ export class TcvdbMemoryStore implements IMemoryStore {
       scene_name: record.scene_name,
       team_id: record.teamId ?? "",
       user_id: record.userId ?? "",
+      owner_user_id: currentOwner,
       agent_id: record.agentId ?? "",
       version: record.version ?? 0,
       session_key: record.sessionKey,
@@ -728,6 +739,7 @@ export class TcvdbMemoryStore implements IMemoryStore {
           scene_name: record.scene_name,
           team_id: record.teamId ?? "",
           user_id: record.userId ?? "",
+          owner_user_id: record.ownerUserId ?? record.userId ?? "",
           agent_id: record.agentId ?? "",
           version: record.version ?? 0,
           session_key: record.sessionKey,
@@ -888,6 +900,7 @@ export class TcvdbMemoryStore implements IMemoryStore {
           task_id: String(doc.task_id ?? ""),
           team_id: String(doc.team_id ?? ""),
           user_id: String(doc.user_id ?? ""),
+          owner_user_id: String(doc.owner_user_id ?? doc.user_id ?? ""),
           agent_id: String(doc.agent_id ?? ""),
           version: Number(doc.version ?? 0),
           timestamp_str: String(doc.timestamp_str ?? ""),
@@ -920,6 +933,7 @@ export class TcvdbMemoryStore implements IMemoryStore {
         task_id: String(doc.task_id ?? ""),
         team_id: String(doc.team_id ?? ""),
         user_id: String(doc.user_id ?? ""),
+        owner_user_id: String(doc.owner_user_id ?? doc.user_id ?? ""),
         agent_id: String(doc.agent_id ?? ""),
         version: Number(doc.version ?? 0),
         timestamp_str: String(doc.timestamp_str ?? ""),
@@ -1085,11 +1099,20 @@ export class TcvdbMemoryStore implements IMemoryStore {
     await this._ensureInit();
     if (this.degraded) return;
 
+    const existing = await this.client.query(this.l0Collection, {
+      documentIds: [record.id], retrieveVector: false, outputFields: ["user_id", "owner_user_id"], limit: 1,
+    });
+    const currentOwner = String(existing.documents?.[0]?.owner_user_id
+      ?? existing.documents?.[0]?.user_id
+      ?? record.ownerUserId
+      ?? record.userId
+      ?? DEFAULT_ISOLATION_ID);
     const doc: Record<string, unknown> = {
       id: record.id,
       message_text: record.messageText,
       team_id: record.teamId ?? "",
       user_id: record.userId || DEFAULT_ISOLATION_ID,
+      owner_user_id: currentOwner,
       agent_id: record.agentId || DEFAULT_ISOLATION_ID,
       session_key: record.sessionKey,
       session_id: record.sessionId || DEFAULT_ISOLATION_ID,
@@ -1126,6 +1149,7 @@ export class TcvdbMemoryStore implements IMemoryStore {
           message_text: record.messageText,
           team_id: record.teamId ?? "",
           user_id: record.userId || DEFAULT_ISOLATION_ID,
+          owner_user_id: record.ownerUserId || record.userId || DEFAULT_ISOLATION_ID,
           agent_id: record.agentId || DEFAULT_ISOLATION_ID,
           session_key: record.sessionKey,
           session_id: record.sessionId || DEFAULT_ISOLATION_ID,
@@ -1266,6 +1290,7 @@ export class TcvdbMemoryStore implements IMemoryStore {
         team_id: String(doc.team_id ?? ""),
         task_id: String(doc.task_id ?? ""),
         user_id: String(doc.user_id ?? ""),
+        owner_user_id: String(doc.owner_user_id ?? doc.user_id ?? ""),
         agent_id: String(doc.agent_id ?? ""),
         role: String(doc.role ?? ""),
         message_text: String(doc.message_text ?? ""),
@@ -1856,6 +1881,7 @@ export class TcvdbMemoryStore implements IMemoryStore {
         team_id: d.team_id ?? "",
         task_id: d.task_id ?? "",
         user_id: d.user_id ?? "",
+        owner_user_id: d.owner_user_id ?? d.user_id ?? "",
         agent_id: d.agent_id ?? "",
         role: d.role ?? "",
         message_text: d.message_text ?? "",
@@ -1884,7 +1910,7 @@ export class TcvdbMemoryStore implements IMemoryStore {
       eqFilter("team_id", filter.teamId),
       `(${taskIds.map((taskId) => eqFilter("task_id", taskId)).join(" or ")})`,
     ];
-    if (filter.userId !== undefined) conditions.push(eqFilter("user_id", filter.userId));
+    if (filter.userId !== undefined) conditions.push(eqFilter("owner_user_id", filter.userId));
     if (filter.timeStartMs !== undefined) conditions.push(`timestamp >= ${filter.timeStartMs}`);
     if (filter.timeEndMs !== undefined) conditions.push(`timestamp <= ${filter.timeEndMs}`);
     const filterExpr = joinFilter(conditions);
@@ -1902,7 +1928,7 @@ export class TcvdbMemoryStore implements IMemoryStore {
         limit,
         offset: scanned,
         filter: filterExpr,
-        outputFields: ["team_id", "task_id", "user_id", "agent_id", "session_id", "timestamp", "recorded_at_ms"],
+        outputFields: ["team_id", "task_id", "user_id", "owner_user_id", "agent_id", "session_id", "timestamp", "recorded_at_ms"],
         sort: [{ fieldName: "recorded_at_ms", direction: "asc" }],
       });
       const docs = resp.documents ?? [];
@@ -1993,6 +2019,7 @@ export class TcvdbMemoryStore implements IMemoryStore {
         team_id: d.team_id ?? "",
         task_id: d.task_id ?? "",
         user_id: d.user_id ?? "",
+        owner_user_id: d.owner_user_id ?? d.user_id ?? "",
         agent_id: d.agent_id ?? "",
         version: Number(d.version ?? 0),
         timestamp_str: d.timestamp_str ?? "",
@@ -2038,6 +2065,84 @@ export class TcvdbMemoryStore implements IMemoryStore {
     }
   }
 
+  async transferMemoryOwner(input: {
+    teamId: string;
+    agentId: string;
+    fromOwnerUserId: string;
+    toOwnerUserId: string;
+  }): Promise<{ l0Updated: number; l1Updated: number }> {
+    await this._ensureInit();
+    if (this.degraded) throw new Error("memory store is degraded");
+    const teamId = input.teamId.trim();
+    const agentId = input.agentId.trim();
+    const fromOwner = input.fromOwnerUserId.trim();
+    const toOwner = input.toOwnerUserId.trim();
+    if (!teamId || !agentId || !fromOwner || !toOwner) {
+      throw new Error("transferMemoryOwner requires complete team/agent/owner scope");
+    }
+    if (fromOwner === toOwner) return { l0Updated: 0, l1Updated: 0 };
+
+    // Query by stable Team+Agent indexes and filter the mutable owner in memory.
+    // This keeps existing TCVDB collections usable even before owner_user_id is
+    // added as a filter index; new collections create that index above.
+    const scope = joinFilter([eqFilter("team_id", teamId), eqFilter("agent_id", agentId)]);
+    const [l0All, l1All] = await Promise.all([
+      this._queryAllDocs(this.l0Collection, scope, L0_OUTPUT_FIELDS),
+      this._queryAllDocs(this.l1Collection, scope, L1_OUTPUT_FIELDS),
+    ]);
+    const owns = (doc: Record<string, unknown>) => String(doc.owner_user_id ?? doc.user_id ?? "") === fromOwner;
+    const l0 = l0All.filter(owns);
+    const l1 = l1All.filter(owns);
+    const changed: Array<{ collection: string; doc: Record<string, unknown> }> = [];
+    try {
+      for (const doc of l0) {
+        await this.client.upsert(this.l0Collection, [{ ...doc, owner_user_id: toOwner }]);
+        changed.push({ collection: this.l0Collection, doc });
+      }
+      for (const doc of l1) {
+        await this.client.upsert(this.l1Collection, [{ ...doc, owner_user_id: toOwner }]);
+        changed.push({ collection: this.l1Collection, doc });
+      }
+      return { l0Updated: l0.length, l1Updated: l1.length };
+    } catch (error) {
+      const compensationErrors: string[] = [];
+      for (const item of changed.reverse()) {
+        try {
+          await this.client.upsert(item.collection, [{ ...item.doc, owner_user_id: fromOwner }]);
+        } catch (compensationError) {
+          compensationErrors.push(compensationError instanceof Error ? compensationError.message : String(compensationError));
+        }
+      }
+      if (compensationErrors.length > 0) {
+        throw new Error(`memory owner transfer inconsistent: ${compensationErrors.join("; ")}`);
+      }
+      throw error;
+    }
+  }
+
+  async listMemoryIntegrityScopes(): Promise<import("./types.js").MemoryIntegrityScope[]> {
+    await this._ensureInit();
+    if (this.degraded) throw new Error("memory store is degraded");
+    const [l0, l1] = await Promise.all([
+      this._queryAllDocs(this.l0Collection, undefined, ["team_id", "agent_id", "owner_user_id", "user_id"]),
+      this._queryAllDocs(this.l1Collection, undefined, ["team_id", "agent_id", "owner_user_id", "user_id"]),
+    ]);
+    const grouped = new Map<string, import("./types.js").MemoryIntegrityScope>();
+    const add = (row: Record<string, unknown>, layer: "l0" | "l1") => {
+      const teamId = String(row.team_id ?? "");
+      const agentId = String(row.agent_id ?? "");
+      const owner = String(row.owner_user_id ?? row.user_id ?? "");
+      const key = `${teamId}\0${agentId}`;
+      const current = grouped.get(key) ?? { teamId, agentId, ownerUserIds: [], l0Count: 0, l1Count: 0 };
+      if (owner && !current.ownerUserIds.includes(owner)) current.ownerUserIds.push(owner);
+      if (layer === "l0") current.l0Count++; else current.l1Count++;
+      grouped.set(key, current);
+    };
+    for (const row of l0) add(row, "l0");
+    for (const row of l1) add(row, "l1");
+    return [...grouped.values()];
+  }
+
   /**
    * 清空某个 (team, agent) 下的全部记忆内容：L0 + L1 + L2/L3 profile 行。
    * 向量与 sparse_vector 随文档一起删除，无需单独清理。
@@ -2077,6 +2182,23 @@ export class TcvdbMemoryStore implements IMemoryStore {
     assertDeleteFilterSafe(contentFilter, "clearMemoryContent/content", ["team_id", "agent_id"]);
     assertDeleteFilterSafe(profileFilter, "clearMemoryContent/profiles", ["team_id", "agent_id"]);
 
+    const l1Rows = await this._queryAllDocs(this.l1Collection, contentFilter, ["id"]);
+    const memoryIds = new Set(l1Rows.map((row) => String(row.id ?? "")).filter(Boolean));
+    if (memoryIds.size > 0) {
+      const refs = await this._queryAllDocs(
+        this.memoryGenerationRefsCollection,
+        undefined,
+        MEMORY_GENERATION_REF_OUTPUT_FIELDS,
+      );
+      const refIds = refs
+        .filter((row) => memoryIds.has(String(row.memory_id ?? "")))
+        .map((row) => String(row.id ?? ""))
+        .filter(Boolean);
+      if (refIds.length > 0) {
+        await this.client.deleteDoc(this.memoryGenerationRefsCollection, { query: { documentIds: refIds } });
+      }
+    }
+
     const l0Deleted = await this.client.deleteDoc(this.l0Collection, { query: { filter: contentFilter } });
     const l1Deleted = await this.client.deleteDoc(this.l1Collection, { query: { filter: contentFilter } });
     const profilesDeleted = await this.client.deleteDoc(this.profilesCollection, { query: { filter: profileFilter } });
@@ -2106,6 +2228,7 @@ export class TcvdbMemoryStore implements IMemoryStore {
         team_id: String(doc.team_id ?? ""),
         task_id: String(doc.task_id ?? ""),
         user_id: String(doc.user_id ?? ""),
+        owner_user_id: String(doc.owner_user_id ?? doc.user_id ?? ""),
         agent_id: String(doc.agent_id ?? ""),
         version: Number(doc.version ?? 0),
         metadata_json: String(doc.metadata_json ?? "{}"),
@@ -2125,6 +2248,7 @@ export class TcvdbMemoryStore implements IMemoryStore {
         team_id: String(doc.team_id ?? ""),
         task_id: String(doc.task_id ?? ""),
         user_id: String(doc.user_id ?? ""),
+        owner_user_id: String(doc.owner_user_id ?? doc.user_id ?? ""),
         agent_id: String(doc.agent_id ?? ""),
         role: String(doc.role ?? ""),
         message_text: String(doc.message_text ?? ""),

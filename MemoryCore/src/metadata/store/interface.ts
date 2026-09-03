@@ -42,6 +42,13 @@ import type {
   AssetFilter,
   BatchDeleteResult,
   UserOwnedResourceCounts,
+  UserOwnedAssetCounts,
+  MemberRemovalResult,
+  SafeUserDeleteResult,
+  TeamDeletePreview,
+  OwnershipTransferInput,
+  OwnershipTransferResult,
+  IntegrityFinding,
   UserOwnedResourceDependency,
   UserOwnedResourceFilter,
   ListPage,
@@ -67,6 +74,13 @@ export class DuplicateUserKeyError extends Error {
   }
 }
 
+export class LifecycleTransactionsRequiredError extends Error {
+  constructor() {
+    super("lifecycle mutations require MongoDB transactions");
+    this.name = "LifecycleTransactionsRequiredError";
+  }
+}
+
 export interface IMetadataStore {
   /** 初始化存储（建表/建索引/建连接）。幂等。 */
   init(): MaybePromise<void>;
@@ -82,6 +96,7 @@ export interface IMetadataStore {
   getUserByUsername(authProvider: string, username: string): MaybePromise<UserEntity | null>;
   updateUser(userId: string, patch: Partial<UserEntity>): MaybePromise<UserEntity | null>;
   deleteUsers(userIds: string[]): MaybePromise<BatchDeleteResult>;
+  deleteUsersSafely(userIds: string[]): MaybePromise<SafeUserDeleteResult>;
   listUsersByTeam(
     teamId: string,
     pagination?: PaginationParams | null,
@@ -95,6 +110,7 @@ export interface IMetadataStore {
   countSystemAdmins(): MaybePromise<number>;
   countTeams(): MaybePromise<number>;
   getUserOwnedResourceCounts(userId: string, teamId?: string): MaybePromise<UserOwnedResourceCounts>;
+  getUserOwnedAssetCounts(userId: string, teamId?: string): MaybePromise<UserOwnedAssetCounts>;
   listUserOwnedResources(
     userId: string,
     pagination?: PaginationParams | null,
@@ -117,11 +133,30 @@ export interface IMetadataStore {
   getTeamById(teamId: string): MaybePromise<TeamEntity | null>;
   updateTeam(teamId: string, patch: Partial<TeamEntity>): MaybePromise<TeamEntity | null>;
   deleteTeams(teamIds: string[]): MaybePromise<BatchDeleteResult>;
+  getTeamDeletePreview(teamId: string): MaybePromise<TeamDeletePreview | null>;
+  deleteEmptyTeam(teamId: string, ownerUserId: string, revision: string): MaybePromise<boolean>;
+  transferOwnership(input: OwnershipTransferInput): MaybePromise<OwnershipTransferResult>;
+  prepareOwnershipTransfer(input: OwnershipTransferInput): MaybePromise<{
+    operation_id: string;
+    status: string;
+  }>;
+  resolveOwnershipTransfer(
+    input: Pick<OwnershipTransferInput, "team_id" | "resource_type" | "resource_id" | "idempotency_key"> & {
+      status: "failed" | "inconsistent_retryable";
+      error_code: string;
+    },
+  ): MaybePromise<void>;
+  scanIntegrityFindings(): MaybePromise<IntegrityFinding[]>;
+  purgeIntegrityFindings(
+    findings: Array<{ finding_id: string; fingerprint: string }>,
+  ): MaybePromise<{ deleted: string[]; failed: Array<{ finding_id: string; reason: string }> }>;
   listTeamsByUser(userId: string, pagination?: PaginationParams | null, filter?: TeamFilter): MaybePromise<ListPage<TeamEntity>>;
 
   // ── TeamMember ──
   addTeamMember(input: AddTeamMemberInput): MaybePromise<TeamMemberEntity>;
   removeTeamMember(teamId: string, userId: string): MaybePromise<void>;
+  updateTeamMemberRole(teamId: string, userId: string, role: TeamMemberEntity["role"]): MaybePromise<TeamMemberEntity | null>;
+  removeTeamMemberSafely(teamId: string, userId: string): MaybePromise<MemberRemovalResult>;
   listTeamMembers(teamId: string, pagination?: PaginationParams | null): MaybePromise<ListPage<TeamMemberEntity>>;
   getTeamMember(teamId: string, userId: string): MaybePromise<TeamMemberEntity | null>;
   listTeamMembersWithProfile(

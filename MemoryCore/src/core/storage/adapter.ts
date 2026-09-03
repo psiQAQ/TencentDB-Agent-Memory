@@ -42,6 +42,13 @@ class ScopedStorageBackend implements IStorageBackend {
     return this.base.putObject(this.key(key), content, opts);
   }
 
+  async replaceObject(key: string, content: string | Buffer, opts?: PutObjectOptions): Promise<void> {
+    if (!this.base.replaceObject) {
+      throw new Error("storage backend does not support atomic replaceObject");
+    }
+    return this.base.replaceObject(this.key(key), content, opts);
+  }
+
   async appendObject(key: string, content: string | Buffer): Promise<void> {
     return this.base.appendObject(this.key(key), content);
   }
@@ -110,6 +117,15 @@ export class StorageAdapter {
 
   async writeFile(key: string, content: string | Buffer): Promise<void> {
     return this.backend.putObject(key, content);
+  }
+
+  async replaceFileAtomically(key: string, content: string | Buffer): Promise<void> {
+    if (!this.backend.replaceObject) {
+      throw new Error(
+        `storage backend ${this.backend.type} does not support atomic JSONL replacement; lifecycle mutation refused`,
+      );
+    }
+    return this.backend.replaceObject(key, content, { contentType: "application/x-ndjson" });
   }
 
   // ── fs.appendFile replacement — atomic via backend.appendObject (CR-1 fix) ──

@@ -102,10 +102,15 @@ import {
 import type { ISkillExtractor } from "../core/skill/queue/types.js";
 import type { SkillBufferStorage } from "../core/skill/conversation-add/index.js";
 import { makeKnowledgeRouteTable } from "./knowledge-handlers.js";
-import { makeChatMemoryRouteTable, clearChatMemoryContentResilient } from "./chat-memory-handlers.js";
+import {
+  makeChatMemoryRouteTable,
+  clearChatMemoryContentResilient,
+  transferChatMemoryContentOwnership,
+} from "./chat-memory-handlers.js";
 import { makeMemoryPromptRouteTable } from "./memory-prompt-handlers.js";
 import { makeMemoryGenerationLogRouteTable } from "./memory-generation-log-handlers.js";
 import { makeTaskActivityRouteTable } from "./activity-handlers.js";
+import { purgeOperationalIntegrity, scanOperationalIntegrity } from "./operational-integrity.js";
 import { handleOffloadV2Route } from "../offload_server/router.js";
 import type { OffloadV2Deps } from "../offload_server/router.js";
 import { resolveV3StrictIsolation } from "../utils/env-config.js";
@@ -462,8 +467,41 @@ export class TdaiGateway {
       rawSvc.setChatMemoryContentCleaner(async ({ teamId, agentId }) => {
         const { store: memoryStore, storage } = await this.resolveMemoryContentTargets(instanceId);
         await clearChatMemoryContentResilient({
-          store: memoryStore, storage, teamId, agentId, logger: this.logger,
+          store: memoryStore, storage, teamId, agentId, instanceId, logger: this.logger,
         });
+      });
+      rawSvc.setChatMemoryOwnerTransfer(async ({ teamId, agentId, fromOwnerUserId, toOwnerUserId }) => {
+        const { store: memoryStore, storage } = await this.resolveMemoryContentTargets(instanceId);
+        return await transferChatMemoryContentOwnership({
+          store: memoryStore,
+          storage,
+          teamId,
+          agentId,
+          fromOwnerUserId,
+          toOwnerUserId,
+        });
+      });
+      const resolveOperationalDeps = async () => {
+        const { store: memoryStore, storage } = await this.resolveMemoryContentTargets(instanceId);
+        let skillCore = this.core.getSkillCore();
+        if (this.config.deployMode === "service") {
+          skillCore = await this.resolveSkillCoreForInstance(instanceId);
+        } else if (!skillCore) {
+          await this.core.ensureSkillModuleWired();
+          skillCore = this.core.getSkillCore();
+        }
+        return {
+          metadataStore: store,
+          memoryStore,
+          storage,
+          skillCore,
+          instanceId,
+          logger: this.logger,
+        };
+      };
+      rawSvc.setOperationalIntegrityHooks({
+        scan: async () => scanOperationalIntegrity(await resolveOperationalDeps()),
+        purge: async (findings) => purgeOperationalIntegrity(await resolveOperationalDeps(), findings),
       });
 
       svc = wrapApiServiceForTrace(rawSvc);

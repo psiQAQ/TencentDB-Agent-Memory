@@ -54,6 +54,14 @@ export interface UserOwnedResourceCounts {
   total: number;
 }
 
+export interface UserOwnedAssetCounts {
+  skill: number;
+  llm_wiki: number;
+  code_graph: number;
+  chat_memory: number;
+  other: number;
+}
+
 export interface UserOwnedResourceDependency {
   resource_type: UserOwnedResourceType;
   resource_id: string;
@@ -69,6 +77,7 @@ export interface UserOwnedResourceDependency {
 
 export interface UserDependenciesResult extends PaginatedResult<UserOwnedResourceDependency> {
   counts: UserOwnedResourceCounts;
+  asset_counts: UserOwnedAssetCounts;
 }
 
 /** user/create 响应：不含 username。 */
@@ -156,6 +165,7 @@ export interface TaskEntity {
   task_id: string;
   team_id: string;
   creator_user_id: string;
+  owner_user_id: string;
   title: string;
   description?: string | null;
   source_type: TaskSourceType;
@@ -338,6 +348,56 @@ export interface ListUserDependenciesRequest extends PaginationInput {
   team_id?: string;
   resource_type?: UserOwnedResourceType;
   status?: string;
+  asset_type?: AssetType;
+}
+
+export interface TeamDeletePreview {
+  team_id: string;
+  team_name: string;
+  revision: string;
+  active_members: number;
+  counts: UserOwnedResourceCounts;
+  asset_counts: UserOwnedAssetCounts;
+  active_associations: number;
+  ready: boolean;
+}
+
+export interface DeleteTeamRequest {
+  team_id: string;
+  team_name: string;
+  revision: string;
+  confirmation: "DELETE_TEAM";
+}
+
+export interface LeaveTeamRequest {
+  team_id: string;
+  confirmation: "LEAVE_TEAM";
+}
+
+export interface UpdateTeamMemberRoleRequest {
+  team_id: string;
+  user_id: string;
+  role: TeamRole;
+}
+
+export interface OwnershipTransferRequest {
+  team_id: string;
+  transfers: Array<{
+    resource_type: "team" | "agent" | "task" | "asset";
+    resource_id: string;
+    to_user_id: string;
+  }>;
+  idempotency_key: string;
+  confirmation: "TRANSFER_OWNERSHIP";
+}
+
+export interface OwnershipTransferResult {
+  resource_type: "team" | "agent" | "task" | "asset";
+  resource_id: string;
+  transferred: boolean;
+  implicit_asset_ids: string[];
+  removed_binding_ids: string[];
+  reason?: string;
 }
 export interface CreateTeamRequest {
   name: string;

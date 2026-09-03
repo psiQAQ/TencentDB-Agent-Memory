@@ -8,6 +8,7 @@
  */
 
 import { createRequire } from "node:module";
+import { createHash } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import path from "node:path";
 import type { DatabaseSync, SQLInputValue } from "node:sqlite";
@@ -49,6 +50,13 @@ import type {
   AssetFilter,
   BatchDeleteResult,
   UserOwnedResourceCounts,
+  UserOwnedAssetCounts,
+  MemberRemovalResult,
+  SafeUserDeleteResult,
+  TeamDeletePreview,
+  OwnershipTransferInput,
+  OwnershipTransferResult,
+  IntegrityFinding,
   UserOwnedResourceDependency,
   UserOwnedResourceFilter,
   ListPage,
@@ -197,6 +205,7 @@ export class SqliteMetadataStore implements IMetadataStore {
       CREATE TABLE IF NOT EXISTS meta_tasks (
         task_id TEXT PRIMARY KEY,
         team_id TEXT NOT NULL,
+        owner_user_id TEXT NOT NULL,
         creator_user_id TEXT NOT NULL,
         title TEXT NOT NULL,
         description TEXT,
@@ -210,6 +219,7 @@ export class SqliteMetadataStore implements IMetadataStore {
         metadata_json TEXT NOT NULL DEFAULT '{}'
       );
       CREATE INDEX IF NOT EXISTS idx_meta_tasks_team_status ON meta_tasks(team_id, status, created_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_meta_tasks_owner_status_created ON meta_tasks(owner_user_id, status, created_at DESC);
       CREATE TABLE IF NOT EXISTS meta_task_agents (
         id TEXT PRIMARY KEY,
         task_id TEXT NOT NULL,
@@ -275,6 +285,47 @@ export class SqliteMetadataStore implements IMetadataStore {
         updated_at TEXT NOT NULL,
         UNIQUE(asset_id, subject_type, subject_id, permission)
       );
+      CREATE TABLE IF NOT EXISTS meta_lifecycle_operations (
+        operation_id TEXT PRIMARY KEY,
+        idempotency_key TEXT NOT NULL,
+        actor_user_id TEXT NOT NULL,
+        team_id TEXT NOT NULL,
+        resource_type TEXT NOT NULL,
+        resource_id TEXT NOT NULL,
+        from_owner_user_id TEXT,
+        to_owner_user_id TEXT,
+        status TEXT NOT NULL,
+        result_json TEXT NOT NULL DEFAULT '{}',
+        error_code TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        UNIQUE(idempotency_key, resource_type, resource_id)
+      );
+      CREATE TABLE IF NOT EXISTS meta_integrity_findings (
+        finding_id TEXT PRIMARY KEY,
+        fingerprint TEXT NOT NULL UNIQUE,
+        category TEXT NOT NULL,
+        source_service TEXT NOT NULL,
+        team_id TEXT,
+        owner_user_id TEXT,
+        resource_type TEXT NOT NULL,
+        resource_id TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'open',
+        detail_json TEXT NOT NULL DEFAULT '{}',
+        first_seen_at TEXT NOT NULL,
+        last_seen_at TEXT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS meta_tombstones (
+        tombstone_id TEXT PRIMARY KEY,
+        entity_type TEXT NOT NULL,
+        entity_id TEXT NOT NULL,
+        name TEXT,
+        team_id TEXT,
+        owner_user_id TEXT,
+        reason TEXT NOT NULL,
+        deleted_at TEXT NOT NULL,
+        UNIQUE(entity_type, entity_id)
+      );
       CREATE INDEX IF NOT EXISTS idx_meta_users_created ON meta_users(created_at DESC);
       CREATE INDEX IF NOT EXISTS idx_meta_user_keys_user_created ON meta_user_keys(user_id, created_at DESC);
       CREATE INDEX IF NOT EXISTS idx_meta_teams_created ON meta_teams(created_at DESC);
@@ -313,6 +364,14 @@ export class SqliteMetadataStore implements IMetadataStore {
       CREATE INDEX IF NOT EXISTS idx_meta_config_params_module
         ON meta_config_params(module);
     `);
+    // v3.2: creator_user_id 只保留创建事实，owner_user_id 承载可变 ownership。
+    try {
+      this.db.exec("ALTER TABLE meta_tasks ADD COLUMN owner_user_id TEXT");
+    } catch (err) {
+      if (!String(err).includes("duplicate column name")) throw err;
+    }
+    this.db.exec("UPDATE meta_tasks SET owner_user_id = creator_user_id WHERE owner_user_id IS NULL OR owner_user_id = ''");
+    this.db.exec("CREATE INDEX IF NOT EXISTS idx_meta_tasks_owner_status_created ON meta_tasks(owner_user_id, status, created_at DESC)");
     this.migrateUserTypeColumn();
     this.migrateLegacyUserKeys();
   }
@@ -420,6 +479,18 @@ export class SqliteMetadataStore implements IMetadataStore {
       } catch {
         /* ignore */
       }
+      throw e;
+    }
+  }
+
+  private txImmediate<T>(fn: () => T): T {
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const result = fn();
+      this.db.exec("COMMIT");
+      return result;
+    } catch (e) {
+      try { this.db.exec("ROLLBACK"); } catch { /* ignore */ }
       throw e;
     }
   }
@@ -566,6 +637,26 @@ export class SqliteMetadataStore implements IMetadataStore {
     return result;
   }
 
+  deleteUsersSafely(userIds: string[]): SafeUserDeleteResult {
+    return this.txImmediate(() => {
+      const uniqueIds = [...new Set(userIds)];
+      const existing = uniqueIds
+        .map((userId) => this.getUserById(userId))
+        .filter((user): user is UserEntity => !!user);
+      const deletingAdmins = existing.filter((user) => user.user_type === "system_admin").length;
+      const adminCount = this.countSystemAdmins();
+      if (deletingAdmins > 0 && adminCount - deletingAdmins < 1) {
+        return { deleted: null, blockers: [], last_system_admin: true };
+      }
+      const blockers = existing.map((user) => ({
+        user_id: user.user_id,
+        counts: this.getUserOwnedResourceCounts(user.user_id),
+      })).filter(({ counts }) => counts.teams || counts.agents || counts.tasks || counts.assets);
+      if (blockers.length > 0) return { deleted: null, blockers, last_system_admin: false };
+      return { deleted: this.deleteUsers(uniqueIds), blockers: [], last_system_admin: false };
+    });
+  }
+
   listUsersByTeam(
     teamId: string,
     pagination?: PaginationParams | null,
@@ -651,9 +742,24 @@ export class SqliteMetadataStore implements IMetadataStore {
     return {
       teams: count("meta_teams", "owner_user_id"),
       agents: count("meta_agents", "owner_user_id"),
-      tasks: count("meta_tasks", "creator_user_id"),
+      tasks: count("meta_tasks", "owner_user_id"),
       assets: count("meta_assets", "owner_user_id"),
     };
+  }
+
+  getUserOwnedAssetCounts(userId: string, teamId?: string): UserOwnedAssetCounts {
+    const params: SQLInputValue[] = teamId ? [userId, teamId] : [userId];
+    const teamFilter = teamId ? " AND team_id = ?" : "";
+    const rows = this.db.prepare(
+      `SELECT asset_type, COUNT(*) AS c FROM meta_assets WHERE owner_user_id = ?${teamFilter} GROUP BY asset_type`,
+    ).all(...params) as Row[];
+    const result: UserOwnedAssetCounts = { skill: 0, llm_wiki: 0, code_graph: 0, chat_memory: 0, other: 0 };
+    for (const row of rows) {
+      const key = String(row.asset_type);
+      if (key in result) result[key as keyof UserOwnedAssetCounts] = Number(row.c);
+      else result.other += Number(row.c);
+    }
+    return result;
   }
 
   listUserOwnedResources(
@@ -670,7 +776,7 @@ export class SqliteMetadataStore implements IMetadataStore {
         FROM meta_agents WHERE owner_user_id = ?
       UNION ALL
       SELECT 'task', task_id, team_id, title, status, NULL, created_at
-        FROM meta_tasks WHERE creator_user_id = ?
+        FROM meta_tasks WHERE owner_user_id = ?
       UNION ALL
       SELECT 'asset', asset_id, team_id, name, status, asset_type, created_at
         FROM meta_assets WHERE owner_user_id = ?
@@ -689,18 +795,23 @@ export class SqliteMetadataStore implements IMetadataStore {
       where += " AND d.status = ?";
       filterParams.push(filter.status);
     }
+    if (filter?.asset_type) {
+      where += " AND d.asset_type = ?";
+      filterParams.push(filter.asset_type);
+    }
     const baseParams: SQLInputValue[] = [userId, userId, userId, userId, userId];
     const params = [...baseParams, ...filterParams];
     const from = `FROM deps d
-      JOIN meta_teams t ON t.team_id = d.team_id
+      LEFT JOIN meta_teams t ON t.team_id = d.team_id
       LEFT JOIN meta_team_members m ON m.team_id = d.team_id AND m.user_id = ?
       ${where}`;
     return this.selectList(
       `${cte} SELECT COUNT(*) AS c ${from}`,
       params,
       `${cte}
-       SELECT d.resource_type, d.resource_id, d.team_id, t.name AS team_name,
+       SELECT d.resource_type, d.resource_id, d.team_id, COALESCE(t.name, d.team_id) AS team_name,
               d.name, d.status, d.asset_type, d.created_at,
+              COALESCE(t.status, 'missing') AS team_status,
               m.role AS membership_role,
               COALESCE(m.status, 'absent') AS membership_status
          ${from}
@@ -720,6 +831,7 @@ export class SqliteMetadataStore implements IMetadataStore {
           ? null
           : String(r.membership_role) as UserOwnedResourceDependency["membership_role"],
         membership_status: String(r.membership_status) as UserOwnedResourceDependency["membership_status"],
+        team_status: String(r.team_status),
       }),
     );
   }
@@ -830,6 +942,8 @@ export class SqliteMetadataStore implements IMetadataStore {
       const teamId = input.team_id ?? generateId(ID_PREFIX.team);
       try {
         return this.tx(() => {
+          const owner = this.get<Row>("SELECT status FROM meta_users WHERE user_id = ?", input.owner_user_id);
+          if (!owner || owner.status !== "active") throw new Error("active_owner_user_required");
           this.run(
             `INSERT INTO meta_teams
               (team_id, name, description, owner_user_id, status, created_at, updated_at, metadata_json)
@@ -886,6 +1000,372 @@ export class SqliteMetadataStore implements IMetadataStore {
     return result;
   }
 
+  getTeamDeletePreview(teamId: string): TeamDeletePreview | null {
+    const team = this.getTeamById(teamId);
+    if (!team) return null;
+    const count = (sql: string, ...params: SQLInputValue[]) => this.get<{ c: number }>(sql, ...params)?.c ?? 0;
+    const activeMembers = count(
+      "SELECT COUNT(*) AS c FROM meta_team_members WHERE team_id = ? AND status = 'active'",
+      teamId,
+    );
+    const counts: UserOwnedResourceCounts = {
+      teams: 1,
+      agents: count("SELECT COUNT(*) AS c FROM meta_agents WHERE team_id = ?", teamId),
+      tasks: count("SELECT COUNT(*) AS c FROM meta_tasks WHERE team_id = ?", teamId),
+      assets: count("SELECT COUNT(*) AS c FROM meta_assets WHERE team_id = ?", teamId),
+    };
+    const assetRows = this.db.prepare(
+      "SELECT asset_type, COUNT(*) AS c FROM meta_assets WHERE team_id = ? GROUP BY asset_type",
+    ).all(teamId) as Row[];
+    const assetCounts: UserOwnedAssetCounts = { skill: 0, llm_wiki: 0, code_graph: 0, chat_memory: 0, other: 0 };
+    for (const row of assetRows) {
+      const key = String(row.asset_type);
+      if (key in assetCounts) assetCounts[key as keyof UserOwnedAssetCounts] = Number(row.c);
+      else assetCounts.other += Number(row.c);
+    }
+    const activeAssociations = count(
+      `SELECT
+         (SELECT COUNT(*) FROM meta_task_agents ta
+            JOIN meta_tasks t ON t.task_id = ta.task_id WHERE t.team_id = ? AND ta.status = 'active') +
+         (SELECT COUNT(*) FROM meta_agent_fixed_assets fa
+            JOIN meta_agents a ON a.agent_id = fa.agent_id WHERE a.team_id = ?) +
+         (SELECT COUNT(*) FROM meta_asset_acl aa
+            JOIN meta_assets x ON x.asset_id = aa.asset_id WHERE x.team_id = ?) +
+         (SELECT COUNT(*) FROM meta_lifecycle_operations o
+            WHERE o.team_id = ? AND o.status NOT IN ('succeeded','failed','resolved')) +
+         (SELECT COUNT(*) FROM meta_integrity_findings f
+            WHERE f.team_id = ? AND f.status = 'open'
+              AND f.category IN ('operational_orphan','inconsistent')) AS c`,
+      teamId, teamId, teamId, teamId, teamId,
+    );
+    const fingerprint = JSON.stringify({
+      team_id: team.team_id,
+      updated_at: team.updated_at,
+      active_members: activeMembers,
+      counts,
+      asset_counts: assetCounts,
+      active_associations: activeAssociations,
+    });
+    const revision = createHash("sha256").update(fingerprint).digest("hex");
+    return {
+      team_id: team.team_id,
+      team_name: team.name,
+      revision,
+      active_members: activeMembers,
+      counts,
+      asset_counts: assetCounts,
+      active_associations: activeAssociations,
+      ready: activeMembers === 1 && counts.agents === 0 && counts.tasks === 0
+        && counts.assets === 0 && activeAssociations === 0,
+    };
+  }
+
+  deleteEmptyTeam(teamId: string, ownerUserId: string, revision: string): boolean {
+    return this.txImmediate(() => {
+      const team = this.getTeamById(teamId);
+      if (!team || team.owner_user_id !== ownerUserId) return false;
+      const preview = this.getTeamDeletePreview(teamId);
+      if (!preview || !preview.ready || preview.revision !== revision) return false;
+      this.run("DELETE FROM meta_team_members WHERE team_id = ? AND user_id = ?", teamId, ownerUserId);
+      this.run("DELETE FROM meta_teams WHERE team_id = ? AND owner_user_id = ?", teamId, ownerUserId);
+      return this.getTeamById(teamId) === null;
+    });
+  }
+
+  prepareOwnershipTransfer(input: OwnershipTransferInput): { operation_id: string; status: string } {
+    return this.txImmediate(() => {
+      const existing = this.get<Row>(
+        `SELECT * FROM meta_lifecycle_operations
+          WHERE idempotency_key = ? AND resource_type = ? AND resource_id = ?`,
+        input.idempotency_key, input.resource_type, input.resource_id,
+      );
+      if (existing) {
+        if (existing.team_id !== input.team_id || existing.from_owner_user_id !== input.from_user_id
+          || existing.to_owner_user_id !== input.to_user_id) throw new Error("idempotency_key_conflict");
+        return { operation_id: String(existing.operation_id), status: String(existing.status) };
+      }
+      const target = this.get<Row>(
+        `SELECT 1 FROM meta_team_members m JOIN meta_users u ON u.user_id=m.user_id
+          WHERE m.team_id=? AND m.user_id=? AND m.status='active' AND u.status='active'`,
+        input.team_id, input.to_user_id,
+      );
+      const table = input.resource_type === "team" ? "meta_teams"
+        : input.resource_type === "agent" ? "meta_agents"
+          : input.resource_type === "task" ? "meta_tasks" : "meta_assets";
+      const idColumn = `${input.resource_type}_id`;
+      const current = this.get<Row>(
+        `SELECT team_id, owner_user_id FROM ${table} WHERE ${idColumn} = ?`,
+        input.resource_id,
+      );
+      if (!target) throw new Error("target_not_active_member");
+      if (!current || current.team_id !== input.team_id) throw new Error("resource_not_found");
+      if (current.owner_user_id !== input.from_user_id) throw new Error("not_resource_owner");
+      const operationId = generateRelationId();
+      const now = nowIso();
+      this.run(
+        `INSERT INTO meta_lifecycle_operations
+          (operation_id, idempotency_key, actor_user_id, team_id, resource_type, resource_id,
+           from_owner_user_id, to_owner_user_id, status, result_json, created_at, updated_at)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
+        operationId, input.idempotency_key, input.from_user_id, input.team_id,
+        input.resource_type, input.resource_id, input.from_user_id, input.to_user_id,
+        "pending", "{}", now, now,
+      );
+      this.run("UPDATE meta_teams SET updated_at=? WHERE team_id=?", now, input.team_id);
+      return { operation_id: operationId, status: "pending" };
+    });
+  }
+
+  resolveOwnershipTransfer(input: Pick<OwnershipTransferInput, "team_id" | "resource_type" | "resource_id" | "idempotency_key"> & {
+    status: "failed" | "inconsistent_retryable"; error_code: string;
+  }): void {
+    this.txImmediate(() => {
+      const now = nowIso();
+      this.run(
+        `UPDATE meta_lifecycle_operations SET status=?, error_code=?, updated_at=?
+          WHERE idempotency_key=? AND resource_type=? AND resource_id=? AND team_id=? AND status <> 'succeeded'`,
+        input.status, input.error_code, now, input.idempotency_key, input.resource_type, input.resource_id, input.team_id,
+      );
+      this.run("UPDATE meta_teams SET updated_at=? WHERE team_id=?", now, input.team_id);
+    });
+  }
+
+  transferOwnership(input: OwnershipTransferInput): OwnershipTransferResult {
+    return this.txImmediate(() => {
+      const operation = this.get<Row>(
+        `SELECT operation_id, status, result_json FROM meta_lifecycle_operations
+          WHERE idempotency_key = ? AND resource_type = ? AND resource_id = ?`,
+        input.idempotency_key, input.resource_type, input.resource_id,
+      );
+      if (operation?.status === "succeeded" && operation.result_json) {
+        return JSON.parse(String(operation.result_json)) as OwnershipTransferResult;
+      }
+
+      const target = this.get<Row>(
+        `SELECT m.role, m.status, u.status AS user_status
+           FROM meta_team_members m JOIN meta_users u ON u.user_id = m.user_id
+          WHERE m.team_id = ? AND m.user_id = ?`,
+        input.team_id, input.to_user_id,
+      );
+      const fail = (reason: string): OwnershipTransferResult => ({
+        resource_type: input.resource_type,
+        resource_id: input.resource_id,
+        transferred: false,
+        implicit_asset_ids: [],
+        removed_binding_ids: [],
+        reason,
+      });
+      if (!target || target.status !== "active" || target.user_status !== "active") return fail("target_not_active_member");
+      if (input.resource_type === "team" && target.role !== "admin") return fail("team_owner_target_must_be_admin");
+
+      const table = input.resource_type === "team" ? "meta_teams"
+        : input.resource_type === "agent" ? "meta_agents"
+          : input.resource_type === "task" ? "meta_tasks" : "meta_assets";
+      const idColumn = `${input.resource_type}_id`;
+      const current = this.get<Row>(`SELECT team_id, owner_user_id FROM ${table} WHERE ${idColumn} = ?`, input.resource_id);
+      if (!current || current.team_id !== input.team_id) return fail("resource_not_found");
+      if (current.owner_user_id !== input.from_user_id) return fail("not_resource_owner");
+
+      const implicitAssetIds: string[] = [];
+      const removedBindingIds: string[] = [];
+      if (input.resource_type === "agent") {
+        const memoryId = buildChatMemoryAssetId(input.team_id, input.resource_id);
+        const skillRows = this.db.prepare(
+          `SELECT DISTINCT x.asset_id FROM meta_assets x
+             JOIN meta_agent_fixed_assets fa ON fa.asset_id = x.asset_id
+            WHERE fa.agent_id = ? AND x.asset_type = 'skill' AND x.owner_user_id = ?`,
+        ).all(input.resource_id, input.from_user_id) as Row[];
+        implicitAssetIds.push(memoryId, ...skillRows.map((row) => String(row.asset_id)));
+        const existingImplicit = implicitAssetIds.filter((id) => !!this.get("SELECT 1 FROM meta_assets WHERE asset_id = ?", id));
+        if (existingImplicit.length) {
+          const ph = existingImplicit.map(() => "?").join(",");
+          this.run(`UPDATE meta_assets SET owner_user_id = ?, updated_at = ? WHERE asset_id IN (${ph})`,
+            input.to_user_id, nowIso(), ...existingImplicit);
+        }
+        const invalid = this.db.prepare(
+          `SELECT fa.id FROM meta_agent_fixed_assets fa JOIN meta_assets x ON x.asset_id = fa.asset_id
+            WHERE fa.agent_id = ? AND x.visibility = 'private' AND x.owner_user_id <> ?`,
+        ).all(input.resource_id, input.to_user_id) as Row[];
+        removedBindingIds.push(...invalid.map((row) => String(row.id)));
+        if (removedBindingIds.length) {
+          const ph = removedBindingIds.map(() => "?").join(",");
+          this.run(`DELETE FROM meta_agent_fixed_assets WHERE id IN (${ph})`, ...removedBindingIds);
+        }
+      }
+      this.run(`UPDATE ${table} SET owner_user_id = ?${input.resource_type === "team" ? ", updated_at = ?" : ", updated_at = ?"} WHERE ${idColumn} = ?`,
+        input.to_user_id, nowIso(), input.resource_id);
+
+      const result: OwnershipTransferResult = {
+        resource_type: input.resource_type,
+        resource_id: input.resource_id,
+        transferred: true,
+        implicit_asset_ids: implicitAssetIds,
+        removed_binding_ids: removedBindingIds,
+      };
+      if (operation) {
+        this.run(
+          `UPDATE meta_lifecycle_operations SET status='succeeded', result_json=?, error_code=NULL, updated_at=?
+            WHERE operation_id=?`,
+          JSON.stringify(result), nowIso(), operation.operation_id,
+        );
+      } else this.run(
+        `INSERT INTO meta_lifecycle_operations
+          (operation_id, idempotency_key, actor_user_id, team_id, resource_type, resource_id,
+           from_owner_user_id, to_owner_user_id, status, result_json, created_at, updated_at)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
+        generateRelationId(), input.idempotency_key, input.from_user_id, input.team_id,
+        input.resource_type, input.resource_id, input.from_user_id, input.to_user_id,
+        "succeeded", JSON.stringify(result), nowIso(), nowIso(),
+      );
+      return result;
+    });
+  }
+
+  scanIntegrityFindings(): IntegrityFinding[] {
+    const now = nowIso();
+    const raw = this.db.prepare(`
+      SELECT kind, resource_id, team_id, owner_user_id, reason, category, purgable FROM (
+        SELECT 'agent' AS kind, a.agent_id AS resource_id, a.team_id, a.owner_user_id,
+          CASE WHEN t.team_id IS NULL THEN 'missing_team' WHEN u.user_id IS NULL THEN 'missing_owner_user'
+               ELSE 'owner_membership_absent' END AS reason,
+          CASE WHEN t.team_id IS NOT NULL AND u.user_id IS NOT NULL THEN 'recoverable_dependency'
+               ELSE 'operational_orphan' END AS category, 0 AS purgable
+        FROM meta_agents a LEFT JOIN meta_teams t ON t.team_id=a.team_id
+          LEFT JOIN meta_users u ON u.user_id=a.owner_user_id
+          LEFT JOIN meta_team_members m ON m.team_id=a.team_id AND m.user_id=a.owner_user_id AND m.status='active'
+        WHERE t.team_id IS NULL OR u.user_id IS NULL OR m.id IS NULL
+        UNION ALL
+        SELECT 'task', x.task_id, x.team_id, x.owner_user_id,
+          CASE WHEN t.team_id IS NULL THEN 'missing_team' WHEN u.user_id IS NULL THEN 'missing_owner_user'
+               ELSE 'owner_membership_absent' END,
+          CASE WHEN t.team_id IS NOT NULL AND u.user_id IS NOT NULL THEN 'recoverable_dependency'
+               ELSE 'operational_orphan' END, 0
+        FROM meta_tasks x LEFT JOIN meta_teams t ON t.team_id=x.team_id
+          LEFT JOIN meta_users u ON u.user_id=x.owner_user_id
+          LEFT JOIN meta_team_members m ON m.team_id=x.team_id AND m.user_id=x.owner_user_id AND m.status='active'
+        WHERE t.team_id IS NULL OR u.user_id IS NULL OR m.id IS NULL
+        UNION ALL
+        SELECT x.asset_type, x.asset_id, x.team_id, x.owner_user_id,
+          CASE WHEN t.team_id IS NULL THEN 'missing_team' WHEN u.user_id IS NULL THEN 'missing_owner_user'
+               ELSE 'owner_membership_absent' END,
+          CASE WHEN t.team_id IS NOT NULL AND u.user_id IS NOT NULL THEN 'recoverable_dependency'
+               ELSE 'operational_orphan' END, 0
+        FROM meta_assets x LEFT JOIN meta_teams t ON t.team_id=x.team_id
+          LEFT JOIN meta_users u ON u.user_id=x.owner_user_id
+          LEFT JOIN meta_team_members m ON m.team_id=x.team_id AND m.user_id=x.owner_user_id AND m.status='active'
+        WHERE t.team_id IS NULL OR u.user_id IS NULL OR m.id IS NULL
+        UNION ALL
+        SELECT 'team', t.team_id, t.team_id, t.owner_user_id, 'invalid_team_owner_membership', 'inconsistent', 0
+        FROM meta_teams t LEFT JOIN meta_users u ON u.user_id=t.owner_user_id
+          LEFT JOIN meta_team_members m ON m.team_id=t.team_id AND m.user_id=t.owner_user_id
+            AND m.status='active' AND m.role='admin'
+        WHERE u.user_id IS NULL OR m.id IS NULL
+        UNION ALL
+        SELECT 'task_agent_relation', ta.id, COALESCE(t.team_id,a.team_id), NULL,
+          'dangling_task_or_agent', 'operational_orphan', 1
+        FROM meta_task_agents ta LEFT JOIN meta_tasks t ON t.task_id=ta.task_id
+          LEFT JOIN meta_agents a ON a.agent_id=ta.agent_id
+        WHERE t.task_id IS NULL OR a.agent_id IS NULL
+        UNION ALL
+        SELECT 'fixed_asset_relation', fa.id, a.team_id, NULL,
+          'dangling_agent_or_asset', 'operational_orphan', 1
+        FROM meta_agent_fixed_assets fa LEFT JOIN meta_agents a ON a.agent_id=fa.agent_id
+          LEFT JOIN meta_assets x ON x.asset_id=fa.asset_id
+        WHERE a.agent_id IS NULL OR x.asset_id IS NULL
+        UNION ALL
+        SELECT 'acl_relation', aa.id, x.team_id, NULL, 'dangling_asset_acl', 'operational_orphan', 1
+        FROM meta_asset_acl aa LEFT JOIN meta_assets x ON x.asset_id=aa.asset_id WHERE x.asset_id IS NULL
+        UNION ALL
+        SELECT 'participation_history', p.id, p.team_id, p.user_id,
+          'historical_reference_without_live_parent', 'retained_history', 0
+        FROM meta_participation_logs p LEFT JOIN meta_teams t ON t.team_id=p.team_id
+          LEFT JOIN meta_tasks x ON x.task_id=p.task_id LEFT JOIN meta_agents a ON a.agent_id=p.agent_id
+        WHERE t.team_id IS NULL OR x.task_id IS NULL OR a.agent_id IS NULL
+      ) ORDER BY kind, resource_id
+    `).all() as Row[];
+    const findings: IntegrityFinding[] = raw.map((row) => {
+      const fingerprint = createHash("sha256").update(JSON.stringify({
+        kind: row.kind, resource_id: row.resource_id, team_id: row.team_id,
+        owner_user_id: row.owner_user_id, reason: row.reason, category: row.category,
+      })).digest("hex");
+      return {
+        finding_id: `finding-${fingerprint.slice(0, 20)}`,
+        fingerprint,
+        category: String(row.category) as IntegrityFinding["category"],
+        source_service: "MemoryCore",
+        resource_type: String(row.kind),
+        resource_id: String(row.resource_id),
+        team_id: row.team_id == null ? null : String(row.team_id),
+        owner_user_id: row.owner_user_id == null ? null : String(row.owner_user_id),
+        reason: String(row.reason),
+        allowed_actions: Number(row.purgable) === 1 ? ["inspect", "purge"] : ["inspect"],
+        first_seen_at: now,
+        last_seen_at: now,
+      };
+    });
+    this.tx(() => {
+      const fingerprints = new Set(findings.map((finding) => finding.fingerprint));
+      const openRows = this.db.prepare(
+        "SELECT finding_id, fingerprint FROM meta_integrity_findings WHERE status='open'",
+      ).all() as Row[];
+      for (const row of openRows) {
+        if (!fingerprints.has(String(row.fingerprint))) {
+          this.run(
+            "UPDATE meta_integrity_findings SET status='resolved',last_seen_at=? WHERE finding_id=?",
+            now, row.finding_id,
+          );
+        }
+      }
+      for (const finding of findings) {
+        const prior = this.get<Row>("SELECT first_seen_at FROM meta_integrity_findings WHERE fingerprint = ?", finding.fingerprint);
+        finding.first_seen_at = prior?.first_seen_at ? String(prior.first_seen_at) : now;
+        this.run(
+          `INSERT INTO meta_integrity_findings
+            (finding_id,fingerprint,category,source_service,team_id,owner_user_id,resource_type,resource_id,status,detail_json,first_seen_at,last_seen_at)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+           ON CONFLICT(fingerprint) DO UPDATE SET last_seen_at=excluded.last_seen_at,status='open'`,
+          finding.finding_id, finding.fingerprint, finding.category, finding.source_service,
+          finding.team_id, finding.owner_user_id, finding.resource_type, finding.resource_id,
+          "open", JSON.stringify({ reason: finding.reason, allowed_actions: finding.allowed_actions }),
+          finding.first_seen_at, now,
+        );
+      }
+    });
+    return findings;
+  }
+
+  purgeIntegrityFindings(findings: Array<{ finding_id: string; fingerprint: string }>): {
+    deleted: string[]; failed: Array<{ finding_id: string; reason: string }>;
+  } {
+    const current = new Map(this.scanIntegrityFindings().map((item) => [item.finding_id, item]));
+    const deleted: string[] = [];
+    const failed: Array<{ finding_id: string; reason: string }> = [];
+    this.txImmediate(() => {
+      for (const requested of findings) {
+        const item = current.get(requested.finding_id);
+        if (!item || item.fingerprint !== requested.fingerprint) {
+          failed.push({ finding_id: requested.finding_id, reason: "stale_integrity_scan" });
+          continue;
+        }
+        if (!item.allowed_actions.includes("purge")) {
+          failed.push({ finding_id: requested.finding_id, reason: "finding_not_purgable" });
+          continue;
+        }
+        const table = item.resource_type === "task_agent_relation" ? "meta_task_agents"
+          : item.resource_type === "fixed_asset_relation" ? "meta_agent_fixed_assets"
+            : item.resource_type === "acl_relation" ? "meta_asset_acl" : null;
+        if (!table) {
+          failed.push({ finding_id: requested.finding_id, reason: "finding_not_purgable" });
+          continue;
+        }
+        this.run(`DELETE FROM ${table} WHERE id = ?`, item.resource_id);
+        this.run("UPDATE meta_integrity_findings SET status='resolved',last_seen_at=? WHERE finding_id=?", nowIso(), item.finding_id);
+        deleted.push(item.finding_id);
+      }
+    });
+    return { deleted, failed };
+  }
+
   listTeamsByUser(userId: string, pagination?: PaginationParams | null, filter?: { name?: string }): ListPage<TeamEntity> {
     let base =
       "FROM meta_teams t JOIN meta_team_members m ON m.team_id = t.team_id WHERE m.user_id = ? AND m.status = 'active'";
@@ -908,25 +1388,76 @@ export class SqliteMetadataStore implements IMetadataStore {
   // TeamMember
   // ============================================================
   addTeamMember(input: AddTeamMemberInput): TeamMemberEntity {
-    const now = nowIso();
-    runWithGeneratedRelationId(input.id, isSqliteRelationIdCollision, (id) => {
-      this.run(
-        `INSERT INTO meta_team_members (id, team_id, user_id, role, joined_at, status)
-       VALUES (?,?,?,?,?,?)
-       ON CONFLICT(team_id, user_id) DO UPDATE SET role = excluded.role, status = excluded.status`,
-        id,
-        input.team_id,
-        input.user_id,
-        input.role ?? "member",
-        now,
-        input.status ?? "active",
-      );
+    return this.txImmediate(() => {
+      const now = nowIso();
+      const team = this.get<Row>("SELECT 1 FROM meta_teams WHERE team_id = ?", input.team_id);
+      const user = this.get<Row>("SELECT 1 FROM meta_users WHERE user_id = ? AND status = 'active'", input.user_id);
+      if (!team || !user) throw new Error("active_team_and_user_required");
+      runWithGeneratedRelationId(input.id, isSqliteRelationIdCollision, (id) => {
+        this.run(
+          `INSERT INTO meta_team_members (id, team_id, user_id, role, joined_at, status)
+         VALUES (?,?,?,?,?,?)
+         ON CONFLICT(team_id, user_id) DO UPDATE SET role = excluded.role, status = 'active'`,
+          id, input.team_id, input.user_id, input.role ?? "member", now, "active",
+        );
+      });
+      this.run("UPDATE meta_teams SET updated_at=? WHERE team_id=?", now, input.team_id);
+      return this.getTeamMember(input.team_id, input.user_id)!;
     });
-    return this.getTeamMember(input.team_id, input.user_id)!;
   }
 
   removeTeamMember(teamId: string, userId: string): void {
     this.run("DELETE FROM meta_team_members WHERE team_id = ? AND user_id = ?", teamId, userId);
+  }
+
+  updateTeamMemberRole(teamId: string, userId: string, role: TeamMemberEntity["role"]): TeamMemberEntity | null {
+    return this.txImmediate(() => {
+      this.run(
+        "UPDATE meta_team_members SET role=? WHERE team_id=? AND user_id=? AND status='active'",
+        role, teamId, userId,
+      );
+      this.run("UPDATE meta_teams SET updated_at=? WHERE team_id=?", nowIso(), teamId);
+      return this.getTeamMember(teamId, userId);
+    });
+  }
+
+  removeTeamMemberSafely(teamId: string, userId: string): MemberRemovalResult {
+    return this.txImmediate(() => {
+      const counts = this.getUserOwnedResourceCounts(userId, teamId);
+      const assetCounts = this.getUserOwnedAssetCounts(userId, teamId);
+      const aclCount = this.get<{ c: number }>(
+        `SELECT COUNT(*) AS c FROM meta_asset_acl aa
+           JOIN meta_assets x ON x.asset_id = aa.asset_id
+          WHERE x.team_id = ? AND aa.subject_type = 'user' AND aa.subject_id = ?`,
+        teamId, userId,
+      )?.c ?? 0;
+      const operationCount = this.get<{ c: number }>(
+        `SELECT COUNT(*) AS c FROM meta_lifecycle_operations
+          WHERE team_id = ? AND (from_owner_user_id = ? OR to_owner_user_id = ?)
+            AND status NOT IN ('succeeded','failed','resolved')`,
+        teamId, userId, userId,
+      )?.c ?? 0;
+      const findingCount = this.get<{ c: number }>(
+        `SELECT COUNT(*) AS c FROM meta_integrity_findings
+          WHERE team_id = ? AND owner_user_id = ? AND status = 'open'
+            AND category IN ('operational_orphan','inconsistent')`,
+        teamId, userId,
+      )?.c ?? 0;
+      const activeAssociations = aclCount + findingCount;
+      const blocked = counts.agents > 0 || counts.tasks > 0 || counts.assets > 0;
+      if (blocked) return { removed: false, counts, asset_counts: assetCounts, active_associations: activeAssociations, blocker_code: "member_has_owned_resources" };
+      if (operationCount > 0) return { removed: false, counts, asset_counts: assetCounts, active_associations: activeAssociations, blocker_code: "lifecycle_operation_in_progress" };
+      if (findingCount > 0) return { removed: false, counts, asset_counts: assetCounts, active_associations: activeAssociations, blocker_code: "member_has_active_associations" };
+      if (aclCount > 0) {
+        this.run(
+          `DELETE FROM meta_asset_acl WHERE subject_type = 'user' AND subject_id = ?
+             AND asset_id IN (SELECT asset_id FROM meta_assets WHERE team_id = ?)`,
+          userId, teamId,
+        );
+      }
+      this.run("DELETE FROM meta_team_members WHERE team_id = ? AND user_id = ?", teamId, userId);
+      return { removed: true, counts, asset_counts: assetCounts, active_associations: aclCount };
+    });
   }
 
   listTeamMembers(teamId: string, pagination?: PaginationParams | null): ListPage<TeamMemberEntity> {
@@ -982,23 +1513,25 @@ export class SqliteMetadataStore implements IMetadataStore {
     for (let attempt = 0; attempt < PK_RETRY_LIMIT; attempt++) {
       const agentId = input.agent_id ?? generateId(ID_PREFIX.agent);
       try {
-        this.run(
-          `INSERT INTO meta_agents
-            (agent_id, team_id, owner_user_id, name, description, prompt, visibility, status, created_at, updated_at, metadata_json)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
-          agentId,
-          input.team_id,
-          input.owner_user_id,
-          input.name,
-          input.description ?? null,
-          input.prompt ?? null,
-          input.visibility ?? "team",
-          input.status ?? "active",
-          now,
-          now,
-          input.metadata_json ?? "{}",
-        );
-        return this.getAgentById(agentId)!;
+        return this.txImmediate(() => {
+          const member = this.get<Row>(
+            `SELECT 1 FROM meta_team_members m JOIN meta_users u ON u.user_id=m.user_id
+              WHERE m.team_id=? AND m.user_id=? AND m.status='active' AND u.status='active'`,
+            input.team_id, input.owner_user_id,
+          );
+          if (!member || !this.get("SELECT 1 FROM meta_teams WHERE team_id=?", input.team_id)) {
+            throw new Error("active_team_membership_required");
+          }
+          this.run(
+            `INSERT INTO meta_agents
+              (agent_id, team_id, owner_user_id, name, description, prompt, visibility, status, created_at, updated_at, metadata_json)
+             VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
+            agentId, input.team_id, input.owner_user_id, input.name, input.description ?? null,
+            input.prompt ?? null, input.visibility ?? "team", input.status ?? "active", now, now,
+            input.metadata_json ?? "{}",
+          );
+          return this.getAgentById(agentId)!;
+        });
       } catch (err) {
         if (isPkCollision(err) && !input.agent_id) continue;
         throw err;
@@ -1094,14 +1627,24 @@ export class SqliteMetadataStore implements IMetadataStore {
     for (let attempt = 0; attempt < PK_RETRY_LIMIT; attempt++) {
       const taskId = input.task_id ?? generateId(ID_PREFIX.task);
       try {
-        return this.tx(() => {
+        return this.txImmediate(() => {
+          const ownerId = input.owner_user_id ?? input.creator_user_id;
+          const member = this.get<Row>(
+            `SELECT 1 FROM meta_team_members m JOIN meta_users u ON u.user_id=m.user_id
+              WHERE m.team_id=? AND m.user_id=? AND m.status='active' AND u.status='active'`,
+            input.team_id, ownerId,
+          );
+          if (!member || !this.get("SELECT 1 FROM meta_teams WHERE team_id=?", input.team_id)) {
+            throw new Error("active_team_membership_required");
+          }
           this.run(
             `INSERT INTO meta_tasks
-              (task_id, team_id, creator_user_id, title, description, source_type, source_url,
+              (task_id, team_id, owner_user_id, creator_user_id, title, description, source_type, source_url,
                status, auto_assign_floating_assets, risk_level, created_at, updated_at, metadata_json)
-             VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+             VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
             taskId,
             input.team_id,
+            input.owner_user_id ?? input.creator_user_id,
             input.creator_user_id,
             input.title,
             input.description ?? null,
@@ -1171,7 +1714,7 @@ export class SqliteMetadataStore implements IMetadataStore {
       params.push(filter.status);
     }
     if (filter?.creator_user_id) {
-      where += " AND creator_user_id = ?";
+      where += " AND owner_user_id = ?";
       params.push(filter.creator_user_id);
     }
     if (filter?.title) {
@@ -1196,7 +1739,7 @@ export class SqliteMetadataStore implements IMetadataStore {
       params.push(filter.status);
     }
     if (filter.creator_user_id) {
-      where += " AND creator_user_id = ?";
+      where += " AND owner_user_id = ?";
       params.push(filter.creator_user_id);
     }
     if (filter.title) {
@@ -1369,7 +1912,16 @@ export class SqliteMetadataStore implements IMetadataStore {
   createAsset(input: CreateAssetInput): AssetEntity {
     const now = nowIso();
     const assetId = input.asset_id;
-    this.run(
+    return this.txImmediate(() => {
+      const member = this.get<Row>(
+        `SELECT 1 FROM meta_team_members m JOIN meta_users u ON u.user_id=m.user_id
+          WHERE m.team_id=? AND m.user_id=? AND m.status='active' AND u.status='active'`,
+        input.team_id, input.owner_user_id,
+      );
+      if (!member || !this.get("SELECT 1 FROM meta_teams WHERE team_id=?", input.team_id)) {
+        throw new Error("active_team_membership_required");
+      }
+      this.run(
       `INSERT INTO meta_assets
         (asset_id, team_id, asset_type, name, description, owner_user_id, source_type, source_ref,
          version, visibility, status, confidence, expires_at, last_used_at, usage_count, content_ref,
@@ -1394,8 +1946,9 @@ export class SqliteMetadataStore implements IMetadataStore {
       now,
       now,
       input.metadata_json ?? "{}",
-    );
-    return this.getAssetById(assetId)!;
+      );
+      return this.getAssetById(assetId)!;
+    });
   }
 
   getAssetById(assetId: string): AssetEntity | null {
@@ -1760,6 +2313,7 @@ export class SqliteMetadataStore implements IMetadataStore {
     return {
       task_id: String(r.task_id),
       team_id: String(r.team_id),
+      owner_user_id: String(r.owner_user_id ?? r.creator_user_id),
       creator_user_id: String(r.creator_user_id),
       title: String(r.title),
       description: r.description != null ? String(r.description) : null,

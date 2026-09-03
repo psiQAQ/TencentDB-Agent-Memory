@@ -117,7 +117,13 @@ class _MetadataMethodsMixin:
         return self._stub.post(f"{_V3}/team/update", _body(p))
 
     def _delete_teams(self, team_ids: List[str]) -> Dict[str, Any]:
-        return self._stub.post(f"{_V3}/team/delete", {"team_ids": team_ids})
+        raise ValueError("batch team delete was removed; use delete_team(request) with preview revision")
+
+    def _preview_team_delete(self, team_id: str) -> Dict[str, Any]:
+        return self._stub.post(f"{_V3}/team/delete-preview", {"team_id": team_id})
+
+    def _delete_team(self, p: Dict[str, Any]) -> Dict[str, Any]:
+        return self._stub.post(f"{_V3}/team/delete", _body(p))
 
     def _list_teams(
         self,
@@ -141,6 +147,15 @@ class _MetadataMethodsMixin:
 
     def _remove_team_member(self, team_id: str, user_id: str) -> Dict[str, Any]:
         return self._stub.post(f"{_V3}/team-member/remove", {"team_id": team_id, "user_id": user_id})
+
+    def _leave_team(self, p: Dict[str, Any]) -> Dict[str, Any]:
+        return self._stub.post(f"{_V3}/team-member/leave", _body(p))
+
+    def _update_team_member_role(self, p: Dict[str, Any]) -> Dict[str, Any]:
+        return self._stub.post(f"{_V3}/team-member/update-role", _body(p))
+
+    def _transfer_ownership(self, p: Dict[str, Any]) -> Dict[str, Any]:
+        return self._stub.post(f"{_V3}/ownership/transfer", _body(p))
 
     def _list_team_members(
         self,
@@ -423,6 +438,12 @@ class MetadataClient(_MetadataMethodsMixin):
     def delete_teams(self, team_ids: List[str]) -> Dict[str, Any]:
         return self._delete_teams(team_ids)
 
+    def preview_team_delete(self, team_id: str) -> Dict[str, Any]:
+        return self._preview_team_delete(team_id)
+
+    def delete_team(self, p: Dict[str, Any]) -> Dict[str, Any]:
+        return self._delete_team(p)
+
     def list_teams(
         self,
         user_id_or_request: Union[str, Dict[str, Any], None] = None,
@@ -438,6 +459,15 @@ class MetadataClient(_MetadataMethodsMixin):
 
     def remove_team_member(self, team_id: str, user_id: str) -> Dict[str, Any]:
         return self._remove_team_member(team_id, user_id)
+
+    def leave_team(self, p: Dict[str, Any]) -> Dict[str, Any]:
+        return self._leave_team(p)
+
+    def update_team_member_role(self, p: Dict[str, Any]) -> Dict[str, Any]:
+        return self._update_team_member_role(p)
+
+    def transfer_ownership(self, p: Dict[str, Any]) -> Dict[str, Any]:
+        return self._transfer_ownership(p)
 
     def list_team_members(
         self,
@@ -707,6 +737,12 @@ class AsyncMetadataClient(_MetadataMethodsMixin):
     async def delete_teams(self, team_ids: List[str]) -> Dict[str, Any]:
         return await self._delete_teams(team_ids)
 
+    async def preview_team_delete(self, team_id: str) -> Dict[str, Any]:
+        return await self._preview_team_delete(team_id)
+
+    async def delete_team(self, p: Dict[str, Any]) -> Dict[str, Any]:
+        return await self._delete_team(p)
+
     async def list_teams(
         self,
         user_id_or_request: Union[str, Dict[str, Any], None] = None,
@@ -720,6 +756,15 @@ class AsyncMetadataClient(_MetadataMethodsMixin):
 
     async def remove_team_member(self, team_id: str, user_id: str) -> Dict[str, Any]:
         return await self._remove_team_member(team_id, user_id)
+
+    async def leave_team(self, p: Dict[str, Any]) -> Dict[str, Any]:
+        return await self._leave_team(p)
+
+    async def update_team_member_role(self, p: Dict[str, Any]) -> Dict[str, Any]:
+        return await self._update_team_member_role(p)
+
+    async def transfer_ownership(self, p: Dict[str, Any]) -> Dict[str, Any]:
+        return await self._transfer_ownership(p)
 
     async def list_team_members(
         self,

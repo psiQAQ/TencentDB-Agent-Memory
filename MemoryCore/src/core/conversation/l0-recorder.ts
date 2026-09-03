@@ -49,6 +49,10 @@ export interface L0MessageRecord {
   /** Three-dim tenancy isolation. Optional during rollout — see
    *  docs/l0l3-tenant-isolation-design.md. */
   userId?: string;
+  /** Team scope for precise lifecycle cleanup of shared daily JSONL shards. */
+  teamId?: string;
+  /** Mutable owner; historical userId remains unchanged after handoff. */
+  ownerUserId?: string;
   agentId?: string;
   recordedAt: string; // ISO timestamp
   id: string;

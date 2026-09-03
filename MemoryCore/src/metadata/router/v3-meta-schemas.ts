@@ -63,6 +63,7 @@ export const userDependenciesSchema = z.object({
   team_id: nonEmpty.optional(),
   resource_type: z.enum(["team", "agent", "task", "asset"]).optional(),
   status: nonEmpty.optional(),
+  asset_type: assetType.optional(),
 }).merge(paginationInputSchema);
 export const userListSchema = z
   .object({
@@ -105,7 +106,13 @@ export const teamUpdateSchema = z.object({
   status: teamStatus.optional(),
   metadata_json: z.string().optional(),
 });
-export const teamDeleteSchema = z.object({ team_ids: idList });
+export const teamDeletePreviewSchema = z.object({ team_id: nonEmpty });
+export const teamDeleteSchema = z.object({
+  team_id: nonEmpty,
+  team_name: nonEmpty,
+  revision: nonEmpty,
+  confirmation: z.literal("DELETE_TEAM"),
+});
 export const teamListSchema = userIdOrKeyFields
   .merge(z.object({ name: z.string().min(1).optional() }))
   .merge(paginationInputSchema)
@@ -116,11 +123,32 @@ export const teamMemberAddSchema = z.object({
   team_id: nonEmpty,
   user_id: nonEmpty,
   role: teamRole.optional(),
-  status: memberStatus.optional(),
-});
+}).strict();
 export const teamMemberRemoveSchema = z.object({ team_id: nonEmpty, user_id: nonEmpty });
+export const teamMemberUpdateRoleSchema = z.object({ team_id: nonEmpty, user_id: nonEmpty, role: teamRole });
+export const teamMemberLeaveSchema = z.object({
+  team_id: nonEmpty,
+  confirmation: z.literal("LEAVE_TEAM"),
+});
 export const teamMemberListSchema = z.object({ team_id: nonEmpty }).merge(paginationInputSchema);
 export const teamMemberGetSchema = z.object({ team_id: nonEmpty, user_id: nonEmpty });
+
+export const ownershipTransferSchema = z.object({
+  team_id: nonEmpty,
+  transfers: z.array(z.object({
+    resource_type: z.enum(["team", "agent", "task", "asset"]),
+    resource_id: nonEmpty,
+    to_user_id: nonEmpty,
+  })).min(1).max(100),
+  idempotency_key: z.string().uuid(),
+  confirmation: z.literal("TRANSFER_OWNERSHIP"),
+});
+export const integrityScanSchema = z.object({});
+export const integrityPurgeSchema = z.object({
+  findings: z.array(z.object({ finding_id: nonEmpty, fingerprint: nonEmpty })).min(1).max(100),
+  reason: z.string().min(3).max(500),
+  confirmation: z.literal("PURGE_ZOMBIES"),
+});
 
 // ── Agent ──
 export const agentCreateSchema = z.object({
@@ -387,6 +415,31 @@ export const internalListUsersByInstanceSchema = z.object({
 // ── ConfigParam（v3.2）──
 export const instanceQuotaGetSchema = z.object({});
 
+/** Trusted control-plane finalize calls. They are mounted only under /v3/internal/meta/*. */
+export const internalAssetFinalizeDeleteSchema = z.object({
+  asset_id: nonEmpty,
+  expected_owner_user_id: nonEmpty,
+});
+
+export const internalAssetGetSchema = z.object({ asset_id: nonEmpty });
+
+export const internalAssetFinalizeTransferSchema = z.object({
+  team_id: nonEmpty,
+  asset_id: nonEmpty,
+  from_owner_user_id: nonEmpty,
+  to_owner_user_id: nonEmpty,
+  idempotency_key: nonEmpty,
+});
+
+export const internalAssetPrepareTransferSchema = internalAssetFinalizeTransferSchema;
+export const internalAssetResolveTransferSchema = z.object({
+  team_id: nonEmpty,
+  asset_id: nonEmpty,
+  idempotency_key: nonEmpty,
+  status: z.enum(["failed", "inconsistent_retryable"]),
+  error_code: nonEmpty,
+});
+
 export const configUserGetSchema = z.object({
   user_id: nonEmpty,
   module: nonEmpty,
@@ -414,12 +467,18 @@ export const V3_SCHEMAS = {
   "/v3/meta/team/create": teamCreateSchema,
   "/v3/meta/team/get": teamGetSchema,
   "/v3/meta/team/update": teamUpdateSchema,
+  "/v3/meta/team/delete-preview": teamDeletePreviewSchema,
   "/v3/meta/team/delete": teamDeleteSchema,
   "/v3/meta/team/list": teamListSchema,
   "/v3/meta/team-member/add": teamMemberAddSchema,
   "/v3/meta/team-member/remove": teamMemberRemoveSchema,
+  "/v3/meta/team-member/update-role": teamMemberUpdateRoleSchema,
+  "/v3/meta/team-member/leave": teamMemberLeaveSchema,
   "/v3/meta/team-member/list": teamMemberListSchema,
   "/v3/meta/team-member/get": teamMemberGetSchema,
+  "/v3/meta/ownership/transfer": ownershipTransferSchema,
+  "/v3/meta/integrity/scan": integrityScanSchema,
+  "/v3/meta/integrity/purge": integrityPurgeSchema,
   "/v3/meta/agent/create": agentCreateSchema,
   "/v3/meta/agent/get": agentGetSchema,
   "/v3/meta/agent/update": agentUpdateSchema,

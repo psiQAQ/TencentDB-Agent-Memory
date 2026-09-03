@@ -70,6 +70,8 @@ export interface L1SearchResult {
   team_id: string;
   task_id: string;
   user_id: string;
+  /** Current mutable owner; user_id remains the immutable historical source. */
+  owner_user_id: string;
   agent_id: string;
   metadata_json: string;
 }
@@ -92,6 +94,7 @@ export interface L1FtsResult {
   team_id: string;
   task_id: string;
   user_id: string;
+  owner_user_id: string;
   agent_id: string;
   metadata_json: string;
 }
@@ -123,6 +126,7 @@ export interface L1RecordRow {
   team_id: string;
   task_id: string;
   user_id: string;
+  owner_user_id: string;
   agent_id: string;
   version: number;
   timestamp_str: string;
@@ -152,6 +156,8 @@ export interface L0Record {
    */
   teamId?: string;
   userId?: string;
+  /** Current mutable owner. Defaults to userId for new records. */
+  ownerUserId?: string;
   agentId?: string;
   taskId?: string;
   role: string;
@@ -169,6 +175,7 @@ export interface L0SearchResult {
   team_id: string;
   task_id: string;
   user_id: string;
+  owner_user_id: string;
   agent_id: string;
   role: string;
   message_text: string;
@@ -186,6 +193,7 @@ export interface L0FtsResult {
   team_id: string;
   task_id: string;
   user_id: string;
+  owner_user_id: string;
   agent_id: string;
   role: string;
   message_text: string;
@@ -203,6 +211,7 @@ export interface L0QueryRow {
   team_id: string;
   task_id: string;
   user_id: string;
+  owner_user_id: string;
   agent_id: string;
   role: string;
   message_text: string;
@@ -477,6 +486,26 @@ export interface MemoryContentClearResult {
   profilesDeleted: number;
 }
 
+export interface MemoryOwnerTransferInput {
+  teamId: string;
+  agentId: string;
+  fromOwnerUserId: string;
+  toOwnerUserId: string;
+}
+
+export interface MemoryOwnerTransferResult {
+  l0Updated: number;
+  l1Updated: number;
+}
+
+export interface MemoryIntegrityScope {
+  teamId: string;
+  agentId: string;
+  ownerUserIds: string[];
+  l0Count: number;
+  l1Count: number;
+}
+
 export type KnowledgeType = "wiki" | "code-graph";
 
 export interface KnowledgeEntity {
@@ -703,6 +732,11 @@ export interface IMemoryStore extends MemoryPromptStore, MemoryGenerationRefStor
    * 实现必须校验 filter.teamId / filter.agentId 非空，否则抛错拒绝执行。
    */
   clearMemoryContent?(filter: MemoryContentClearFilter): MaybePromise<MemoryContentClearResult>;
+
+  /** Move current L0/L1 ownership without rewriting historical user_id. */
+  transferMemoryOwner?(input: MemoryOwnerTransferInput): MaybePromise<MemoryOwnerTransferResult>;
+  /** Content-free inventory used only by system-admin integrity governance. */
+  listMemoryIntegrityScopes?(): MaybePromise<MemoryIntegrityScope[]>;
 
   // ── Entity metadata (Team / User / Agent / Task) ───────────
   createTeam?(input: Omit<TeamEntity, "created_at" | "updated_at" | "status" | "user_ids" | "agent_ids" | "task_ids"> & { team_id?: string; status?: TeamStatus }): MaybePromise<TeamEntity>;

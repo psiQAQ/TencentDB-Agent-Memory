@@ -28,13 +28,125 @@ import { ZodError, z } from "zod";
 import { errorEnvelope, successEnvelope } from "./v2-router.js";
 import type { ApiResponseEnvelope, V2AuthContext } from "./v2-schemas.js";
 import type { IMemoryStore, MemoryContentClearResult } from "../core/store/types.js";
-import type { StorageAdapter } from "../core/storage/types.js";
-import { createScopedStorageAdapter } from "../core/storage/adapter.js";
+import { createScopedStorageAdapter, type StorageAdapter } from "../core/storage/adapter.js";
 import { buildProfileIsolationScope } from "../core/profile/profile-sync.js";
+import { MemoryGenerationLogStore } from "../core/memory-generation-log/store.js";
 import { MetadataError, type MetadataService } from "../metadata/service/metadata-service.js";
 import type { Logger } from "../core/types.js";
 
 const TAG = "[chat-memory-handlers]";
+
+const jsonlLifecycleLocks = new Map<string, Promise<void>>();
+
+async function withJsonlLifecycleLock<T>(scope: string, fn: () => Promise<T>): Promise<T> {
+  const previous = jsonlLifecycleLocks.get(scope) ?? Promise.resolve();
+  let release!: () => void;
+  const current = new Promise<void>((resolve) => { release = resolve; });
+  const scheduled = previous.then(() => current);
+  jsonlLifecycleLocks.set(scope, scheduled);
+  await previous;
+  try {
+    return await fn();
+  } finally {
+    release();
+    if (jsonlLifecycleLocks.get(scope) === scheduled) jsonlLifecycleLocks.delete(scope);
+  }
+}
+
+function jsonlScopeMatches(value: Record<string, unknown>, teamId: string, agentId: string): boolean {
+  const recordAgent = String(value.agentId ?? value.agent_id ?? "");
+  const recordTeam = String(value.teamId ?? value.team_id ?? "");
+  if (recordAgent !== agentId) return false;
+  // Pre-isolation rows did not carry teamId. Agent IDs are globally unique, so
+  // exact agent identity is the only safe discriminator available for them.
+  return !recordTeam || recordTeam === teamId;
+}
+
+async function rewriteJsonlScope(args: {
+  storage: StorageAdapter;
+  teamId: string;
+  agentId: string;
+  mode: "delete" | "transfer";
+  fromOwnerUserId?: string;
+  toOwnerUserId?: string;
+}): Promise<number> {
+  return withJsonlLifecycleLock(`${args.teamId}\0${args.agentId}`, async () => {
+    let changed = 0;
+    for (const prefix of ["conversations/", "records/"]) {
+      const entries = await args.storage.readdir(prefix, ".jsonl");
+      for (const entry of entries) {
+        if (entry.isDirectory) continue;
+        const raw = await args.storage.readFile(entry.key);
+        if (raw === null) continue;
+        const output: string[] = [];
+        let fileChanged = false;
+        for (const line of raw.split("\n")) {
+          if (!line.trim()) continue;
+          let value: Record<string, unknown>;
+          try {
+            value = JSON.parse(line) as Record<string, unknown>;
+          } catch {
+            throw new Error(`malformed JSONL prevents safe lifecycle mutation: ${entry.key}`);
+          }
+          if (!jsonlScopeMatches(value, args.teamId, args.agentId)) {
+            output.push(line);
+            continue;
+          }
+          if (args.mode === "delete") {
+            fileChanged = true;
+            changed++;
+            continue;
+          }
+          const currentOwner = String(
+            value.ownerUserId ?? value.owner_user_id ?? value.userId ?? value.user_id ?? "",
+          );
+          if (currentOwner !== args.fromOwnerUserId) {
+            output.push(line);
+            continue;
+          }
+          value.ownerUserId = args.toOwnerUserId;
+          delete value.owner_user_id;
+          output.push(JSON.stringify(value));
+          fileChanged = true;
+          changed++;
+        }
+        if (fileChanged) {
+          await args.storage.replaceFileAtomically(
+            entry.key,
+            output.length ? `${output.join("\n")}\n` : "",
+          );
+        }
+      }
+    }
+    return changed;
+  });
+}
+
+export async function transferChatMemoryContentOwnership(args: {
+  store: IMemoryStore;
+  storage: StorageAdapter;
+  teamId: string;
+  agentId: string;
+  fromOwnerUserId: string;
+  toOwnerUserId: string;
+}): Promise<{ l0Updated: number; l1Updated: number; jsonlUpdated: number }> {
+  if (!args.store.transferMemoryOwner) {
+    throw new Error("memory backend does not support ownership transfer");
+  }
+  const canonical = await args.store.transferMemoryOwner(args);
+  try {
+    const jsonlUpdated = await rewriteJsonlScope({ ...args, mode: "transfer" });
+    return { ...canonical, jsonlUpdated };
+  } catch (error) {
+    await args.store.transferMemoryOwner({
+      teamId: args.teamId,
+      agentId: args.agentId,
+      fromOwnerUserId: args.toOwnerUserId,
+      toOwnerUserId: args.fromOwnerUserId,
+    });
+    throw error;
+  }
+}
 
 /** 单次clear 的 memory_ids 上限。 */
 export const CHAT_MEMORY_CLEAR_MAX = 100;
@@ -178,6 +290,7 @@ export async function clearChatMemoryContent(args: {
   storage: StorageAdapter;
   teamId: string;
   agentId: string;
+  instanceId: string;
 }): Promise<{ l0Deleted: number; l1Deleted: number; profileDeleted: number }> {
   // 入口处自校验：这是破坏性操作，且有两个调用方，不能依赖上游都做过校验。
   const teamId = (args.teamId ?? "").trim();
@@ -194,6 +307,8 @@ export async function clearChatMemoryContent(args: {
     agentId,
   });
   const filesRemoved = await clearProfileStorage(args.storage, teamId, agentId);
+  await rewriteJsonlScope({ storage: args.storage, teamId, agentId, mode: "delete" });
+  await new MemoryGenerationLogStore(args.storage, args.instanceId).purgeScope(teamId, agentId);
   return {
     l0Deleted: result.l0Deleted,
     l1Deleted: result.l1Deleted,
@@ -244,6 +359,7 @@ async function clearChatMemoryContentWithRetry(args: {
   agentId: string;
   logger: Logger;
   memoryId: string;
+  instanceId: string;
 }): Promise<{
   result: { l0Deleted: number; l1Deleted: number; profileDeleted: number };
   attempts: number;
@@ -257,6 +373,7 @@ async function clearChatMemoryContentWithRetry(args: {
         storage: args.storage,
         teamId: args.teamId,
         agentId: args.agentId,
+        instanceId: args.instanceId,
       });
       if (attempt > 1) {
         args.logger.info(
@@ -301,6 +418,7 @@ export async function clearChatMemoryContentResilient(args: {
   teamId: string;
   agentId: string;
   logger: Logger;
+  instanceId: string;
 }): Promise<{ l0Deleted: number; l1Deleted: number; profileDeleted: number }> {
   const { result } = await clearChatMemoryContentWithRetry({
     ...args,
@@ -408,6 +526,7 @@ async function handleChatMemoryClear(
         agentId: target.agent_id,
         logger: deps.logger,
         memoryId: target.asset_id,
+        instanceId: auth.serviceId,
       });
 
       await recordClearAudit(store, {

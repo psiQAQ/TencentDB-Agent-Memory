@@ -5,7 +5,7 @@
  * Maps object keys to local file paths under a configurable root directory.
  */
 
-import { readFile, writeFile, mkdir, readdir, unlink, stat, rm, appendFile } from "node:fs/promises";
+import { readFile, writeFile, mkdir, readdir, unlink, stat, rm, appendFile, rename } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { join, dirname, sep, resolve } from "node:path";
 import type {
@@ -104,6 +104,29 @@ export class LocalStorageBackend implements IStorageBackend {
     }
 
     this.logger?.debug?.(`${TAG} putObject: ${key} (${buf.length} bytes)`);
+  }
+
+  async replaceObject(key: string, content: string | Buffer, opts?: PutObjectOptions): Promise<void> {
+    const filePath = this.resolvePath(key);
+    await mkdir(dirname(filePath), { recursive: true });
+    const suffix = `${process.pid}.${Date.now()}.${Math.random().toString(16).slice(2)}`;
+    const temporaryPath = `${filePath}.lifecycle-${suffix}.tmp`;
+    const buf = typeof content === "string" ? Buffer.from(content, "utf-8") : content;
+    await writeFile(temporaryPath, buf);
+    await rename(temporaryPath, filePath);
+
+    const metaPath = filePath + ".meta.json";
+    if (opts?.contentType || (opts?.metadata && Object.keys(opts.metadata).length > 0)) {
+      const temporaryMetaPath = `${metaPath}.lifecycle-${suffix}.tmp`;
+      await writeFile(temporaryMetaPath, JSON.stringify({
+        contentType: opts.contentType,
+        metadata: opts.metadata,
+      }));
+      await rename(temporaryMetaPath, metaPath);
+    } else if (existsSync(metaPath)) {
+      await unlink(metaPath);
+    }
+    this.logger?.debug?.(`${TAG} replaceObject: ${key} (${buf.length} bytes)`);
   }
 
   /**

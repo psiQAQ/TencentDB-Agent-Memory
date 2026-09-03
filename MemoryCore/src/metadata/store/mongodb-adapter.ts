@@ -15,6 +15,7 @@ import type {
   ClientSession,
   Document,
 } from "mongodb";
+import { createHash } from "node:crypto";
 import { mapTeamMemberWithProfile } from "./team-member-view.js";
 import { generateId, generateRelationId, ID_PREFIX } from "../utils/id-generator.js";
 import {
@@ -53,6 +54,13 @@ import type {
   AssetFilter,
   BatchDeleteResult,
   UserOwnedResourceCounts,
+  UserOwnedAssetCounts,
+  MemberRemovalResult,
+  SafeUserDeleteResult,
+  TeamDeletePreview,
+  OwnershipTransferInput,
+  OwnershipTransferResult,
+  IntegrityFinding,
   UserOwnedResourceDependency,
   UserOwnedResourceFilter,
   ListPage,
@@ -66,7 +74,7 @@ import type {
 } from "../types.js";
 import { DEFAULT_PAGINATION } from "../pagination.js";
 import { buildChatMemoryAssetId } from "../utils/chat-memory-asset.js";
-import { DuplicateUserKeyError } from "./interface.js";
+import { DuplicateUserKeyError, LifecycleTransactionsRequiredError } from "./interface.js";
 
 function nowIso(): string {
   return new Date().toISOString();
@@ -210,6 +218,14 @@ export class MongoMetadataStore implements IMetadataStore {
     await this.ensureIndex("meta_tasks", { task_id: 1 }, { unique: true });
     await this.ensureIndex("meta_tasks", { team_id: 1, status: 1, created_at: -1 });
     await this.ensureIndex("meta_tasks", { creator_user_id: 1, status: 1, created_at: -1 });
+    await this.ensureIndex("meta_tasks", { owner_user_id: 1, status: 1, created_at: -1 });
+    await this.ensureIndex("meta_lifecycle_operations", { idempotency_key: 1, resource_type: 1, resource_id: 1 }, { unique: true });
+    await this.ensureIndex("meta_integrity_findings", { fingerprint: 1 }, { unique: true });
+    await this.ensureIndex("meta_tombstones", { entity_type: 1, entity_id: 1 }, { unique: true });
+    await this.col("meta_tasks").updateMany(
+      { $or: [{ owner_user_id: { $exists: false } }, { owner_user_id: null }, { owner_user_id: "" }] } as Document,
+      [{ $set: { owner_user_id: "$creator_user_id" } }] as Document[],
+    );
 
     // ── meta_task_agents ──
     await this.ensureIndex("meta_task_agents", { task_id: 1, agent_id: 1 }, { unique: true });
@@ -463,6 +479,60 @@ export class MongoMetadataStore implements IMetadataStore {
     return result;
   }
 
+  async deleteUsersSafely(userIds: string[]): Promise<SafeUserDeleteResult> {
+    if (!this.useTransactions) throw new LifecycleTransactionsRequiredError();
+    const uniqueIds = [...new Set(userIds)];
+    return this.withTx(async (session) => {
+      const users = await this.col<UserEntity>("meta_users").find(
+        { user_id: { $in: uniqueIds } } as Document,
+        { ...PROJECT_NO_ID, session },
+      ).toArray();
+      const adminCount = await this.col("meta_users").countDocuments({ user_type: "system_admin" }, { session });
+      const memberships = await this.col<TeamMemberEntity>("meta_team_members").find(
+        { user_id: { $in: uniqueIds } } as Document,
+        { ...PROJECT_NO_ID, session },
+      ).toArray();
+      const deletingAdmins = users.filter((user) => user.user_type === "system_admin").length;
+      if (deletingAdmins > 0 && adminCount - deletingAdmins < 1) {
+        return { deleted: null, blockers: [], last_system_admin: true };
+      }
+      const blockers: SafeUserDeleteResult["blockers"] = [];
+      for (const user of users) {
+        const q = { owner_user_id: user.user_id };
+        const teams = await this.col("meta_teams").countDocuments(q, { session });
+        const agents = await this.col("meta_agents").countDocuments(q, { session });
+        const tasks = await this.col("meta_tasks").countDocuments(q, { session });
+        const assets = await this.col("meta_assets").countDocuments(q, { session });
+        if (teams || agents || tasks || assets) blockers.push({
+          user_id: user.user_id, counts: { teams, agents, tasks, assets },
+        });
+      }
+      if (blockers.length > 0) return { deleted: null, blockers, last_system_admin: false };
+
+      const now = nowIso();
+      await this.col("meta_users").updateMany(
+        { user_id: { $in: users.map((user) => user.user_id) } }, { $set: { updated_at: now } }, { session },
+      );
+      const teamIds = [...new Set(memberships.map((member) => member.team_id))];
+      if (teamIds.length > 0) {
+        await this.col("meta_teams").updateMany(
+          { team_id: { $in: teamIds } }, { $set: { updated_at: now } }, { session },
+        );
+      }
+      const existingIds = users.map((user) => user.user_id);
+      await this.col("meta_user_keys").deleteMany({ user_id: { $in: existingIds } }, { session });
+      await this.col("meta_team_members").deleteMany({ user_id: { $in: existingIds } }, { session });
+      await this.col("meta_asset_acl").deleteMany({ subject_type: "user", subject_id: { $in: existingIds } }, { session });
+      await this.col("meta_users").deleteMany({ user_id: { $in: existingIds } }, { session });
+      const failed = uniqueIds.filter((id) => !existingIds.includes(id)).map((id) => ({ id, reason: "not_found" }));
+      return {
+        deleted: { deleted_ids: existingIds, failed },
+        blockers: [],
+        last_system_admin: false,
+      };
+    });
+  }
+
   async listUsersByTeam(
     teamId: string,
     pagination?: PaginationParams | null,
@@ -512,17 +582,31 @@ export class MongoMetadataStore implements IMetadataStore {
   }
 
   async getUserOwnedResourceCounts(userId: string, teamId?: string): Promise<UserOwnedResourceCounts> {
-    const scoped = (ownerField: "owner_user_id" | "creator_user_id"): Document => ({
+    const scoped = (ownerField: "owner_user_id"): Document => ({
       [ownerField]: userId,
       ...(teamId ? { team_id: teamId } : {}),
     });
     const [teams, agents, tasks, assets] = await Promise.all([
       this.col("meta_teams").countDocuments(scoped("owner_user_id")),
       this.col("meta_agents").countDocuments(scoped("owner_user_id")),
-      this.col("meta_tasks").countDocuments(scoped("creator_user_id")),
+      this.col("meta_tasks").countDocuments(scoped("owner_user_id")),
       this.col("meta_assets").countDocuments(scoped("owner_user_id")),
     ]);
     return { teams, agents, tasks, assets };
+  }
+
+  async getUserOwnedAssetCounts(userId: string, teamId?: string): Promise<UserOwnedAssetCounts> {
+    const rows = await this.col("meta_assets").aggregate([
+      { $match: { owner_user_id: userId, ...(teamId ? { team_id: teamId } : {}) } },
+      { $group: { _id: "$asset_type", c: { $sum: 1 } } },
+    ]).toArray();
+    const result: UserOwnedAssetCounts = { skill: 0, llm_wiki: 0, code_graph: 0, chat_memory: 0, other: 0 };
+    for (const row of rows) {
+      const key = String(row._id);
+      if (key in result) result[key as keyof UserOwnedAssetCounts] = Number(row.c);
+      else result.other += Number(row.c);
+    }
+    return result;
   }
 
   async listUserOwnedResources(
@@ -534,7 +618,7 @@ export class MongoMetadataStore implements IMetadataStore {
     const [teams, agents, tasks, assets] = await Promise.all([
       this.col<TeamEntity>("meta_teams").find({ owner_user_id: userId, ...scope }, { projection: PROJECT_NO_ID }).toArray(),
       this.col<AgentEntity>("meta_agents").find({ owner_user_id: userId, ...scope }, { projection: PROJECT_NO_ID }).toArray(),
-      this.col<TaskEntity>("meta_tasks").find({ creator_user_id: userId, ...scope }, { projection: PROJECT_NO_ID }).toArray(),
+      this.col<TaskEntity>("meta_tasks").find({ owner_user_id: userId, ...scope }, { projection: PROJECT_NO_ID }).toArray(),
       this.col<AssetEntity>("meta_assets").find({ owner_user_id: userId, ...scope }, { projection: PROJECT_NO_ID }).toArray(),
     ]);
     const raw = [
@@ -575,7 +659,8 @@ export class MongoMetadataStore implements IMetadataStore {
         created_at: item.created_at,
       })),
     ].filter((item) => (!filter?.resource_type || item.resource_type === filter.resource_type)
-      && (!filter?.status || item.status === filter.status));
+      && (!filter?.status || item.status === filter.status)
+      && (!filter?.asset_type || item.asset_type === filter.asset_type));
 
     const teamIds = [...new Set(raw.map((item) => item.team_id))];
     const [teamRows, memberships] = await Promise.all([
@@ -595,6 +680,9 @@ export class MongoMetadataStore implements IMetadataStore {
           team_name: teamNames.get(item.team_id) ?? item.team_id,
           membership_role: membership?.role ?? null,
           membership_status: (membership?.status ?? "absent") as UserOwnedResourceDependency["membership_status"],
+          team_status: teamNames.has(item.team_id)
+            ? (teamRows.find((team) => team.team_id === item.team_id)?.status ?? "active")
+            : "missing",
         };
       })
       .sort((a, b) => b.created_at.localeCompare(a.created_at)
@@ -699,6 +787,7 @@ export class MongoMetadataStore implements IMetadataStore {
   // Team
   // ============================================================
   async createTeam(input: CreateTeamInput): Promise<TeamEntity> {
+    if (!this.useTransactions) throw new LifecycleTransactionsRequiredError();
     const now = nowIso();
     for (let attempt = 0; attempt < PK_RETRY_LIMIT; attempt++) {
       const team: TeamEntity = {
@@ -713,6 +802,13 @@ export class MongoMetadataStore implements IMetadataStore {
       };
       try {
         await this.withTx(async (session) => {
+          const owner = await this.col("meta_users").findOne(
+            { user_id: input.owner_user_id, status: "active" }, { session },
+          );
+          if (!owner) throw new Error("active_owner_user_required");
+          await this.col("meta_users").updateOne(
+            { user_id: input.owner_user_id }, { $set: { updated_at: now } }, { session },
+          );
           await this.col("meta_teams").insertOne({ ...team }, { session });
           await this.col("meta_team_members").insertOne(
             {
@@ -756,6 +852,377 @@ export class MongoMetadataStore implements IMetadataStore {
     return result;
   }
 
+  private async buildTeamDeletePreview(teamId: string, session?: ClientSession): Promise<TeamDeletePreview | null> {
+    const team = await this.col<TeamEntity>("meta_teams").findOne(
+      { team_id: teamId } as Document,
+      { ...PROJECT_NO_ID, session },
+    ) as TeamEntity | null;
+    if (!team) return null;
+    const activeMembers = await this.col("meta_team_members").countDocuments({ team_id: teamId, status: "active" }, { session });
+    const agents = await this.col("meta_agents").countDocuments({ team_id: teamId }, { session });
+    const tasks = await this.col("meta_tasks").countDocuments({ team_id: teamId }, { session });
+    const assets = await this.col("meta_assets").countDocuments({ team_id: teamId }, { session });
+    const assetRows = await this.col("meta_assets").aggregate([
+      { $match: { team_id: teamId } },
+      { $group: { _id: "$asset_type", c: { $sum: 1 } } },
+    ], { session }).toArray();
+    const taskAgents = await this.col("meta_task_agents").aggregate([
+      { $lookup: { from: "meta_tasks", localField: "task_id", foreignField: "task_id", as: "task" } },
+      { $match: { "task.team_id": teamId, status: "active" } },
+      { $count: "c" },
+    ], { session }).toArray();
+    const fixedAssets = await this.col("meta_agent_fixed_assets").aggregate([
+      { $lookup: { from: "meta_agents", localField: "agent_id", foreignField: "agent_id", as: "agent" } },
+      { $match: { "agent.team_id": teamId } },
+      { $count: "c" },
+    ], { session }).toArray();
+    const acls = await this.col("meta_asset_acl").aggregate([
+      { $lookup: { from: "meta_assets", localField: "asset_id", foreignField: "asset_id", as: "asset" } },
+      { $match: { "asset.team_id": teamId } },
+      { $count: "c" },
+    ], { session }).toArray();
+    const operations = await this.col("meta_lifecycle_operations").countDocuments({
+      team_id: teamId, status: { $nin: ["succeeded", "failed", "resolved"] },
+    }, { session });
+    const findings = await this.col("meta_integrity_findings").countDocuments({
+      team_id: teamId, status: "open", category: { $in: ["operational_orphan", "inconsistent"] },
+    }, { session });
+    const counts: UserOwnedResourceCounts = { teams: 1, agents, tasks, assets };
+    const assetCounts: UserOwnedAssetCounts = { skill: 0, llm_wiki: 0, code_graph: 0, chat_memory: 0, other: 0 };
+    for (const row of assetRows) {
+      const key = String(row._id);
+      if (key in assetCounts) assetCounts[key as keyof UserOwnedAssetCounts] = Number(row.c);
+      else assetCounts.other += Number(row.c);
+    }
+    const activeAssociations = Number(taskAgents[0]?.c ?? 0) + Number(fixedAssets[0]?.c ?? 0)
+      + Number(acls[0]?.c ?? 0) + operations + findings;
+    const fingerprint = JSON.stringify({
+      team_id: team.team_id, updated_at: team.updated_at, active_members: activeMembers,
+      counts, asset_counts: assetCounts, active_associations: activeAssociations,
+    });
+    return {
+      team_id: team.team_id,
+      team_name: team.name,
+      revision: createHash("sha256").update(fingerprint).digest("hex"),
+      active_members: activeMembers,
+      counts,
+      asset_counts: assetCounts,
+      active_associations: activeAssociations,
+      ready: activeMembers === 1 && agents === 0 && tasks === 0 && assets === 0 && activeAssociations === 0,
+    };
+  }
+
+  async getTeamDeletePreview(teamId: string): Promise<TeamDeletePreview | null> {
+    return this.buildTeamDeletePreview(teamId);
+  }
+
+  async deleteEmptyTeam(teamId: string, ownerUserId: string, revision: string): Promise<boolean> {
+    if (!this.useTransactions) throw new LifecycleTransactionsRequiredError();
+    return this.withTx(async (session) => {
+      const team = await this.col<TeamEntity>("meta_teams").findOne(
+        { team_id: teamId, owner_user_id: ownerUserId } as Document,
+        { ...PROJECT_NO_ID, session },
+      );
+      if (!team) return false;
+      const preview = await this.buildTeamDeletePreview(teamId, session);
+      if (!preview || !preview.ready || preview.revision !== revision) return false;
+      await this.col("meta_team_members").deleteOne({ team_id: teamId, user_id: ownerUserId }, { session });
+      const deleted = await this.col("meta_teams").deleteOne({ team_id: teamId, owner_user_id: ownerUserId }, { session });
+      return deleted.deletedCount === 1;
+    });
+  }
+
+  async prepareOwnershipTransfer(input: OwnershipTransferInput): Promise<{ operation_id: string; status: string }> {
+    if (!this.useTransactions) throw new LifecycleTransactionsRequiredError();
+    return this.withTx(async (session) => {
+      const existing = await this.col("meta_lifecycle_operations").findOne({
+        idempotency_key: input.idempotency_key,
+        resource_type: input.resource_type,
+        resource_id: input.resource_id,
+      }, { session });
+      if (existing) {
+        if (existing.team_id !== input.team_id || existing.from_owner_user_id !== input.from_user_id
+          || existing.to_owner_user_id !== input.to_user_id) throw new Error("idempotency_key_conflict");
+        return { operation_id: String(existing.operation_id), status: String(existing.status) };
+      }
+      const target = await this.col("meta_team_members").findOne({
+        team_id: input.team_id, user_id: input.to_user_id, status: "active",
+      }, { session });
+      const user = await this.col("meta_users").findOne({ user_id: input.to_user_id, status: "active" }, { session });
+      const collection = input.resource_type === "team" ? "meta_teams"
+        : input.resource_type === "agent" ? "meta_agents"
+          : input.resource_type === "task" ? "meta_tasks" : "meta_assets";
+      const idColumn = `${input.resource_type}_id`;
+      const current = await this.col(collection).findOne({
+        [idColumn]: input.resource_id, team_id: input.team_id,
+      }, { session });
+      if (!target || !user) throw new Error("target_not_active_member");
+      if (!current) throw new Error("resource_not_found");
+      if (current.owner_user_id !== input.from_user_id) throw new Error("not_resource_owner");
+      const operationId = generateRelationId();
+      const now = nowIso();
+      await this.col("meta_lifecycle_operations").insertOne({
+        operation_id: operationId, idempotency_key: input.idempotency_key,
+        actor_user_id: input.from_user_id, team_id: input.team_id,
+        resource_type: input.resource_type, resource_id: input.resource_id,
+        from_owner_user_id: input.from_user_id, to_owner_user_id: input.to_user_id,
+        status: "pending", result_json: "{}", error_code: null,
+        created_at: now, updated_at: now,
+      }, { session });
+      await this.col("meta_teams").updateOne({ team_id: input.team_id }, { $set: { updated_at: now } }, { session });
+      return { operation_id: operationId, status: "pending" };
+    });
+  }
+
+  async resolveOwnershipTransfer(input: Pick<OwnershipTransferInput, "team_id" | "resource_type" | "resource_id" | "idempotency_key"> & {
+    status: "failed" | "inconsistent_retryable"; error_code: string;
+  }): Promise<void> {
+    if (!this.useTransactions) throw new LifecycleTransactionsRequiredError();
+    await this.withTx(async (session) => {
+      const now = nowIso();
+      await this.col("meta_lifecycle_operations").updateOne({
+        idempotency_key: input.idempotency_key, resource_type: input.resource_type,
+        resource_id: input.resource_id, team_id: input.team_id, status: { $ne: "succeeded" },
+      }, { $set: { status: input.status, error_code: input.error_code, updated_at: now } }, { session });
+      await this.col("meta_teams").updateOne({ team_id: input.team_id }, { $set: { updated_at: now } }, { session });
+    });
+  }
+
+  async transferOwnership(input: OwnershipTransferInput): Promise<OwnershipTransferResult> {
+    if (!this.useTransactions) throw new LifecycleTransactionsRequiredError();
+    return this.withTx(async (session) => {
+      const operation = await this.col("meta_lifecycle_operations").findOne({
+        idempotency_key: input.idempotency_key,
+        resource_type: input.resource_type,
+        resource_id: input.resource_id,
+      }, { session });
+      if (operation?.status === "succeeded" && operation.result_json) {
+        return JSON.parse(String(operation.result_json)) as OwnershipTransferResult;
+      }
+      const fail = (reason: string): OwnershipTransferResult => ({
+        resource_type: input.resource_type, resource_id: input.resource_id,
+        transferred: false, implicit_asset_ids: [], removed_binding_ids: [], reason,
+      });
+      const target = await this.col<TeamMemberEntity>("meta_team_members").findOne(
+        { team_id: input.team_id, user_id: input.to_user_id, status: "active" } as Document,
+        { ...PROJECT_NO_ID, session },
+      );
+      const user = await this.col<UserEntity>("meta_users").findOne(
+        { user_id: input.to_user_id, status: "active" } as Document,
+        { ...PROJECT_NO_ID, session },
+      );
+      if (!target || !user) return fail("target_not_active_member");
+      if (input.resource_type === "team" && target.role !== "admin") return fail("team_owner_target_must_be_admin");
+      const collection = input.resource_type === "team" ? "meta_teams"
+        : input.resource_type === "agent" ? "meta_agents"
+          : input.resource_type === "task" ? "meta_tasks" : "meta_assets";
+      const idColumn = `${input.resource_type}_id`;
+      const current = await this.col(collection).findOne(
+        { [idColumn]: input.resource_id, team_id: input.team_id } as Document,
+        { projection: { _id: 0, team_id: 1, owner_user_id: 1 }, session },
+      );
+      if (!current) return fail("resource_not_found");
+      if (current.owner_user_id !== input.from_user_id) return fail("not_resource_owner");
+
+      const implicitAssetIds: string[] = [];
+      const removedBindingIds: string[] = [];
+      if (input.resource_type === "agent") {
+        const bindings = await this.col<FixedAssetBindingEntity>("meta_agent_fixed_assets").find(
+          { agent_id: input.resource_id } as Document, { ...PROJECT_NO_ID, session },
+        ).toArray();
+        const assetIds = bindings.map((binding) => binding.asset_id);
+        const assets = await this.col<AssetEntity>("meta_assets").find(
+          { asset_id: { $in: assetIds } } as Document, { ...PROJECT_NO_ID, session },
+        ).toArray();
+        const memoryId = buildChatMemoryAssetId(input.team_id, input.resource_id);
+        implicitAssetIds.push(memoryId, ...assets
+          .filter((asset) => asset.asset_type === "skill" && asset.owner_user_id === input.from_user_id)
+          .map((asset) => asset.asset_id));
+        await this.col("meta_assets").updateMany(
+          { asset_id: { $in: implicitAssetIds }, owner_user_id: input.from_user_id } as Document,
+          { $set: { owner_user_id: input.to_user_id, updated_at: nowIso() } },
+          { session },
+        );
+        const invalidAssetIds = assets
+          .filter((asset) => asset.visibility === "private" && asset.owner_user_id !== input.to_user_id
+            && !implicitAssetIds.includes(asset.asset_id))
+          .map((asset) => asset.asset_id);
+        removedBindingIds.push(...bindings
+          .filter((binding) => invalidAssetIds.includes(binding.asset_id))
+          .map((binding) => binding.id));
+        if (removedBindingIds.length) {
+          await this.col("meta_agent_fixed_assets").deleteMany({ id: { $in: removedBindingIds } }, { session });
+        }
+      }
+      await this.col("meta_teams").updateOne(
+        { team_id: input.team_id },
+        { $set: { updated_at: nowIso() } },
+        { session },
+      );
+      await this.col(collection).updateOne(
+        { [idColumn]: input.resource_id, owner_user_id: input.from_user_id } as Document,
+        { $set: { owner_user_id: input.to_user_id, updated_at: nowIso() } },
+        { session },
+      );
+      const result: OwnershipTransferResult = {
+        resource_type: input.resource_type, resource_id: input.resource_id, transferred: true,
+        implicit_asset_ids: implicitAssetIds, removed_binding_ids: removedBindingIds,
+      };
+      if (operation) {
+        await this.col("meta_lifecycle_operations").updateOne(
+          { operation_id: operation.operation_id },
+          { $set: { status: "succeeded", result_json: JSON.stringify(result), error_code: null, updated_at: nowIso() } },
+          { session },
+        );
+      } else {
+        await this.col("meta_lifecycle_operations").insertOne({
+          operation_id: generateRelationId(), idempotency_key: input.idempotency_key,
+          actor_user_id: input.from_user_id, team_id: input.team_id,
+          resource_type: input.resource_type, resource_id: input.resource_id,
+          from_owner_user_id: input.from_user_id, to_owner_user_id: input.to_user_id,
+          status: "succeeded", result_json: JSON.stringify(result), error_code: null,
+          created_at: nowIso(), updated_at: nowIso(),
+        }, { session });
+      }
+      return result;
+    });
+  }
+
+  async scanIntegrityFindings(): Promise<IntegrityFinding[]> {
+    const [users, teams, members, agents, tasks, assets, taskAgents, fixedAssets, acls, participation] = await Promise.all([
+      this.col<UserEntity>("meta_users").find({}, PROJECT_NO_ID).toArray(),
+      this.col<TeamEntity>("meta_teams").find({}, PROJECT_NO_ID).toArray(),
+      this.col<TeamMemberEntity>("meta_team_members").find({}, PROJECT_NO_ID).toArray(),
+      this.col<AgentEntity>("meta_agents").find({}, PROJECT_NO_ID).toArray(),
+      this.col<TaskEntity>("meta_tasks").find({}, PROJECT_NO_ID).toArray(),
+      this.col<AssetEntity>("meta_assets").find({}, PROJECT_NO_ID).toArray(),
+      this.col<TaskAgentEntity>("meta_task_agents").find({}, PROJECT_NO_ID).toArray(),
+      this.col<FixedAssetBindingEntity>("meta_agent_fixed_assets").find({}, PROJECT_NO_ID).toArray(),
+      this.col<AclEntity>("meta_asset_acl").find({}, PROJECT_NO_ID).toArray(),
+      this.col<ParticipationLogEntity>("meta_participation_logs").find({}, PROJECT_NO_ID).toArray(),
+    ]);
+    const userIds = new Set(users.map((item) => item.user_id));
+    const teamById = new Map(teams.map((item) => [item.team_id, item]));
+    const memberByKey = new Map(members.map((item) => [`${item.team_id}:${item.user_id}`, item]));
+    const agentById = new Map(agents.map((item) => [item.agent_id, item]));
+    const taskById = new Map(tasks.map((item) => [item.task_id, item]));
+    const assetById = new Map(assets.map((item) => [item.asset_id, item]));
+    const now = nowIso();
+    const rows: Array<Omit<IntegrityFinding, "finding_id" | "fingerprint" | "first_seen_at" | "last_seen_at">> = [];
+    const owned = [
+      ...agents.map((item) => ({ type: "agent", id: item.agent_id, team: item.team_id, owner: item.owner_user_id })),
+      ...tasks.map((item) => ({ type: "task", id: item.task_id, team: item.team_id, owner: item.owner_user_id })),
+      ...assets.map((item) => ({ type: item.asset_type, id: item.asset_id, team: item.team_id, owner: item.owner_user_id })),
+    ];
+    for (const item of owned) {
+      const teamExists = teamById.has(item.team);
+      const userExists = userIds.has(item.owner);
+      const membership = memberByKey.get(`${item.team}:${item.owner}`);
+      if (teamExists && userExists && membership?.status === "active") continue;
+      rows.push({
+        category: teamExists && userExists ? "recoverable_dependency" : "operational_orphan",
+        source_service: "MemoryCore", resource_type: item.type, resource_id: item.id,
+        team_id: item.team, owner_user_id: item.owner,
+        reason: !teamExists ? "missing_team" : !userExists ? "missing_owner_user" : "owner_membership_absent",
+        allowed_actions: ["inspect"],
+      });
+    }
+    for (const team of teams) {
+      const ownerMember = memberByKey.get(`${team.team_id}:${team.owner_user_id}`);
+      if (!userIds.has(team.owner_user_id) || ownerMember?.status !== "active" || ownerMember.role !== "admin") {
+        rows.push({
+          category: "inconsistent", source_service: "MemoryCore", resource_type: "team",
+          resource_id: team.team_id, team_id: team.team_id, owner_user_id: team.owner_user_id,
+          reason: "invalid_team_owner_membership", allowed_actions: ["inspect"],
+        });
+      }
+    }
+    for (const relation of taskAgents) {
+      if (!taskById.has(relation.task_id) || !agentById.has(relation.agent_id)) rows.push({
+        category: "operational_orphan", source_service: "MemoryCore", resource_type: "task_agent_relation",
+        resource_id: relation.id, team_id: taskById.get(relation.task_id)?.team_id ?? agentById.get(relation.agent_id)?.team_id ?? null,
+        owner_user_id: null, reason: "dangling_task_or_agent", allowed_actions: ["inspect", "purge"],
+      });
+    }
+    for (const relation of fixedAssets) {
+      if (!agentById.has(relation.agent_id) || !assetById.has(relation.asset_id)) rows.push({
+        category: "operational_orphan", source_service: "MemoryCore", resource_type: "fixed_asset_relation",
+        resource_id: relation.id, team_id: agentById.get(relation.agent_id)?.team_id ?? assetById.get(relation.asset_id)?.team_id ?? null,
+        owner_user_id: null, reason: "dangling_agent_or_asset", allowed_actions: ["inspect", "purge"],
+      });
+    }
+    for (const relation of acls) {
+      if (!assetById.has(relation.asset_id)) rows.push({
+        category: "operational_orphan", source_service: "MemoryCore", resource_type: "acl_relation",
+        resource_id: relation.id, team_id: null, owner_user_id: null,
+        reason: "dangling_asset_acl", allowed_actions: ["inspect", "purge"],
+      });
+    }
+    for (const log of participation) {
+      if (!teamById.has(log.team_id) || !taskById.has(log.task_id) || !agentById.has(log.agent_id)) rows.push({
+        category: "retained_history", source_service: "MemoryCore", resource_type: "participation_history",
+        resource_id: log.id, team_id: log.team_id, owner_user_id: log.user_id,
+        reason: "historical_reference_without_live_parent", allowed_actions: ["inspect"],
+      });
+    }
+    const findings: IntegrityFinding[] = rows.map((row) => {
+      const fingerprint = createHash("sha256").update(JSON.stringify(row)).digest("hex");
+      return { ...row, finding_id: `finding-${fingerprint.slice(0, 20)}`, fingerprint, first_seen_at: now, last_seen_at: now };
+    });
+    const currentFingerprints = findings.map((finding) => finding.fingerprint);
+    await this.col("meta_integrity_findings").updateMany(
+      {
+        status: "open",
+        ...(currentFingerprints.length > 0 ? { fingerprint: { $nin: currentFingerprints } } : {}),
+      },
+      { $set: { status: "resolved", last_seen_at: now } },
+    );
+    if (findings.length) {
+      await this.col("meta_integrity_findings").bulkWrite(findings.map((finding) => ({
+        updateOne: {
+          filter: { fingerprint: finding.fingerprint },
+          update: {
+            $set: { ...finding, status: "open", last_seen_at: now },
+            $setOnInsert: { first_seen_at: now },
+          },
+          upsert: true,
+        },
+      })));
+    }
+    return findings;
+  }
+
+  async purgeIntegrityFindings(findings: Array<{ finding_id: string; fingerprint: string }>): Promise<{
+    deleted: string[]; failed: Array<{ finding_id: string; reason: string }>;
+  }> {
+    if (!this.useTransactions) throw new LifecycleTransactionsRequiredError();
+    const current = new Map((await this.scanIntegrityFindings()).map((item) => [item.finding_id, item]));
+    return this.withTx(async (session) => {
+      const deleted: string[] = [];
+      const failed: Array<{ finding_id: string; reason: string }> = [];
+      for (const requested of findings) {
+        const item = current.get(requested.finding_id);
+        if (!item || item.fingerprint !== requested.fingerprint) {
+          failed.push({ finding_id: requested.finding_id, reason: "stale_integrity_scan" });
+          continue;
+        }
+        const collection = item.resource_type === "task_agent_relation" ? "meta_task_agents"
+          : item.resource_type === "fixed_asset_relation" ? "meta_agent_fixed_assets"
+            : item.resource_type === "acl_relation" ? "meta_asset_acl" : null;
+        if (!collection || !item.allowed_actions.includes("purge")) {
+          failed.push({ finding_id: requested.finding_id, reason: "finding_not_purgable" });
+          continue;
+        }
+        await this.col(collection).deleteOne({ id: item.resource_id }, { session });
+        await this.col("meta_integrity_findings").updateOne(
+          { finding_id: item.finding_id }, { $set: { status: "resolved", last_seen_at: nowIso() } }, { session },
+        );
+        deleted.push(item.finding_id);
+      }
+      return { deleted, failed };
+    });
+  }
+
   async listTeamsByUser(userId: string, pagination?: PaginationParams | null, filter?: { name?: string }): Promise<ListPage<TeamEntity>> {
     const joinedMatch: Document = {};
     if (filter?.name) joinedMatch.name = filter.name;
@@ -775,22 +1242,94 @@ export class MongoMetadataStore implements IMetadataStore {
   // TeamMember
   // ============================================================
   async addTeamMember(input: AddTeamMemberInput): Promise<TeamMemberEntity> {
+    if (!this.useTransactions) throw new LifecycleTransactionsRequiredError();
     const now = nowIso();
-    await runWithGeneratedRelationId(input.id, isMongoRelationIdCollision, async (id) => {
-      await this.col("meta_team_members").updateOne(
-        { team_id: input.team_id, user_id: input.user_id },
-        {
-          $set: { role: input.role ?? "member", status: input.status ?? "active" },
-          $setOnInsert: { id, team_id: input.team_id, user_id: input.user_id, joined_at: now },
-        },
-        { upsert: true },
-      );
+    await this.withTx(async (session) => {
+      const team = await this.col("meta_teams").findOne({ team_id: input.team_id }, { session });
+      const user = await this.col("meta_users").findOne({ user_id: input.user_id, status: "active" }, { session });
+      if (!team || !user) throw new Error("active_team_and_user_required");
+      await runWithGeneratedRelationId(input.id, isMongoRelationIdCollision, async (id) => {
+        await this.col("meta_team_members").updateOne(
+          { team_id: input.team_id, user_id: input.user_id },
+          {
+            $set: { role: input.role ?? "member", status: "active" },
+            $setOnInsert: { id, team_id: input.team_id, user_id: input.user_id, joined_at: now },
+          },
+          { upsert: true, session },
+        );
+      });
+      await this.col("meta_teams").updateOne({ team_id: input.team_id }, { $set: { updated_at: now } }, { session });
     });
     return (await this.getTeamMember(input.team_id, input.user_id))!;
   }
 
   async removeTeamMember(teamId: string, userId: string): Promise<void> {
     await this.col("meta_team_members").deleteOne({ team_id: teamId, user_id: userId });
+  }
+
+  async updateTeamMemberRole(teamId: string, userId: string, role: TeamMemberEntity["role"]): Promise<TeamMemberEntity | null> {
+    if (!this.useTransactions) throw new LifecycleTransactionsRequiredError();
+    await this.withTx(async (session) => {
+      await this.col("meta_team_members").updateOne(
+        { team_id: teamId, user_id: userId, status: "active" }, { $set: { role } }, { session },
+      );
+      await this.col("meta_teams").updateOne({ team_id: teamId }, { $set: { updated_at: nowIso() } }, { session });
+    });
+    return this.getTeamMember(teamId, userId);
+  }
+
+  async removeTeamMemberSafely(teamId: string, userId: string): Promise<MemberRemovalResult> {
+    if (!this.useTransactions) throw new LifecycleTransactionsRequiredError();
+    return this.withTx(async (session) => {
+      const q = { owner_user_id: userId, team_id: teamId };
+      const agents = await this.col("meta_agents").countDocuments(q, { session });
+      const tasks = await this.col("meta_tasks").countDocuments(q, { session });
+      const assets = await this.col("meta_assets").countDocuments(q, { session });
+      const assetRows = await this.col("meta_assets").aggregate([
+        { $match: q }, { $group: { _id: "$asset_type", c: { $sum: 1 } } },
+      ], { session }).toArray();
+      const acls = await this.col("meta_asset_acl").aggregate([
+        { $lookup: { from: "meta_assets", localField: "asset_id", foreignField: "asset_id", as: "asset" } },
+        { $match: { "asset.team_id": teamId, subject_type: "user", subject_id: userId } },
+        { $count: "c" },
+      ], { session }).toArray();
+      const operations = await this.col("meta_lifecycle_operations").countDocuments({
+        team_id: teamId,
+        $or: [{ from_owner_user_id: userId }, { to_owner_user_id: userId }],
+        status: { $nin: ["succeeded", "failed", "resolved"] },
+      }, { session });
+      const findings = await this.col("meta_integrity_findings").countDocuments({
+        team_id: teamId,
+        owner_user_id: userId,
+        status: "open",
+        category: { $in: ["operational_orphan", "inconsistent"] },
+      }, { session });
+      const counts: UserOwnedResourceCounts = { teams: 0, agents, tasks, assets };
+      const assetCounts: UserOwnedAssetCounts = { skill: 0, llm_wiki: 0, code_graph: 0, chat_memory: 0, other: 0 };
+      for (const row of assetRows) {
+        const key = String(row._id);
+        if (key in assetCounts) assetCounts[key as keyof UserOwnedAssetCounts] = Number(row.c);
+        else assetCounts.other += Number(row.c);
+      }
+      const aclCount = Number(acls[0]?.c ?? 0);
+      const activeAssociations = aclCount + findings;
+      if (agents || tasks || assets) {
+        return { removed: false, counts, asset_counts: assetCounts, active_associations: activeAssociations, blocker_code: "member_has_owned_resources" };
+      }
+      if (operations) return { removed: false, counts, asset_counts: assetCounts, active_associations: activeAssociations, blocker_code: "lifecycle_operation_in_progress" };
+      if (findings) return { removed: false, counts, asset_counts: assetCounts, active_associations: activeAssociations, blocker_code: "member_has_active_associations" };
+      if (aclCount) {
+        const teamAssetIds = await this.col("meta_assets").find(
+          { team_id: teamId }, { projection: { asset_id: 1 }, session },
+        ).map((row) => String(row.asset_id)).toArray();
+        await this.col("meta_asset_acl").deleteMany(
+          { asset_id: { $in: teamAssetIds }, subject_type: "user", subject_id: userId }, { session },
+        );
+      }
+      await this.col("meta_teams").updateOne({ team_id: teamId }, { $set: { updated_at: nowIso() } }, { session });
+      await this.col("meta_team_members").deleteOne({ team_id: teamId, user_id: userId }, { session });
+      return { removed: true, counts, asset_counts: assetCounts, active_associations: aclCount };
+    });
   }
 
   async listTeamMembers(teamId: string, pagination?: PaginationParams | null): Promise<ListPage<TeamMemberEntity>> {
@@ -848,6 +1387,7 @@ export class MongoMetadataStore implements IMetadataStore {
   // Agent
   // ============================================================
   async createAgent(input: CreateAgentInput): Promise<AgentEntity> {
+    if (!this.useTransactions) throw new LifecycleTransactionsRequiredError();
     const now = nowIso();
     for (let attempt = 0; attempt < PK_RETRY_LIMIT; attempt++) {
       const agent: AgentEntity = {
@@ -864,7 +1404,16 @@ export class MongoMetadataStore implements IMetadataStore {
         metadata_json: input.metadata_json ?? "{}",
       };
       try {
-        await this.col("meta_agents").insertOne({ ...agent });
+        await this.withTx(async (session) => {
+          const team = await this.col("meta_teams").findOne({ team_id: input.team_id }, { session });
+          const member = await this.col("meta_team_members").findOne(
+            { team_id: input.team_id, user_id: input.owner_user_id, status: "active" }, { session },
+          );
+          const user = await this.col("meta_users").findOne({ user_id: input.owner_user_id, status: "active" }, { session });
+          if (!team || !member || !user) throw new Error("active_team_membership_required");
+          await this.col("meta_teams").updateOne({ team_id: input.team_id }, { $set: { updated_at: now } }, { session });
+          await this.col("meta_agents").insertOne({ ...agent }, { session });
+        });
         return agent;
       } catch (err) {
         if (isPkCollision(err) && !input.agent_id) continue;
@@ -924,11 +1473,13 @@ export class MongoMetadataStore implements IMetadataStore {
   // Task
   // ============================================================
   async createTask(input: CreateTaskInput): Promise<TaskEntity> {
+    if (!this.useTransactions) throw new LifecycleTransactionsRequiredError();
     const now = nowIso();
     for (let attempt = 0; attempt < PK_RETRY_LIMIT; attempt++) {
       const task: TaskEntity = {
         task_id: input.task_id ?? generateId(ID_PREFIX.task),
         team_id: input.team_id,
+        owner_user_id: input.owner_user_id ?? input.creator_user_id,
         creator_user_id: input.creator_user_id,
         title: input.title,
         description: input.description ?? null,
@@ -943,6 +1494,14 @@ export class MongoMetadataStore implements IMetadataStore {
       };
       try {
         await this.withTx(async (session) => {
+          const ownerId = input.owner_user_id ?? input.creator_user_id;
+          const team = await this.col("meta_teams").findOne({ team_id: input.team_id }, { session });
+          const member = await this.col("meta_team_members").findOne(
+            { team_id: input.team_id, user_id: ownerId, status: "active" }, { session },
+          );
+          const user = await this.col("meta_users").findOne({ user_id: ownerId, status: "active" }, { session });
+          if (!team || !member || !user) throw new Error("active_team_membership_required");
+          await this.col("meta_teams").updateOne({ team_id: input.team_id }, { $set: { updated_at: now } }, { session });
           await this.col("meta_tasks").insertOne({ ...task }, { session });
           const links = input.linked_agents ?? [];
           if (links.length > 0) {
@@ -989,7 +1548,7 @@ export class MongoMetadataStore implements IMetadataStore {
   async listTasksByTeam(teamId: string, pagination?: PaginationParams | null, filter?: TaskFilter): Promise<ListPage<TaskEntity>> {
     const q: Document = { team_id: teamId };
     if (filter?.status) q.status = filter.status;
-    if (filter?.creator_user_id) q.creator_user_id = filter.creator_user_id;
+    if (filter?.creator_user_id) q.owner_user_id = filter.creator_user_id;
     if (filter?.title) q.title = filter.title;
     return this.paginatedFind("meta_tasks", q, pagination, { created_at: -1 }, (d) => d as TaskEntity);
   }
@@ -997,7 +1556,7 @@ export class MongoMetadataStore implements IMetadataStore {
   async listTasks(filter: TaskFilter, pagination?: PaginationParams | null): Promise<ListPage<TaskEntity>> {
     const q: Document = {};
     if (filter.status) q.status = filter.status;
-    if (filter.creator_user_id) q.creator_user_id = filter.creator_user_id;
+    if (filter.creator_user_id) q.owner_user_id = filter.creator_user_id;
     if (filter.title) q.title = filter.title;
     return this.paginatedFind("meta_tasks", q, pagination, { created_at: -1 }, (d) => d as TaskEntity);
   }
@@ -1110,6 +1669,7 @@ export class MongoMetadataStore implements IMetadataStore {
   // Asset
   // ============================================================
   async createAsset(input: CreateAssetInput): Promise<AssetEntity> {
+    if (!this.useTransactions) throw new LifecycleTransactionsRequiredError();
     const now = nowIso();
     const asset: AssetEntity = {
       asset_id: input.asset_id,
@@ -1132,7 +1692,16 @@ export class MongoMetadataStore implements IMetadataStore {
       updated_at: now,
       metadata_json: input.metadata_json ?? "{}",
     };
-    await this.col("meta_assets").insertOne({ ...asset });
+    await this.withTx(async (session) => {
+      const team = await this.col("meta_teams").findOne({ team_id: input.team_id }, { session });
+      const member = await this.col("meta_team_members").findOne(
+        { team_id: input.team_id, user_id: input.owner_user_id, status: "active" }, { session },
+      );
+      const user = await this.col("meta_users").findOne({ user_id: input.owner_user_id, status: "active" }, { session });
+      if (!team || !member || !user) throw new Error("active_team_membership_required");
+      await this.col("meta_teams").updateOne({ team_id: input.team_id }, { $set: { updated_at: now } }, { session });
+      await this.col("meta_assets").insertOne({ ...asset }, { session });
+    });
     return asset;
   }
 

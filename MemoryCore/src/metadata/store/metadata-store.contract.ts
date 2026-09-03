@@ -262,6 +262,7 @@ export function runMetadataStoreContract(
         const u1 = await store.createUser(uniqueUserInput());
         const u2 = await store.createUser(uniqueUserInput());
         const team = await store.createTeam(teamInput(u1.user_id));
+        await store.addTeamMember({ team_id: team.team_id, user_id: u2.user_id, role: "member", status: "active" });
         const a1 = await store.createAgent({ team_id: team.team_id, owner_user_id: u1.user_id, name: "A1" });
         const a2 = await store.createAgent({ team_id: team.team_id, owner_user_id: u2.user_id, name: "A2" });
 
@@ -331,6 +332,7 @@ export function runMetadataStoreContract(
         const other = await store.createUser(uniqueUserInput());
         const team1 = await store.createTeam(teamInput(owner.user_id));
         const team2 = await store.createTeam({ name: "T2", owner_user_id: owner.user_id });
+        await store.addTeamMember({ team_id: team1.team_id, user_id: other.user_id, role: "member", status: "active" });
         const t1 = await store.createTask({ team_id: team1.team_id, creator_user_id: owner.user_id, title: "A" });
         const t2 = await store.createTask({ team_id: team2.team_id, creator_user_id: owner.user_id, title: "B" });
         await store.createTask({ team_id: team1.team_id, creator_user_id: other.user_id, title: "C" });

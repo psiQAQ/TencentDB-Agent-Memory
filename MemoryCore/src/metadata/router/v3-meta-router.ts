@@ -138,7 +138,9 @@ const routeTable: Record<string, Handler> = {
     const { team_id, ...patch } = d;
     return s.updateTeamForCaller(team_id, patch, c);
   }),
-  [`${V3_PREFIX}/team/delete`]: bind(S.teamDeleteSchema, (d, c, s) => s.deleteTeamsForCaller(d.team_ids, c)),
+  [`${V3_PREFIX}/team/delete-preview`]: bind(S.teamDeletePreviewSchema, (d, c, s) =>
+    s.previewTeamDeleteForCaller(d.team_id, c)),
+  [`${V3_PREFIX}/team/delete`]: bind(S.teamDeleteSchema, (d, c, s) => s.deleteTeamForCaller(d, c)),
   [`${V3_PREFIX}/team/list`]: bind(S.teamListSchema, async (d, c, s) => {
     const userId = await resolveUserId(s, d);
     const filter = d.name ? { name: d.name } : undefined;
@@ -155,11 +157,23 @@ const routeTable: Record<string, Handler> = {
     await s.removeTeamMemberForCaller(d.team_id, d.user_id, c);
     return OK;
   }),
+  [`${V3_PREFIX}/team-member/update-role`]: bind(S.teamMemberUpdateRoleSchema, (d, c, s) =>
+    s.updateTeamMemberRoleForCaller(d.team_id, d.user_id, d.role, c)),
+  [`${V3_PREFIX}/team-member/leave`]: bind(S.teamMemberLeaveSchema, async (d, c, s) => {
+    await s.leaveTeamForCaller(d.team_id, c);
+    return OK;
+  }),
   [`${V3_PREFIX}/team-member/list`]: bind(S.teamMemberListSchema, (d, c, s) =>
     s.listTeamMembersForCaller(d.team_id, c, resolvePagination(d)),
   ),
   [`${V3_PREFIX}/team-member/get`]: bind(S.teamMemberGetSchema, async (d, c, s) =>
     s.getTeamMemberForCaller(d.team_id, d.user_id, c)),
+  [`${V3_PREFIX}/ownership/transfer`]: bind(S.ownershipTransferSchema, (d, c, s) =>
+    s.transferOwnershipForCaller(d, c)),
+  [`${V3_PREFIX}/integrity/scan`]: bind(S.integrityScanSchema, (_d, c, s) =>
+    s.scanIntegrityForCaller(c)),
+  [`${V3_PREFIX}/integrity/purge`]: bind(S.integrityPurgeSchema, (d, c, s) =>
+    s.purgeIntegrityForCaller(d.findings, c)),
 
   // Agent
   [`${V3_PREFIX}/agent/create`]: bind(S.agentCreateSchema, (d, c, s) => s.createAgentForCaller(d, c)),
@@ -337,8 +351,18 @@ function mapErrorCode(code: string): number {
     case "last_system_admin":
     case "user_has_owned_resources":
     case "member_has_owned_resources":
+    case "member_has_active_associations":
+    case "lifecycle_operation_in_progress":
+    case "team_owner_transfer_required":
+    case "team_not_ready_for_deletion":
+    case "team_name_confirmation_mismatch":
+    case "managed_resource_requires_lifecycle":
+    case "target_not_active_member":
+    case "team_owner_target_must_be_admin":
     case "member_already_exists":
       return 409;
+    case "lifecycle_transactions_required":
+      return 503;
     case "invalid_credentials":
     case "invalid_password":
       return 401;

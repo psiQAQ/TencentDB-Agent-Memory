@@ -129,7 +129,7 @@ export function buildIsolationWhere(
     params.push(filter.teamId);
   }
   if (filter.userId !== undefined) {
-    parts.push(`${tablePrefix}user_id = ?`);
+    parts.push(`${tablePrefix}owner_user_id = ?`);
     params.push(filter.userId);
   }
   if (filter.agentId !== undefined) {
@@ -157,12 +157,12 @@ export function buildIsolationWhere(
  * store cannot push the filter down (e.g. older TCVDB collection).
  */
 export function rowMatchesIsolation(
-  row: { team_id?: string; user_id?: string; agent_id?: string; session_id?: string; task_id?: string; session_key?: string },
+  row: { team_id?: string; user_id?: string; owner_user_id?: string; agent_id?: string; session_id?: string; task_id?: string; session_key?: string },
   filter: IsolationFilter | undefined,
 ): boolean {
   if (!filter) return true;
   if (filter.teamId !== undefined && row.team_id !== filter.teamId) return false;
-  if (filter.userId !== undefined && row.user_id !== filter.userId) return false;
+  if (filter.userId !== undefined && (row.owner_user_id ?? row.user_id) !== filter.userId) return false;
   if (filter.agentId !== undefined && row.agent_id !== filter.agentId) return false;
   if (filter.sessionId !== undefined && row.session_id !== filter.sessionId) return false;
   if (filter.taskId !== undefined && row.task_id !== filter.taskId) return false;

@@ -12,7 +12,11 @@
  * 不感知具体后端（SQLite / MongoDB），保证存储可切换。
  */
 
-import { DuplicateUserKeyError, type IMetadataStore } from "../store/interface.js";
+import {
+  DuplicateUserKeyError,
+  LifecycleTransactionsRequiredError,
+  type IMetadataStore,
+} from "../store/interface.js";
 import {
   checkPermission,
   canBindAsset,
@@ -81,6 +85,7 @@ import type {
   UserOwnedResourceCounts,
   UserOwnedResourceFilter,
   UserDependenciesResult,
+  TeamDeletePreview,
   AssetType,
   AssetVisibility,
   AssetStatus,
@@ -91,6 +96,8 @@ import type {
   PaginationParams,
   InstanceUserListFilter,
   UserListFilter,
+  OwnershipTransferResult,
+  IntegrityFinding,
 } from "../types.js";
 import { formatListResult, paginateArray, resolvePagination, wrapPaginated, DEFAULT_PAGINATION } from "../pagination.js";
 import { generateId, ID_PREFIX } from "../utils/id-generator.js";
@@ -144,6 +151,21 @@ export type ChatMemoryContentCleaner = (params: {
   teamId: string;
   agentId: string;
 }) => Promise<void>;
+
+export type ChatMemoryOwnerTransfer = (params: {
+  teamId: string;
+  agentId: string;
+  fromOwnerUserId: string;
+  toOwnerUserId: string;
+}) => Promise<{ l0Updated: number; l1Updated: number }>;
+
+export interface OperationalIntegrityHooks {
+  scan(): Promise<IntegrityFinding[]>;
+  purge(findings: Array<{ finding_id: string; fingerprint: string }>): Promise<{
+    deleted: string[];
+    failed: Array<{ finding_id: string; reason: string }>;
+  }>;
+}
 
 /** Detect unique constraint violation (SQLite UNIQUE or MongoDB E11000) on a specific column. */
 function isUniqueViolation(err: unknown, column?: string): boolean {
@@ -266,6 +288,8 @@ export class MetadataService {
 
   /** 由 gateway 注入的 chat_memory 内容清理器；未注入时归档只删资产不清内容。 */
   private _chatMemoryContentCleaner?: ChatMemoryContentCleaner;
+  private _chatMemoryOwnerTransfer?: ChatMemoryOwnerTransfer;
+  private _operationalIntegrityHooks?: OperationalIntegrityHooks;
 
   constructor(
     private readonly store: IMetadataStore,
@@ -306,6 +330,14 @@ export class MetadataService {
    */
   setChatMemoryContentCleaner(cleaner: ChatMemoryContentCleaner): void {
     this._chatMemoryContentCleaner = cleaner;
+  }
+
+  setChatMemoryOwnerTransfer(transfer: ChatMemoryOwnerTransfer): void {
+    this._chatMemoryOwnerTransfer = transfer;
+  }
+
+  setOperationalIntegrityHooks(hooks: OperationalIntegrityHooks): void {
+    this._operationalIntegrityHooks = hooks;
   }
 
   /** memory 静态 key 仅用于 auth/verify body，不可作 Header 鉴权。 */
@@ -522,25 +554,19 @@ export class MetadataService {
     if (!canManageUsers(ctx)) {
       throw new MetadataError("permission_denied", "user management requires system admin");
     }
-    let deletingSystemAdmins = 0;
-    for (const id of userIds) {
-      const u = await this.getUserById(id);
-      if (u && isSystemAdminUser(u)) deletingSystemAdmins++;
+    let safe;
+    try { safe = await this.store.deleteUsersSafely(userIds); }
+    catch (err) {
+      if (err instanceof LifecycleTransactionsRequiredError) {
+        throw new MetadataError("lifecycle_transactions_required", err.message);
+      }
+      throw err;
     }
-    const totalAdmins = await this.store.countSystemAdmins();
-    if (totalAdmins > 0 && totalAdmins - deletingSystemAdmins < 1) {
+    if (safe.last_system_admin) {
       throw new MetadataError("last_system_admin", "cannot delete the last system_admin user");
     }
-
-    const ownedResources: Array<{ user_id: string; counts: UserOwnedResourceCounts }> = [];
-    for (const userId of userIds) {
-      const counts = await this.store.getUserOwnedResourceCounts(userId);
-      if (counts.teams || counts.agents || counts.tasks || counts.assets) {
-        ownedResources.push({ user_id: userId, counts });
-      }
-    }
-    if (ownedResources.length > 0) {
-      const details = ownedResources
+    if (safe.blockers.length > 0) {
+      const details = safe.blockers
         .map(({ user_id, counts }) =>
           `${user_id}(teams=${counts.teams}, agents=${counts.agents}, tasks=${counts.tasks}, assets=${counts.assets})`,
         )
@@ -548,10 +574,10 @@ export class MetadataService {
       throw new MetadataError(
         "user_has_owned_resources",
         `cannot delete users with owned resources: ${details}`,
-        { blockers: ownedResources },
+        { blockers: safe.blockers },
       );
     }
-    return this.deleteUsers(userIds);
+    return safe.deleted ?? { deleted_ids: [], failed: [] };
   }
 
   async deleteUsers(userIds: string[]): Promise<BatchDeleteResult> {
@@ -577,8 +603,9 @@ export class MetadataService {
       }
       await this.assertCallerIsTeamOwnerOrAdmin(ctx, filter.team_id);
     }
-    const [counts, page] = await Promise.all([
+    const [counts, assetCounts, page] = await Promise.all([
       this.store.getUserOwnedResourceCounts(userId, filter.team_id),
+      this.store.getUserOwnedAssetCounts(userId, filter.team_id),
       this.store.listUserOwnedResources(userId, pagination, filter),
     ]);
     return {
@@ -587,6 +614,7 @@ export class MetadataService {
         ...counts,
         total: counts.teams + counts.agents + counts.tasks + counts.assets,
       },
+      asset_counts: assetCounts,
     };
   }
 
@@ -1747,10 +1775,10 @@ export class MetadataService {
     return agent;
   }
 
-  private async assertCallerIsTaskCreator(ctx: V3AuthContext, taskId: string): Promise<TaskEntity> {
+  private async assertCallerIsTaskOwner(ctx: V3AuthContext, taskId: string): Promise<TaskEntity> {
     const task = await this.getTaskById(taskId);
     if (!task) throw new MetadataError("task_not_found", `task not found: ${taskId}`);
-    this.assertCallerIsResourceOwner(ctx, task.creator_user_id);
+    this.assertCallerIsResourceOwner(ctx, task.owner_user_id);
     return task;
   }
 
@@ -1939,7 +1967,13 @@ export class MetadataService {
   // ============================================================
   async createTeamForCaller(input: CreateTeamInput, ctx: V3AuthContext): Promise<TeamEntity> {
     this.assertCallerIsResourceOwner(ctx, input.owner_user_id);
-    return this.createTeam(input);
+    try { return await this.createTeam(input); }
+    catch (err) {
+      if (err instanceof LifecycleTransactionsRequiredError) {
+        throw new MetadataError("lifecycle_transactions_required", err.message);
+      }
+      throw err;
+    }
   }
 
   async updateTeamForCaller(
@@ -1952,10 +1986,50 @@ export class MetadataService {
   }
 
   async deleteTeamsForCaller(teamIds: string[], ctx: V3AuthContext): Promise<BatchDeleteResult> {
-    for (const teamId of teamIds) {
-      await this.assertCallerIsTeamOwnerOrAdmin(ctx, teamId);
+    void teamIds;
+    void ctx;
+    throw new MetadataError(
+      "managed_resource_requires_lifecycle",
+      "team deletion requires delete-preview and single-team lifecycle confirmation",
+    );
+  }
+
+  async previewTeamDeleteForCaller(teamId: string, ctx: V3AuthContext): Promise<TeamDeletePreview> {
+    const team = await this.getTeamById(teamId);
+    if (!team) throw new MetadataError("team_not_found", `team not found: ${teamId}`);
+    const callerId = this.requireCallerId(ctx);
+    if (team.owner_user_id !== callerId) {
+      throw new MetadataError("permission_denied", "only the team owner can delete a team");
     }
-    return this.deleteTeams(teamIds);
+    const preview = await this.store.getTeamDeletePreview(teamId);
+    if (!preview) throw new MetadataError("team_not_found", `team not found: ${teamId}`);
+    return preview;
+  }
+
+  async deleteTeamForCaller(
+    input: { team_id: string; team_name: string; revision: string },
+    ctx: V3AuthContext,
+  ): Promise<BatchDeleteResult> {
+    const preview = await this.previewTeamDeleteForCaller(input.team_id, ctx);
+    if (preview.team_name !== input.team_name) {
+      throw new MetadataError("team_name_confirmation_mismatch", "team name confirmation does not match");
+    }
+    if (!preview.ready || preview.revision !== input.revision) {
+      throw new MetadataError("team_not_ready_for_deletion", "team is not empty or preview is stale", preview);
+    }
+    try {
+      const deleted = await this.store.deleteEmptyTeam(input.team_id, this.requireCallerId(ctx), input.revision);
+      if (!deleted) {
+        const latest = await this.store.getTeamDeletePreview(input.team_id);
+        throw new MetadataError("team_not_ready_for_deletion", "team changed after preview", latest ?? undefined);
+      }
+      return { deleted_ids: [input.team_id], failed: [] };
+    } catch (err) {
+      if (err instanceof LifecycleTransactionsRequiredError) {
+        throw new MetadataError("lifecycle_transactions_required", err.message);
+      }
+      throw err;
+    }
   }
 
   async addTeamMemberForCaller(input: AddTeamMemberInput, ctx: V3AuthContext): Promise<TeamMemberEntity> {
@@ -1965,7 +2039,42 @@ export class MetadataService {
     if (input.user_id === callerId) {
       throw new MetadataError("permission_denied", "cannot add yourself as a team member");
     }
-    return this.addTeamMember(input);
+    const existing = await this.store.getTeamMember(input.team_id, input.user_id);
+    if (existing?.status === "active") {
+      throw new MetadataError("member_already_exists", "use team-member/update-role for an active member");
+    }
+    try { return await this.addTeamMember({ ...input, status: "active" }); }
+    catch (err) {
+      if (err instanceof LifecycleTransactionsRequiredError) {
+        throw new MetadataError("lifecycle_transactions_required", err.message);
+      }
+      throw err;
+    }
+  }
+
+  async updateTeamMemberRoleForCaller(
+    teamId: string,
+    userId: string,
+    role: TeamMemberEntity["role"],
+    ctx: V3AuthContext,
+  ): Promise<TeamMemberEntity> {
+    await this.assertCallerIsTeamAdmin(ctx, teamId);
+    const callerId = this.requireCallerId(ctx);
+    const team = await this.getTeamById(teamId);
+    if (!team) throw new MetadataError("team_not_found", `team not found: ${teamId}`);
+    if (userId === callerId || userId === team.owner_user_id) {
+      throw new MetadataError("permission_denied", "owner and caller roles are locked");
+    }
+    let updated;
+    try { updated = await this.store.updateTeamMemberRole(teamId, userId, role); }
+    catch (err) {
+      if (err instanceof LifecycleTransactionsRequiredError) {
+        throw new MetadataError("lifecycle_transactions_required", err.message);
+      }
+      throw err;
+    }
+    if (!updated || updated.status !== "active") throw new MetadataError("member_not_found", "active member not found");
+    return updated;
   }
 
   async removeTeamMemberForCaller(teamId: string, userId: string, ctx: V3AuthContext): Promise<void> {
@@ -1979,16 +2088,220 @@ export class MetadataService {
     if (userId === team.owner_user_id) {
       throw new MetadataError("permission_denied", "cannot remove team owner");
     }
-    const counts = await this.store.getUserOwnedResourceCounts(userId, teamId);
-    if (counts.agents || counts.tasks || counts.assets) {
+    let result;
+    try {
+      result = await this.store.removeTeamMemberSafely(teamId, userId);
+    } catch (err) {
+      if (err instanceof LifecycleTransactionsRequiredError) {
+        throw new MetadataError("lifecycle_transactions_required", err.message);
+      }
+      throw err;
+    }
+    if (!result.removed) {
       throw new MetadataError(
-        "member_has_owned_resources",
-        `cannot remove member with owned resources: ${userId}`
-          + `(agents=${counts.agents}, tasks=${counts.tasks}, assets=${counts.assets})`,
-        { user_id: userId, team_id: teamId, counts },
+        result.blocker_code ?? "member_has_owned_resources",
+        `cannot remove member with owned resources: ${userId}`,
+        { user_id: userId, team_id: teamId, ...result },
       );
     }
-    return this.removeTeamMember(teamId, userId);
+  }
+
+  async leaveTeamForCaller(teamId: string, ctx: V3AuthContext): Promise<void> {
+    const callerId = this.requireCallerId(ctx);
+    await this.requireActiveTeamMember(ctx, teamId);
+    const team = await this.getTeamById(teamId);
+    if (!team) throw new MetadataError("team_not_found", `team not found: ${teamId}`);
+    if (team.owner_user_id === callerId) {
+      throw new MetadataError("team_owner_transfer_required", "transfer team ownership before leaving");
+    }
+    let result;
+    try {
+      result = await this.store.removeTeamMemberSafely(teamId, callerId);
+    } catch (err) {
+      if (err instanceof LifecycleTransactionsRequiredError) {
+        throw new MetadataError("lifecycle_transactions_required", err.message);
+      }
+      throw err;
+    }
+    if (!result.removed) {
+      throw new MetadataError(
+        result.blocker_code ?? "member_has_owned_resources",
+        "transfer or permanently clean owned resources before leaving",
+        { user_id: callerId, team_id: teamId, ...result },
+      );
+    }
+  }
+
+  async transferOwnershipForCaller(
+    input: {
+      team_id: string;
+      transfers: Array<{ resource_type: "team" | "agent" | "task" | "asset"; resource_id: string; to_user_id: string }>;
+      idempotency_key: string;
+    },
+    ctx: V3AuthContext,
+  ): Promise<{ items: OwnershipTransferResult[] }> {
+    const callerId = this.requireCallerId(ctx);
+    await this.requireActiveTeamMember(ctx, input.team_id);
+
+    // 先完成整批权限校验，避免一半资源已转移后才发现 caller 越权。
+    for (const transfer of input.transfers) {
+      const target = await this.store.getTeamMember(input.team_id, transfer.to_user_id);
+      const targetUser = await this.getUserById(transfer.to_user_id);
+      if (!target || target.status !== "active" || !targetUser || targetUser.status !== "active") {
+        throw new MetadataError("target_not_active_member", "target must be an active user and Team member");
+      }
+      if (transfer.resource_type === "team") {
+        const team = await this.getTeamById(transfer.resource_id);
+        if (!team || team.team_id !== input.team_id) throw new MetadataError("team_not_found", "team not found");
+        this.assertCallerIsResourceOwner(ctx, team.owner_user_id);
+        if (target.role !== "admin") {
+          throw new MetadataError("team_owner_target_must_be_admin", "Team ownership can only be transferred to an active admin");
+        }
+      } else if (transfer.resource_type === "agent") {
+        const agent = await this.getAgentById(transfer.resource_id);
+        if (!agent || agent.team_id !== input.team_id) throw new MetadataError("agent_not_found", "agent not found");
+        this.assertCallerIsResourceOwner(ctx, agent.owner_user_id);
+      } else if (transfer.resource_type === "task") {
+        const task = await this.getTaskById(transfer.resource_id);
+        if (!task || task.team_id !== input.team_id) throw new MetadataError("task_not_found", "task not found");
+        this.assertCallerIsResourceOwner(ctx, task.owner_user_id);
+      } else {
+        const asset = await this.getAssetById(transfer.resource_id);
+        if (!asset || asset.team_id !== input.team_id) throw new MetadataError("asset_not_found", "asset not found");
+        this.assertCallerIsResourceOwner(ctx, asset.owner_user_id);
+        if (["skill", "chat_memory", "llm_wiki", "code_graph"].includes(asset.asset_type)) {
+          throw new MetadataError(
+            "managed_resource_requires_lifecycle",
+            `${asset.asset_type} ownership requires the coordinated lifecycle endpoint`,
+          );
+        }
+      }
+    }
+
+    const items: OwnershipTransferResult[] = [];
+    try {
+      for (const transfer of input.transfers) {
+        const operationInput = {
+          ...transfer,
+          team_id: input.team_id,
+          from_user_id: callerId,
+          idempotency_key: input.idempotency_key,
+        };
+        if (transfer.resource_type !== "agent") {
+          items.push(await this.store.transferOwnership(operationInput));
+          continue;
+        }
+
+        if (!this._chatMemoryOwnerTransfer) {
+          throw new MetadataError(
+            "lifecycle_coordinator_unavailable",
+            "Agent ownership transfer requires the chat-memory lifecycle coordinator",
+          );
+        }
+        const prepared = await this.store.prepareOwnershipTransfer(operationInput);
+        if (prepared.status === "succeeded") {
+          items.push(await this.store.transferOwnership(operationInput));
+          continue;
+        }
+
+        let memoryMoved = false;
+        try {
+          await this._chatMemoryOwnerTransfer({
+            teamId: input.team_id,
+            agentId: transfer.resource_id,
+            fromOwnerUserId: callerId,
+            toOwnerUserId: transfer.to_user_id,
+          });
+          memoryMoved = true;
+          const result = await this.store.transferOwnership(operationInput);
+          if (!result.transferred) throw new Error(result.reason ?? "metadata_transfer_failed");
+          items.push(result);
+        } catch (error) {
+          let compensationFailed = false;
+          if (memoryMoved) {
+            try {
+              await this._chatMemoryOwnerTransfer({
+                teamId: input.team_id,
+                agentId: transfer.resource_id,
+                fromOwnerUserId: transfer.to_user_id,
+                toOwnerUserId: callerId,
+              });
+            } catch {
+              compensationFailed = true;
+            }
+          }
+          await this.store.resolveOwnershipTransfer({
+            team_id: input.team_id,
+            resource_type: "agent",
+            resource_id: transfer.resource_id,
+            idempotency_key: input.idempotency_key,
+            status: compensationFailed ? "inconsistent_retryable" : "failed",
+            error_code: compensationFailed ? "memory_owner_compensation_failed" : "memory_owner_transfer_failed",
+          });
+          throw error;
+        }
+      }
+    } catch (err) {
+      if (err instanceof LifecycleTransactionsRequiredError) {
+        throw new MetadataError("lifecycle_transactions_required", err.message);
+      }
+      throw err;
+    }
+    return { items };
+  }
+
+  async scanIntegrityForCaller(ctx: V3AuthContext): Promise<{
+    scan_revision: string;
+    findings: IntegrityFinding[];
+    counts: Record<string, number>;
+  }> {
+    if (!ctx.isSystemAdmin) {
+      throw new MetadataError("permission_denied", "integrity governance requires system_admin");
+    }
+    const findings = await this.store.scanIntegrityFindings();
+    if (this._operationalIntegrityHooks) findings.push(...await this._operationalIntegrityHooks.scan());
+    const counts: Record<string, number> = {};
+    for (const finding of findings) counts[finding.category] = (counts[finding.category] ?? 0) + 1;
+    const scanRevision = Buffer.from(
+      findings.map((item) => `${item.finding_id}:${item.fingerprint}`).sort().join("\n"),
+    ).toString("base64url");
+    return { scan_revision: scanRevision, findings, counts };
+  }
+
+  async purgeIntegrityForCaller(
+    findings: Array<{ finding_id: string; fingerprint: string }>,
+    ctx: V3AuthContext,
+  ): Promise<{ deleted: string[]; failed: Array<{ finding_id: string; reason: string }> }> {
+    if (!ctx.isSystemAdmin) {
+      throw new MetadataError("permission_denied", "integrity governance requires system_admin");
+    }
+    try {
+      if (!this._operationalIntegrityHooks) return await this.store.purgeIntegrityFindings(findings);
+      const liveOperational = new Set(
+        (await this._operationalIntegrityHooks.scan()).map((item) => item.finding_id),
+      );
+      const operational = findings.filter((item) => liveOperational.has(item.finding_id));
+      const metadata = findings.filter((item) => !liveOperational.has(item.finding_id));
+
+      // Backing/runtime content is always processed first. Metadata cleanup is
+      // deliberately sequential so a failed backing deletion can never be
+      // hidden by an earlier metadata deletion.
+      const operationalResult = operational.length
+        ? await this._operationalIntegrityHooks.purge(operational)
+        : { deleted: [], failed: [] as Array<{ finding_id: string; reason: string }> };
+      const metadataResult = metadata.length
+        ? await this.store.purgeIntegrityFindings(metadata)
+        : { deleted: [], failed: [] as Array<{ finding_id: string; reason: string }> };
+      return {
+        deleted: [...operationalResult.deleted, ...metadataResult.deleted],
+        failed: [...operationalResult.failed, ...metadataResult.failed],
+      };
+    } catch (err) {
+      if (err instanceof LifecycleTransactionsRequiredError) {
+        throw new MetadataError("lifecycle_transactions_required", err.message);
+      }
+      throw err;
+    }
   }
 
   async listTeamMembersForCaller(
@@ -2021,12 +2334,15 @@ export class MetadataService {
   async createAgentForCaller(input: CreateAgentInput, ctx: V3AuthContext): Promise<AgentEntity> {
     await this.assertTeamExists(input.team_id);
     await this.requireActiveTeamMember(ctx, input.team_id);
-    // owner 本人，或该 team 的 team admin（admin 代新用户创建默认 Agent）
     const callerId = this.requireCallerId(ctx);
-    if (input.owner_user_id !== callerId) {
-      await this.assertCallerIsTeamAdmin(ctx, input.team_id);
+    this.assertCallerIsResourceOwner(ctx, input.owner_user_id);
+    try { return await this.createAgent(input); }
+    catch (err) {
+      if (err instanceof LifecycleTransactionsRequiredError) {
+        throw new MetadataError("lifecycle_transactions_required", err.message);
+      }
+      throw err;
     }
-    return this.createAgent(input);
   }
 
   async updateAgentForCaller(
@@ -2040,7 +2356,16 @@ export class MetadataService {
 
   async deleteAgentsForCaller(agentIds: string[], ctx: V3AuthContext): Promise<BatchDeleteResult> {
     for (const agentId of agentIds) {
-      await this.assertCallerIsAgentOwner(ctx, agentId);
+      const agent = await this.assertCallerIsAgentOwner(ctx, agentId);
+      const selfMemory = await this.getAssetById(buildChatMemoryAssetId(agent.team_id, agent.agent_id));
+      const derived = await this.store.listAgentFixedAssets(agentId, { limit: 1, offset: 0 });
+      if (selfMemory || derived.total > 0) {
+        throw new MetadataError(
+          "managed_resource_requires_lifecycle",
+          "Agent has derived assets; use the owned-resource lifecycle purge",
+          { agent_id: agentId, derived_assets: derived.total + (selfMemory ? 1 : 0) },
+        );
+      }
     }
     return this.deleteAgents(agentIds);
   }
@@ -2054,7 +2379,13 @@ export class MetadataService {
     await this.assertTeamExists(input.team_id);
     await this.requireActiveTeamMember(ctx, input.team_id);
     this.assertCallerIsResourceOwner(ctx, input.creator_user_id);
-    return this.createTask(input);
+    try { return await this.createTask({ ...input, owner_user_id: input.creator_user_id }); }
+    catch (err) {
+      if (err instanceof LifecycleTransactionsRequiredError) {
+        throw new MetadataError("lifecycle_transactions_required", err.message);
+      }
+      throw err;
+    }
   }
 
   async updateTaskForCaller(
@@ -2062,19 +2393,19 @@ export class MetadataService {
     patch: Partial<TaskEntity>,
     ctx: V3AuthContext,
   ): Promise<TaskEntity> {
-    await this.assertCallerIsTaskCreator(ctx, taskId);
+    await this.assertCallerIsTaskOwner(ctx, taskId);
     return this.updateTask(taskId, patch);
   }
 
   async deleteTasksForCaller(taskIds: string[], ctx: V3AuthContext): Promise<BatchDeleteResult> {
     for (const taskId of taskIds) {
-      await this.assertCallerIsTaskCreator(ctx, taskId);
+      await this.assertCallerIsTaskOwner(ctx, taskId);
     }
     return this.deleteTasks(taskIds);
   }
 
   async archiveTaskForCaller(taskId: string, ctx: V3AuthContext): Promise<TaskEntity> {
-    await this.assertCallerIsTaskCreator(ctx, taskId);
+    await this.assertCallerIsTaskOwner(ctx, taskId);
     return this.archiveTask(taskId);
   }
 
@@ -2084,12 +2415,12 @@ export class MetadataService {
     roleInTask: string | undefined,
     ctx: V3AuthContext,
   ): Promise<TaskAgentEntity> {
-    await this.assertCallerIsTaskCreator(ctx, taskId);
+    await this.assertCallerIsTaskOwner(ctx, taskId);
     return this.linkTaskAgent(taskId, agentId, roleInTask);
   }
 
   async unlinkTaskAgentForCaller(taskId: string, agentId: string, ctx: V3AuthContext): Promise<void> {
-    await this.assertCallerIsTaskCreator(ctx, taskId);
+    await this.assertCallerIsTaskOwner(ctx, taskId);
     return this.unlinkTaskAgent(taskId, agentId);
   }
 
@@ -2118,7 +2449,13 @@ export class MetadataService {
     await this.assertTeamExists(input.team_id);
     await this.requireActiveTeamMember(ctx, input.team_id);
     this.assertCallerIsResourceOwner(ctx, input.owner_user_id);
-    return this.createAsset(input);
+    try { return await this.createAsset(input); }
+    catch (err) {
+      if (err instanceof LifecycleTransactionsRequiredError) {
+        throw new MetadataError("lifecycle_transactions_required", err.message);
+      }
+      throw err;
+    }
   }
 
   async updateAssetForCaller(
@@ -2136,8 +2473,131 @@ export class MetadataService {
       const existing = await this.getAssetById(assetId);
       if (!existing) continue;
       await this.assertCallerIsAssetOwner(ctx, assetId);
+      if (["skill", "llm_wiki", "code_graph", "chat_memory"].includes(existing.asset_type)) {
+        throw new MetadataError(
+          "managed_resource_requires_lifecycle",
+          `${existing.asset_type} must be deleted through the owned-resource lifecycle`,
+          { asset_id: assetId, asset_type: existing.asset_type },
+        );
+      }
     }
     return this.deleteAssets(assetIds);
+  }
+
+  /** Bearer-only internal finalize after the backing service has completed deletion. */
+  async finalizeAssetDeleteInternal(assetId: string, expectedOwnerUserId: string): Promise<BatchDeleteResult> {
+    const asset = await this.getAssetById(assetId);
+    if (!asset) return { deleted_ids: [], failed: [] };
+    if (asset.owner_user_id !== expectedOwnerUserId) {
+      throw new MetadataError("stale_lifecycle_operation", "asset owner changed before finalize", {
+        asset_id: assetId,
+      });
+    }
+    return this.deleteAssets([assetId]);
+  }
+
+  /** Bearer-only internal finalize after Wiki/Code Graph backing ownership CAS succeeds. */
+  async prepareAssetTransferInternal(input: {
+    team_id: string;
+    asset_id: string;
+    from_owner_user_id: string;
+    to_owner_user_id: string;
+    idempotency_key: string;
+  }): Promise<{ operation_id: string; status: string }> {
+    const asset = await this.getAssetById(input.asset_id);
+    if (!asset || asset.team_id !== input.team_id) throw new MetadataError("asset_not_found", "asset not found");
+    if (asset.asset_type !== "llm_wiki" && asset.asset_type !== "code_graph") {
+      throw new MetadataError("managed_resource_requires_lifecycle", "prepare is limited to knowledge assets");
+    }
+    if (asset.owner_user_id !== input.from_owner_user_id && asset.owner_user_id !== input.to_owner_user_id) {
+      throw new MetadataError("stale_lifecycle_operation", "asset owner changed before prepare");
+    }
+    const target = await this.store.getTeamMember(input.team_id, input.to_owner_user_id);
+    const targetUser = await this.getUserById(input.to_owner_user_id);
+    if (!target || target.status !== "active" || !targetUser || targetUser.status !== "active") {
+      throw new MetadataError("target_not_active_member", "target must be an active user and Team member");
+    }
+    try {
+      return await this.store.prepareOwnershipTransfer({
+        team_id: input.team_id, resource_type: "asset", resource_id: input.asset_id,
+        from_user_id: input.from_owner_user_id, to_user_id: input.to_owner_user_id,
+        idempotency_key: input.idempotency_key,
+      });
+    } catch (err) {
+      if (err instanceof LifecycleTransactionsRequiredError) {
+        throw new MetadataError("lifecycle_transactions_required", err.message);
+      }
+      throw err;
+    }
+  }
+
+  async resolveAssetTransferInternal(input: {
+    team_id: string;
+    asset_id: string;
+    idempotency_key: string;
+    status: "failed" | "inconsistent_retryable";
+    error_code: string;
+  }): Promise<void> {
+    try {
+      await this.store.resolveOwnershipTransfer({
+        team_id: input.team_id, resource_type: "asset", resource_id: input.asset_id,
+        idempotency_key: input.idempotency_key, status: input.status, error_code: input.error_code,
+      });
+    } catch (err) {
+      if (err instanceof LifecycleTransactionsRequiredError) {
+        throw new MetadataError("lifecycle_transactions_required", err.message);
+      }
+      throw err;
+    }
+  }
+
+  /** Bearer-only internal finalize after Wiki/Code Graph backing ownership CAS succeeds. */
+  async finalizeAssetTransferInternal(input: {
+    team_id: string;
+    asset_id: string;
+    from_owner_user_id: string;
+    to_owner_user_id: string;
+    idempotency_key: string;
+  }): Promise<OwnershipTransferResult> {
+    const asset = await this.getAssetById(input.asset_id);
+    if (!asset || asset.team_id !== input.team_id) {
+      throw new MetadataError("asset_not_found", "asset not found");
+    }
+    if (asset.asset_type !== "llm_wiki" && asset.asset_type !== "code_graph") {
+      throw new MetadataError("managed_resource_requires_lifecycle", "internal finalize is limited to knowledge assets");
+    }
+    if (asset.owner_user_id === input.to_owner_user_id) {
+      return {
+        resource_type: "asset",
+        resource_id: input.asset_id,
+        transferred: true,
+        implicit_asset_ids: [],
+        removed_binding_ids: [],
+      };
+    }
+    if (asset.owner_user_id !== input.from_owner_user_id) {
+      throw new MetadataError("stale_lifecycle_operation", "asset owner changed before finalize");
+    }
+    const target = await this.store.getTeamMember(input.team_id, input.to_owner_user_id);
+    const targetUser = await this.getUserById(input.to_owner_user_id);
+    if (!target || target.status !== "active" || !targetUser || targetUser.status !== "active") {
+      throw new MetadataError("target_not_active_member", "target must be an active user and Team member");
+    }
+    try {
+      return await this.store.transferOwnership({
+        team_id: input.team_id,
+        resource_type: "asset",
+        resource_id: input.asset_id,
+        from_user_id: input.from_owner_user_id,
+        to_user_id: input.to_owner_user_id,
+        idempotency_key: input.idempotency_key,
+      });
+    } catch (err) {
+      if (err instanceof LifecycleTransactionsRequiredError) {
+        throw new MetadataError("lifecycle_transactions_required", err.message);
+      }
+      throw err;
+    }
   }
 
   async touchAssetUsageForCaller(assetId: string, ctx: V3AuthContext): Promise<void> {

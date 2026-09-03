@@ -94,6 +94,8 @@ export interface MemoryRecord {
    */
   teamId?: string;
   userId?: string;
+  /** Current mutable owner; omitted on ordinary writes so stores preserve an existing transfer. */
+  ownerUserId?: string;
   agentId?: string;
 }
 

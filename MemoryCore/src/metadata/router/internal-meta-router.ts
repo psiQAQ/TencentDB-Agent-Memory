@@ -15,7 +15,15 @@ import type { Logger } from "../../core/types.js";
 import { MetadataService, MetadataError } from "../service/metadata-service.js";
 import { extractInstanceId, normalizeInstanceIdForRoute } from "./instance.js";
 import { resolvePagination } from "./pagination.js";
-import { internalListUsersByInstanceSchema, initAdminSchema } from "./v3-meta-schemas.js";
+import {
+  internalAssetFinalizeDeleteSchema,
+  internalAssetFinalizeTransferSchema,
+  internalAssetGetSchema,
+  internalAssetPrepareTransferSchema,
+  internalAssetResolveTransferSchema,
+  internalListUsersByInstanceSchema,
+  initAdminSchema,
+} from "./v3-meta-schemas.js";
 import {
   createMetaApiTraceContext,
   logMetaApiEntry,
@@ -69,6 +77,33 @@ const routeTable: Record<string, InternalHandler> = {
       });
     },
   ),
+  [`${V3_INTERNAL_PREFIX}/asset/finalize-delete`]: bind(
+    internalAssetFinalizeDeleteSchema,
+    (d, svc) => svc.finalizeAssetDeleteInternal(d.asset_id, d.expected_owner_user_id),
+  ),
+  [`${V3_INTERNAL_PREFIX}/asset/get`]: bind(
+    internalAssetGetSchema,
+    async (d, svc) => {
+      const asset = await svc.getAssetById(d.asset_id);
+      if (!asset) throw new MetadataError("asset_not_found", `asset not found: ${d.asset_id}`);
+      return asset;
+    },
+  ),
+  [`${V3_INTERNAL_PREFIX}/asset/finalize-transfer`]: bind(
+    internalAssetFinalizeTransferSchema,
+    (d, svc) => svc.finalizeAssetTransferInternal(d),
+  ),
+  [`${V3_INTERNAL_PREFIX}/asset/prepare-transfer`]: bind(
+    internalAssetPrepareTransferSchema,
+    (d, svc) => svc.prepareAssetTransferInternal(d),
+  ),
+  [`${V3_INTERNAL_PREFIX}/asset/resolve-transfer`]: bind(
+    internalAssetResolveTransferSchema,
+    async (d, svc) => {
+      await svc.resolveAssetTransferInternal(d);
+      return { ok: true };
+    },
+  ),
 };
 
 export const V3_INTERNAL_ROUTES = Object.keys(routeTable);
@@ -77,7 +112,8 @@ function mapErrorCode(code: string): number {
   if (code.endsWith("_not_found")) return 404;
   if (code === "permission_denied") return 403;
   if (code === "missing_instance_id" || code === "invalid_instance_id") return 400;
-  if (code === "already_initialized" || code === "last_system_admin" || code === "member_already_exists") return 409;
+  if (code === "already_initialized" || code === "last_system_admin" || code === "member_already_exists"
+    || code === "stale_lifecycle_operation" || code === "target_not_active_member") return 409;
   if (code === "user_limit_exceeded" || code === "team_limit_exceeded") return 409;
   return 400;
 }

@@ -44,6 +44,12 @@ import type {
   CreateTeamRequest,
   UpdateTeamRequest,
   AddTeamMemberRequest,
+  TeamDeletePreview,
+  DeleteTeamRequest,
+  LeaveTeamRequest,
+  UpdateTeamMemberRoleRequest,
+  OwnershipTransferRequest,
+  OwnershipTransferResult,
   CreateAgentRequest,
   UpdateAgentRequest,
   ListAgentsRequest,
@@ -177,7 +183,12 @@ export class MetadataClient {
   createTeam(p: CreateTeamRequest): Promise<TeamEntity> { return this.http.post(`${V3}/team/create`, body(p)); }
   getTeam(teamId: string): Promise<TeamEntity> { return this.http.post(`${V3}/team/get`, { team_id: teamId }); }
   updateTeam(p: UpdateTeamRequest): Promise<TeamEntity> { return this.http.post(`${V3}/team/update`, body(p)); }
-  deleteTeams(teamIds: string[]): Promise<BatchDeleteResult> { return this.http.post(`${V3}/team/delete`, { team_ids: teamIds }); }
+  previewTeamDelete(teamId: string): Promise<TeamDeletePreview> {
+    return this.http.post(`${V3}/team/delete-preview`, { team_id: teamId });
+  }
+  deleteTeam(p: DeleteTeamRequest): Promise<BatchDeleteResult> {
+    return this.http.post(`${V3}/team/delete`, body(p));
+  }
   listTeams(userId: string, pagination?: PaginationInput): Promise<PaginatedResult<TeamEntity>>;
   listTeams(request: ListTeamsRequest): Promise<PaginatedResult<TeamEntity>>;
   listTeams(
@@ -196,6 +207,13 @@ export class MetadataClient {
   // ── TeamMember ──
   addTeamMember(p: AddTeamMemberRequest): Promise<TeamMemberEntity> { return this.http.post(`${V3}/team-member/add`, body(p)); }
   removeTeamMember(teamId: string, userId: string): Promise<{ ok: true }> { return this.http.post(`${V3}/team-member/remove`, { team_id: teamId, user_id: userId }); }
+  leaveTeam(p: LeaveTeamRequest): Promise<{ ok: true }> { return this.http.post(`${V3}/team-member/leave`, body(p)); }
+  updateTeamMemberRole(p: UpdateTeamMemberRoleRequest): Promise<TeamMemberEntity> {
+    return this.http.post(`${V3}/team-member/update-role`, body(p));
+  }
+  transferOwnership(p: OwnershipTransferRequest): Promise<{ items: OwnershipTransferResult[] }> {
+    return this.http.post(`${V3}/ownership/transfer`, body(p));
+  }
   listTeamMembers(teamId: string, pagination?: PaginationInput): Promise<PaginatedResult<TeamMemberEntity>> {
     return this.http.post(`${V3}/team-member/list`, body({ team_id: teamId, ...pagination }));
   }
