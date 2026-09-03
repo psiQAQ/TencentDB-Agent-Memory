@@ -26,7 +26,7 @@ import {
   type BackendTask,
 } from '@/lib/teamApi';
 import { invalidateBackendCache } from '@/stores/backend';
-import { isTeamAdmin, isTeamMember } from './team-role';
+import { canManageOwnedResource, isTeamMember } from './team-role';
 export { isTeamAdmin, isTeamMember, roleInTeam } from './team-role';
 
 // ========================= Types（前端展示形状，尽量贴近旧 demoStore，减少调用方改动） =========================
@@ -308,21 +308,17 @@ export {
 
 export function canManageAsset(
   asset: { owner_user_id: string; team_id: string },
-  team: Team | null | undefined,
+  _team: Team | null | undefined,
   userId: string,
   _isGlobalAdminFlag?: boolean
 ): boolean {
-  if (!userId) return false;
-  // admin 不再拥有全局特权，与 member 一致：只能操作自己 owner 的资产。
-  if (asset.owner_user_id === userId) return true;
-  if (team && team.team_id === asset.team_id && isTeamAdmin(team, userId)) return true;
-  return false;
+  // Core 的 Agent/Task/Asset mutation 是 owner-only；Team admin 不能代替 owner。
+  return canManageOwnedResource(asset.owner_user_id, userId);
 }
 
 export function canEditTask(task: Task, team: Team | null | undefined, userId: string): boolean {
-  if (!userId) return false;
   if (!team || team.team_id !== task.team_id) return false;
-  return isTeamMember(team, userId);
+  return isTeamMember(team, userId) && canManageOwnedResource(task.creator_user_id, userId);
 }
 
 export function canDeleteTask(task: Task, team: Team | null | undefined, userId: string): boolean {

@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest';
-import { canRemoveMember, roleInTeam, type TeamRoleView } from '../web/src/services/team-role.js';
+import {
+  canManageOwnedResource,
+  canRemoveMember,
+  roleInTeam,
+  type TeamRoleView,
+} from '../web/src/services/team-role.js';
 
 function team(): TeamRoleView {
   return {
@@ -26,5 +31,11 @@ describe('Panel account type and Team role separation', () => {
     expect(canRemoveMember(value, 'owner', 'team-admin')).toBe(false);
     expect(canRemoveMember(value, 'team-admin', 'team-admin')).toBe(false);
     expect(canRemoveMember(value, 'member', 'system-admin')).toBe(false);
+  });
+
+  it('does not let Team or system administrators mutate another owner resource', () => {
+    expect(canManageOwnedResource('member', 'member')).toBe(true);
+    expect(canManageOwnedResource('member', 'team-admin')).toBe(false);
+    expect(canManageOwnedResource('member', 'system-admin')).toBe(false);
   });
 });

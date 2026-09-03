@@ -125,7 +125,7 @@ export default function TaskWorkbench(props: {
           onSelect={(id) => setSelectedId(id)}
           onCreate={() => setShowCreate(true)}
           onDelete={async (task) => {
-            // 权限：删除 task 仅创建者或当前 Team owner/admin。
+            // 权限：Core 的 task/delete 是 creator-only。
             const team = teams.find((t) => t.team_id === task.team_id) ?? null;
             if (!canDeleteTask(task, team, currentUser)) {
               tea.notify.warning(
@@ -149,7 +149,7 @@ export default function TaskWorkbench(props: {
             }
           }}
           onUpdateStatus={async (task, status) => {
-            // 权限：编辑 task（含切换 status）允许 team 内任意 member / admin
+            // 权限：Core 的 task/update（含切换 status）是 creator-only。
             const team = teams.find((t) => t.team_id === task.team_id) ?? null;
             if (!canEditTask(task, team, currentUser)) {
               tea.notify.warning(t('task.noPermissionEdit'));

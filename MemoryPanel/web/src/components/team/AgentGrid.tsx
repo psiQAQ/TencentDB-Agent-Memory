@@ -109,7 +109,7 @@ export default function AgentGrid({
   }, [agents, keyword, ownerFilter]);
 
   function canEdit(agent: StoreAgent): boolean {
-    // 资产 owner 或当前 Team owner/admin 可操作；全局账号类型不参与判断。
+    // Core mutation 是资源 owner-only；Team/global admin 都不能代替 owner。
     return canManageAsset(
       { owner_user_id: agent.owner_user_id, team_id: agent.team_id },
       activeTeam,

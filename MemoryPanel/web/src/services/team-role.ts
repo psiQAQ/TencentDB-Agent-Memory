@@ -23,6 +23,11 @@ export function isTeamMember(team: TeamRoleView | null | undefined, userId: stri
   return roleInTeam(team, userId) !== null;
 }
 
+/** Agent/Task/Asset mutation follows Core ownership, not Team administration. */
+export function canManageOwnedResource(ownerUserId: string, currentUserId: string): boolean {
+  return Boolean(currentUserId) && ownerUserId === currentUserId;
+}
+
 export function canRemoveMember(
   team: TeamRoleView,
   targetUserId: string,

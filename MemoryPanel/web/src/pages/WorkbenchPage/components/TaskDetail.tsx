@@ -61,7 +61,7 @@ export default function TaskDetail({
 }) {
   const { t } = useTranslation();
   const statusLabels = useStatusLabels();
-  // 编辑权限：team 内任意 member 可改 task（含切换 status）。
+  // 编辑权限：Core 的 task/update 是 creator-only（含切换 status）。
   const canEdit = canEditTask(task, team, currentUser);
 
   // —— 编辑态：只在用户点「编辑」后才进入；草稿独立维护，取消即丢弃 —— //
