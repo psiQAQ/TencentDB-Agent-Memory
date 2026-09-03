@@ -10,12 +10,13 @@
 import { initTelemetry } from "./telemetry.js";
 initTelemetry();
 
-import { Hono } from "hono";
+import { Hono, type Context, type Next } from "hono";
 import { serve } from "@hono/node-server";
 import { swaggerUI } from "@hono/swagger-ui";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
+import { timingSafeEqual } from "node:crypto";
 
 import { loadConfig } from "./config.js";
 import { createDb } from "./db/client.js";
@@ -26,6 +27,7 @@ import { createToolsRoutes } from "./routes/tools.js";
 import { createHealthRoutes } from "./routes/health.js";
 import { createLlmBindingRoutes } from "./routes/llm-binding.js";
 import { createAutoSyncRoutes } from "./routes/auto-sync.js";
+import { createLifecycleRoutes } from "./routes/lifecycle.js";
 import { accessLog } from "./middleware/response-envelope.js";
 import { errorHandler } from "./middleware/error-handler.js";
 import { createLogger } from "./logger.js";
@@ -61,6 +63,19 @@ export function createApp() {
 
   // /v3 prefix applied once here — routes define paths without prefix
   const api = new Hono();
+  const lifecycleDeleteAuth = async (c: Context, next: Next) => {
+    const header = c.req.header("authorization") as string | undefined;
+    const actual = header?.startsWith("Bearer ") ? Buffer.from(header.slice(7), "utf8") : Buffer.alloc(0);
+    const expected = Buffer.from(config.internalAuthToken, "utf8");
+    if (!config.internalAuthToken || actual.length !== expected.length || !timingSafeEqual(actual, expected)) {
+      return c.json({ code: 401, message: "managed delete requires lifecycle authorization" }, 401);
+    }
+    await next();
+  };
+  // Backing deletion is a lifecycle finalizer. Direct calls cannot establish
+  // resource ownership and therefore must not bypass the Panel/Core journal.
+  api.use("/wiki/delete", lifecycleDeleteAuth);
+  api.use("/code-graph/delete", lifecycleDeleteAuth);
   // Only Agent tool executions are usage telemetry; health/admin/ingest remain excluded.
   api.use("/tools/call", createKnowledgeTelemetryMiddleware(knowledgeTelemetry));
   api.route("/wiki", createWikiRoutes({
@@ -85,6 +100,10 @@ export function createApp() {
   // internal/* — control-plane endpoints (TMC / operator). Per-instance LLM routing.
   api.route("/internal/llm-binding", createLlmBindingRoutes({
     llmBindingStore: knowledgeModule.llmBindingStore,
+  }));
+  api.route("/internal/lifecycle", createLifecycleRoutes({
+    store: knowledgeModule.store,
+    authToken: config.internalAuthToken,
   }));
 
   // auto-sync admin — 定时同步调度器状态查询 + 手动触发

@@ -198,6 +198,18 @@ export interface SyncedWikiRef {
   team_id: string;
 }
 
+export interface KnowledgeInventoryItem {
+  resource_type: "llm_wiki" | "code_graph";
+  resource_id: string;
+  service_id: string;
+  team_id: string;
+  owner_user_id: string | null;
+  status: string;
+  name: string;
+  created_at: string;
+  updated_at: string;
+}
+
 // ───────────────────────── Store interface ─────────────────────────
 
 /**
@@ -217,6 +229,7 @@ export interface IKnowledgeStore {
   updateCodeGraphStatus(serviceId: string, codeGraphId: string, patch: CodeGraphStatusPatch): void;
   deleteCodeGraph(serviceId: string, teamId: string, codeGraphId: string): boolean;
   updateCodeGraphMeta(serviceId: string, codeGraphId: string, patch: CodeGraphMetaPatch): CodeGraphRow | null;
+  transferCodeGraphOwner(serviceId: string, codeGraphId: string, fromOwnerUserId: string, toOwnerUserId: string): CodeGraphRow | null;
 
   // ── Wiki ──
   createWiki(input: CreateWikiInput): CreateResult<WikiRow>;
@@ -227,6 +240,7 @@ export interface IKnowledgeStore {
   updateWikiStatus(serviceId: string, wikiId: string, patch: WikiStatusPatch): void;
   deleteWiki(serviceId: string, teamId: string, wikiId: string): boolean;
   updateWikiMeta(serviceId: string, wikiId: string, patch: WikiMetaPatch): WikiRow | null;
+  transferWikiOwner(serviceId: string, wikiId: string, fromOwnerUserId: string, toOwnerUserId: string): WikiRow | null;
 
   // ── Audit ──
   appendWikiAudit(input: AuditLogInput): void;
@@ -240,4 +254,6 @@ export interface IKnowledgeStore {
   /** All ready code-graphs (with service_id) so module.ts can rebuild per-tenant dirs. */
   listSyncedCodeGraphs(): SyncedCodeGraphRef[];
   listSyncedWikis(): SyncedWikiRef[];
+  /** Content-free control-plane inventory used by the integrity scanner. */
+  listIntegrityInventory(serviceId: string): KnowledgeInventoryItem[];
 }

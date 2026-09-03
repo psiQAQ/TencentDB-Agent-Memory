@@ -154,6 +154,24 @@ export interface CodeGraphToolResult {
 // ── Port ──
 
 export interface KnowledgeClientPort {
+  /** Trusted backing-store CAS used by the ownership lifecycle coordinator. */
+  transferOwnership(input: {
+    resource_type: 'llm_wiki' | 'code_graph';
+    resource_id: string;
+    from_owner_user_id: string;
+    to_owner_user_id: string;
+  }): Promise<{ resource_id: string; owner_user_id: string; status: string; idempotent?: boolean }>;
+  listIntegrityInventory(): Promise<{ items: Array<{
+    resource_type: 'llm_wiki' | 'code_graph';
+    resource_id: string;
+    team_id: string;
+    owner_user_id: string | null;
+    status: string;
+    name: string;
+    created_at: string;
+    updated_at: string;
+  }> }>;
+
   // Wiki — 资产层（create/list 带 IdFields；get/ingest/delete 仅资产 id 寻址）
   wikiCreate(teamId: string, name: string, userId?: string): Promise<WikiDetail>;
   wikiGet(wikiId: string): Promise<WikiDetail>;

@@ -74,6 +74,7 @@ export type TaskSourceType = 'manual' | 'tapd';
 export interface Task {
   task_id: string;
   team_id: string;
+  owner_user_id: string;
   creator_user_id: string;
   participants: string[];
   title: string;
@@ -132,7 +133,10 @@ function readAgentUiMeta(metadataJson: string | undefined, index: number): Agent
 }
 
 /** 把 ui 专属字段 merge 写回 metadata_json（保留其它 namespace，如 chat_memory）。 */
-export function writeAgentUiMeta(prevMetadataJson: string | undefined, patch: Partial<AgentUiMeta>): string {
+export function writeAgentUiMeta(
+  prevMetadataJson: string | undefined,
+  patch: Partial<AgentUiMeta>,
+): string {
   let meta: Record<string, unknown> = {};
   if (prevMetadataJson) {
     try {
@@ -158,7 +162,11 @@ function readTaskUiMeta(metadataJson: string | undefined, fallbackParticipant: s
     const meta = JSON.parse(metadataJson) as Record<string, unknown>;
     const slot = meta?.ui as Partial<TaskUiMeta> | undefined;
     if (slot && Array.isArray(slot.participants)) {
-      return { participants: Array.from(new Set([...(slot.participants as string[]), fallbackParticipant].filter(Boolean))) };
+      return {
+        participants: Array.from(
+          new Set([...(slot.participants as string[]), fallbackParticipant].filter(Boolean)),
+        ),
+      };
     }
     return fallback;
   } catch {
@@ -243,6 +251,7 @@ export function adaptTask(bt: BackendTask, linkedAgents: string[]): Task {
   return {
     task_id: bt.task_id,
     team_id: bt.team_id,
+    owner_user_id: bt.owner_user_id ?? bt.creator_user_id,
     creator_user_id: bt.creator_user_id,
     participants: ui.participants,
     title: bt.title,
@@ -263,15 +272,25 @@ const ACTIVE_TEAM_KEY = 'tdai-memory.activeTeam.v1';
 const LOCAL_CHANGE_EVENT = 'tdai-memory.demo-store-change';
 
 export function readActiveTeamId(): string | null {
-  try { return localStorage.getItem(ACTIVE_TEAM_KEY); } catch { return null; }
+  try {
+    return localStorage.getItem(ACTIVE_TEAM_KEY);
+  } catch {
+    return null;
+  }
 }
 
 export function writeActiveTeamId(teamId: string | null): void {
   try {
     if (teamId) localStorage.setItem(ACTIVE_TEAM_KEY, teamId);
     else localStorage.removeItem(ACTIVE_TEAM_KEY);
-  } catch { /* ignore */ }
-  try { window.dispatchEvent(new Event(LOCAL_CHANGE_EVENT)); } catch { /* ignore */ }
+  } catch {
+    /* ignore */
+  }
+  try {
+    window.dispatchEvent(new Event(LOCAL_CHANGE_EVENT));
+  } catch {
+    /* ignore */
+  }
 }
 
 /** teams 加载完成后确保 activeTeamId 指向一个有效 team（否则选第一个 / 清空）。 */
@@ -310,7 +329,7 @@ export function canManageAsset(
   asset: { owner_user_id: string; team_id: string },
   _team: Team | null | undefined,
   userId: string,
-  _isGlobalAdminFlag?: boolean
+  _isGlobalAdminFlag?: boolean,
 ): boolean {
   // Core 的 Agent/Task/Asset mutation 是 owner-only；Team admin 不能代替 owner。
   return canManageOwnedResource(asset.owner_user_id, userId);
@@ -318,11 +337,11 @@ export function canManageAsset(
 
 export function canEditTask(task: Task, team: Team | null | undefined, userId: string): boolean {
   if (!team || team.team_id !== task.team_id) return false;
-  return isTeamMember(team, userId) && canManageOwnedResource(task.creator_user_id, userId);
+  return isTeamMember(team, userId) && canManageOwnedResource(task.owner_user_id, userId);
 }
 
 export function canDeleteTask(task: Task, team: Team | null | undefined, userId: string): boolean {
-  return canManageAsset({ owner_user_id: task.creator_user_id, team_id: task.team_id }, team, userId);
+  return canManageAsset({ owner_user_id: task.owner_user_id, team_id: task.team_id }, team, userId);
 }
 
 // ========================= Task mutations（async，包一层 diff/参与者逻辑） =========================
@@ -352,7 +371,11 @@ export async function deleteTaskAsync(taskId: string): Promise<void> {
   invalidateBackendCache();
 }
 
-export async function updateTaskStatusAsync(taskId: string, status: TaskStatus, actorUserId?: string): Promise<void> {
+export async function updateTaskStatusAsync(
+  taskId: string,
+  status: TaskStatus,
+  actorUserId?: string,
+): Promise<void> {
   const patch: Record<string, unknown> = { status };
   if (actorUserId) {
     // 参与者留痕：读一次当前 task 详情，把 actor 并入 participants 再写回 metadata_json
@@ -364,7 +387,9 @@ export async function updateTaskStatusAsync(taskId: string, status: TaskStatus, 
           participants: [...ui.participants, actorUserId],
         });
       }
-    } catch { /* 参与者留痕失败不阻断状态切换 */ }
+    } catch {
+      /* 参与者留痕失败不阻断状态切换 */
+    }
   }
   await tasksApi.update(taskId, patch as Parameters<typeof tasksApi.update>[1]);
   invalidateBackendCache();
@@ -372,8 +397,10 @@ export async function updateTaskStatusAsync(taskId: string, status: TaskStatus, 
 
 export async function updateTaskAsync(
   taskId: string,
-  patch: Partial<Pick<Task, 'title' | 'description' | 'source_type' | 'source_url' | 'linked_agents'>>,
-  actorUserId?: string
+  patch: Partial<
+    Pick<Task, 'title' | 'description' | 'source_type' | 'source_url' | 'linked_agents'>
+  >,
+  actorUserId?: string,
 ): Promise<void> {
   const current = await tasksApi.get(taskId);
   const updatePayload: Record<string, unknown> = {};
@@ -382,18 +409,23 @@ export async function updateTaskAsync(
   if (patch.source_url !== undefined) updatePayload.source_url = patch.source_url;
 
   const ui = readTaskUiMeta(current.metadata_json, current.creator_user_id);
-  const nextParticipants = actorUserId && !ui.participants.includes(actorUserId)
-    ? [...ui.participants, actorUserId]
-    : ui.participants;
+  const nextParticipants =
+    actorUserId && !ui.participants.includes(actorUserId)
+      ? [...ui.participants, actorUserId]
+      : ui.participants;
   if (nextParticipants !== ui.participants) {
-    updatePayload.metadata_json = writeTaskUiMeta(current.metadata_json, { participants: nextParticipants });
+    updatePayload.metadata_json = writeTaskUiMeta(current.metadata_json, {
+      participants: nextParticipants,
+    });
   }
   if (Object.keys(updatePayload).length > 0) {
     await tasksApi.update(taskId, updatePayload as Parameters<typeof tasksApi.update>[1]);
   }
 
   if (patch.linked_agents) {
-    const before = new Set(current.agents.filter((a) => a.status === 'active').map((a) => a.agent_id));
+    const before = new Set(
+      current.agents.filter((a) => a.status === 'active').map((a) => a.agent_id),
+    );
     const after = new Set(patch.linked_agents);
     const toLink = [...after].filter((id) => !before.has(id));
     const toUnlink = [...before].filter((id) => !after.has(id));

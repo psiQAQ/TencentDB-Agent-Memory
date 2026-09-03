@@ -634,6 +634,39 @@ upsert binding（`proxy`\|`byo`）。**幂等**：重复 set 覆盖。
 
 ---
 
+## 3.6 Internal Lifecycle（2）
+
+> `/v3/internal/lifecycle/*` 仅供 Panel control plane。必须同时提供
+> `Authorization: Bearer <KNOWLEDGE_AUTH_TOKEN>` 与有效 `x-tdai-service-id`；token 未配置时
+> fail closed 返回 503。接口不返回正文、prompt、描述、content_ref 或凭证。
+
+### POST /v3/internal/lifecycle/ownership/transfer
+
+以 `from_owner_user_id` 做 compare-and-swap，迁移 Wiki/Code Graph backing owner。
+`processing` 资源拒绝迁移；已经属于目标 owner 时按幂等成功返回。
+
+```json
+{
+  "resource_type": "llm_wiki",
+  "resource_id": "wiki-xxx",
+  "from_owner_user_id": "usr-old",
+  "to_owner_user_id": "usr-new"
+}
+```
+
+该接口只是跨服务 saga 的 backing 阶段；只有后续 Core metadata finalize 成功才算完整转移，
+失败时 Panel 会反向 CAS 补偿。
+
+### POST /v3/internal/lifecycle/integrity/inventory
+
+返回当前实例 Wiki/Code Graph 的 content-free inventory，供 system_admin 僵尸扫描与 Core
+metadata 对账。字段限定为 resource type/ID、Team、owner、name、status 和时间戳。
+
+`/v3/wiki/delete` 与 `/v3/code-graph/delete` 同样要求该 Bearer token。普通调用方必须
+通过 Panel 的 owner-only lifecycle 入口删除，不能直连绕过 ownership journal。
+
+---
+
 ## 4. 附录
 
 ### 4.1 与 MemoryCore 的关键差异（跨卷对接必读）
@@ -641,7 +674,7 @@ upsert binding（`proxy`\|`byo`）。**幂等**：重复 set 覆盖。
 | 维度 | MemoryCore（卷一） | MemoryKnowledge（本卷） |
 |---|---|---|
 | 信封 | `{ code, message, request_id, data }` | `{ code, message, data }`（**无 request_id**） |
-| 鉴权 | Bearer + service-id + user-key 分层 | 仅 `x-tdai-service-id`（内网信任） |
+| 鉴权 | Bearer + service-id + user-key 分层 | 查询/创建使用 `x-tdai-service-id`；删除与 internal lifecycle 另需 control-plane Bearer |
 | 错误 message | 三类格式（枚举 / 5 位 code / `CODE: detail`） | 小写英文句子（按 HTTP code 分支） |
 | 分页出参 | `{ items, total, limit, offset }` | `{ items, total }`（无 limit/offset 回显） |
 | ID 前缀 | skill `skl-` 等 | wiki `wiki-`、code-graph `cg-` |

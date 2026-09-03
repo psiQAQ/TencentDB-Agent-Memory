@@ -259,6 +259,19 @@ export class SqliteKnowledgeStore implements IKnowledgeStore {
     return this.getCodeGraphById(serviceId, codeGraphId);
   }
 
+  transferCodeGraphOwner(serviceId: string, codeGraphId: string, fromOwnerUserId: string, toOwnerUserId: string): CodeGraphRow | null {
+    const current = this.getCodeGraphById(serviceId, codeGraphId);
+    if (!current || current.owner_user_id !== fromOwnerUserId || current.status === "processing") return null;
+    this.db.update(knowledgeCodeGraph)
+      .set({ ownerUserId: toOwnerUserId, updatedAt: nowIso() })
+      .where(and(
+        eq(knowledgeCodeGraph.serviceId, serviceId),
+        eq(knowledgeCodeGraph.codeGraphId, codeGraphId),
+        eq(knowledgeCodeGraph.ownerUserId, fromOwnerUserId),
+      )).run();
+    return this.getCodeGraphById(serviceId, codeGraphId);
+  }
+
   // ═══════════════════════ Wiki ═══════════════════════
 
   createWiki(input: CreateWikiInput): CreateResult<WikiRow> {
@@ -449,6 +462,19 @@ export class SqliteKnowledgeStore implements IKnowledgeStore {
     return this.getWikiById(serviceId, wikiId);
   }
 
+  transferWikiOwner(serviceId: string, wikiId: string, fromOwnerUserId: string, toOwnerUserId: string): WikiRow | null {
+    const current = this.getWikiById(serviceId, wikiId);
+    if (!current || current.owner_user_id !== fromOwnerUserId || current.status === "processing") return null;
+    this.db.update(knowledgeWiki)
+      .set({ ownerUserId: toOwnerUserId, updatedAt: nowIso() })
+      .where(and(
+        eq(knowledgeWiki.serviceId, serviceId),
+        eq(knowledgeWiki.wikiId, wikiId),
+        eq(knowledgeWiki.ownerUserId, fromOwnerUserId),
+      )).run();
+    return this.getWikiById(serviceId, wikiId);
+  }
+
   // ═══════════════════════ Audit ═══════════════════════
 
   appendWikiAudit(input: AuditLogInput): void {
@@ -589,6 +615,37 @@ export class SqliteKnowledgeStore implements IKnowledgeStore {
         and(eq(knowledgeWiki.status, "ready"), isNull(knowledgeWiki.deletedAt)),
       )
       .all();
+  }
+
+  listIntegrityInventory(serviceId: string): import("./types.js").KnowledgeInventoryItem[] {
+    const wikis = this.db.select().from(knowledgeWiki)
+      .where(and(eq(knowledgeWiki.serviceId, serviceId), isNull(knowledgeWiki.deletedAt))).all();
+    const graphs = this.db.select().from(knowledgeCodeGraph)
+      .where(and(eq(knowledgeCodeGraph.serviceId, serviceId), isNull(knowledgeCodeGraph.deletedAt))).all();
+    return [
+      ...wikis.map((row) => ({
+        resource_type: "llm_wiki" as const,
+        resource_id: row.wikiId,
+        service_id: row.serviceId,
+        team_id: row.teamId,
+        owner_user_id: row.ownerUserId ?? null,
+        status: row.status,
+        name: row.name,
+        created_at: row.createdAt,
+        updated_at: row.updatedAt,
+      })),
+      ...graphs.map((row) => ({
+        resource_type: "code_graph" as const,
+        resource_id: row.codeGraphId,
+        service_id: row.serviceId,
+        team_id: row.teamId,
+        owner_user_id: row.ownerUserId ?? null,
+        status: row.status,
+        name: row.repoName ?? row.codeGraphId,
+        created_at: row.createdAt,
+        updated_at: row.updatedAt,
+      })),
+    ];
   }
 
   // ═══════════════════════ Mappers ═══════════════════════

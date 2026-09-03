@@ -7,7 +7,7 @@
 import { useState } from 'react';
 import { Alert, Button, Copy, Form, Input, Modal, Select, Tag } from 'tea-component';
 import { useTranslation } from 'react-i18next';
-import { AddIcon, CloseIcon } from 'tea-icons-react';
+import { AddIcon } from 'tea-icons-react';
 import { isTeamAdmin, invalidateBackendCache, type Team } from '@/services';
 import {
   ApiError,
@@ -33,22 +33,13 @@ export function MemberSection({
 }) {
   const [removing, setRemoving] = useState<string | null>(null);
   const [updating, setUpdating] = useState<string | null>(null);
-  const [blocker, setBlocker] = useState<{ userId: string; dependencies: UserDependencies } | null>(null);
+  const [blocker, setBlocker] = useState<{ userId: string; dependencies: UserDependencies } | null>(
+    null,
+  );
   const { t } = useTranslation();
   const canManageMembers = isTeamAdmin(team, currentUser);
 
   async function handleRemove(userId: string) {
-    let dependencies: UserDependencies;
-    try {
-      dependencies = await usersApi.dependenciesAll(userId, { team_id: team.team_id });
-    } catch (err) {
-      tea.notify.error(getErrorMessage(err));
-      return;
-    }
-    if (dependencies.counts.agents + dependencies.counts.tasks + dependencies.counts.assets > 0) {
-      setBlocker({ userId, dependencies });
-      return;
-    }
     const ok = await tea.confirm({
       message: t('member.remove.confirm', { userId }),
       description: t('member.remove.desc'),
@@ -77,11 +68,37 @@ export function MemberSection({
     }
   }
 
+  async function handleLeave() {
+    const ok = await tea.confirm({
+      message: t('member.leave.confirm'),
+      description: t('member.leave.desc'),
+      okText: t('member.leave.action'),
+    });
+    if (!ok) return;
+    setRemoving(currentUser);
+    try {
+      await membersApi.leave(team.team_id);
+      invalidateBackendCache();
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 409) {
+        try {
+          setBlocker({
+            userId: currentUser,
+            dependencies: await usersApi.dependenciesAll(currentUser, { team_id: team.team_id }),
+          });
+        } catch (refreshErr) {
+          tea.notify.error(getErrorMessage(refreshErr));
+        }
+      } else tea.notify.error(getErrorMessage(err));
+    } finally {
+      setRemoving(null);
+    }
+  }
+
   async function handleRoleChange(userId: string, role: MemberRole) {
     setUpdating(userId);
     try {
-      // team-member/add 是幂等 upsert：已有成员时更新 role。
-      await membersApi.add(team.team_id, { user_id: userId, role });
+      await membersApi.updateRole(team.team_id, userId, role);
       invalidateBackendCache();
     } catch (err) {
       tea.notify.error(getErrorMessage(err));
@@ -95,10 +112,14 @@ export function MemberSection({
       <div className="_memory-section-header">
         <div className="_memory-section-header-info">
           <div className="_memory-section-header-title-row">
-            <div className="_memory-section-title">{t('member.title', { count: team.members.length })}</div>
+            <div className="_memory-section-title">
+              {t('member.title', { count: team.members.length })}
+            </div>
             <Tag size="sm">{team.team_id}</Tag>
           </div>
-          <div className="_memory-section-subtitle">{t('member.subtitle', { name: team.name })}</div>
+          <div className="_memory-section-subtitle">
+            {t('member.subtitle', { name: team.name })}
+          </div>
         </div>
         {canManageMembers && (
           <Button onClick={onAdd} title={t('member.add.tooltip')} data-guide="add-member">
@@ -121,10 +142,12 @@ export function MemberSection({
               isMe={isMe}
               canEditRole={canManageMembers && !isOwner && !isMe}
               canRemove={canRemoveMember(team, member.user_id, currentUser)}
+              canLeave={isMe}
               updating={updating === member.user_id}
               removing={removing === member.user_id}
               onRoleChange={(role) => void handleRoleChange(member.user_id, role)}
               onRemove={() => void handleRemove(member.user_id)}
+              onLeave={() => void handleLeave()}
             />
           );
         })}
@@ -166,7 +189,9 @@ function OwnedResourceBlockerModal({
         <DependencyList items={items} />
       </Modal.Body>
       <Modal.Footer>
-        <Button type="primary" onClick={onClose}>{t('header.profile.close')}</Button>
+        <Button type="primary" onClick={onClose}>
+          {t('header.profile.close')}
+        </Button>
       </Modal.Footer>
     </Modal>
   );
@@ -178,10 +203,17 @@ function DependencyList({ items }: { items: OwnedResourceDependency[] }) {
   return (
     <div style={{ marginTop: 12, maxHeight: 320, overflow: 'auto' }}>
       {items.map((item) => (
-        <div key={`${item.resource_type}:${item.resource_id}`} style={{ padding: '8px 0', borderBottom: '1px solid var(--tea-color-border-secondary)' }}>
-          <div><Tag size="sm">{item.resource_type}</Tag> <strong>{item.name || item.resource_id}</strong></div>
+        <div
+          key={`${item.resource_type}:${item.resource_id}`}
+          style={{ padding: '8px 0', borderBottom: '1px solid var(--tea-color-border-secondary)' }}
+        >
+          <div>
+            <Tag size="sm">{item.resource_type}</Tag>{' '}
+            <strong>{item.name || item.resource_id}</strong>
+          </div>
           <div style={{ marginTop: 4, color: 'var(--tea-color-text-secondary)' }}>
-            <code>{item.resource_id}</code> · {item.status} · {t('resources.membership')}: {item.membership_status}
+            <code>{item.resource_id}</code> · {item.status} · {t('resources.membership')}:{' '}
+            {item.membership_status}
           </div>
         </div>
       ))}
@@ -197,10 +229,12 @@ function MemberCard({
   isMe,
   canEditRole,
   canRemove,
+  canLeave,
   updating,
   removing,
   onRoleChange,
   onRemove,
+  onLeave,
 }: {
   userId: string;
   username?: string;
@@ -209,10 +243,12 @@ function MemberCard({
   isMe: boolean;
   canEditRole: boolean;
   canRemove: boolean;
+  canLeave: boolean;
   updating: boolean;
   removing: boolean;
   onRoleChange: (role: MemberRole) => void;
   onRemove: () => void;
+  onLeave: () => void;
 }) {
   const { t } = useTranslation();
   const displayName = username?.trim() || userId;
@@ -229,12 +265,16 @@ function MemberCard({
           {isMe && <span className="_memory-member-me-tag">{t('member.me')}</span>}
         </div>
         {hasUsername && (
-          <div className="_memory-member-role" style={{ fontSize: '10px', color: 'var(--tea-color-text-tertiary)' }}>
+          <div
+            className="_memory-member-role"
+            style={{ fontSize: '10px', color: 'var(--tea-color-text-tertiary)' }}
+          >
             {userId}
           </div>
         )}
         <div className="_memory-member-role">
-          {role}{isOwner ? t('member.role.creator') : ''}
+          {role}
+          {isOwner ? t('member.role.creator') : ''}
         </div>
       </div>
       <div className="_memory-member-actions">
@@ -251,16 +291,14 @@ function MemberCard({
           ]}
         />
         {canRemove && (
-          <button
-            type="button"
-            onClick={(event) => { event.stopPropagation(); onRemove(); }}
-            disabled={removing}
-            className="_memory-member-remove-btn"
-            title={t('member.remove.tooltip')}
-            aria-label={t('member.remove.tooltip')}
-          >
-            {removing ? '…' : <CloseIcon size={12} />}
-          </button>
+          <Button type="link" disabled={removing} onClick={onRemove}>
+            {t('member.remove.action')}
+          </Button>
+        )}
+        {canLeave && (
+          <Button type="link" disabled={removing || isOwner} onClick={onLeave}>
+            {isOwner ? t('member.leave.transferFirst') : t('member.leave.action')}
+          </Button>
         )}
       </div>
     </div>
@@ -308,7 +346,12 @@ export function AddMemberDialog({
   return (
     <Modal
       visible
-      caption={<>{t('addMember.caption', { name: team.name })}<Tag size="sm">{team.team_id}</Tag></>}
+      caption={
+        <>
+          {t('addMember.caption', { name: team.name })}
+          <Tag size="sm">{team.team_id}</Tag>
+        </>
+      }
       size="m"
       onClose={onClose}
       disableEscape={submitting}
@@ -322,7 +365,10 @@ export function AddMemberDialog({
                 autoFocus
                 size="full"
                 value={userId}
-                onChange={(value) => { setUserId(value); setError(null); }}
+                onChange={(value) => {
+                  setUserId(value);
+                  setError(null);
+                }}
                 onPressEnter={() => void submit()}
                 placeholder={t('addMember.userId.placeholder')}
               />
@@ -342,14 +388,25 @@ export function AddMemberDialog({
             />
             <div className="_memory-field-hint">{t('addMember.role.hint')}</div>
           </Form.Item>
-          {error && <Form.Item><Alert type="error">{error}</Alert></Form.Item>}
+          {error && (
+            <Form.Item>
+              <Alert type="error">{error}</Alert>
+            </Form.Item>
+          )}
         </Form>
       </Modal.Body>
       <Modal.Footer>
-        <Button type="primary" onClick={() => void submit()} disabled={!userId.trim() || submitting} loading={submitting}>
+        <Button
+          type="primary"
+          onClick={() => void submit()}
+          disabled={!userId.trim() || submitting}
+          loading={submitting}
+        >
           {t('addMember.existing.submit')}
         </Button>
-        <Button onClick={onClose} disabled={submitting}>{t('addMember.cancel')}</Button>
+        <Button onClick={onClose} disabled={submitting}>
+          {t('addMember.cancel')}
+        </Button>
       </Modal.Footer>
     </Modal>
   );
@@ -370,9 +427,13 @@ export function CreatedUserKeyModal({
     <Modal visible caption={t('createdUserKey.caption')} size="m" onClose={onClose}>
       <Modal.Body>
         <Form>
-          <Alert type="success">{t('createdUserKey.success', { username: info.username, userId: info.userId })}</Alert>
+          <Alert type="success">
+            {t('createdUserKey.success', { username: info.username, userId: info.userId })}
+          </Alert>
           <div className="space-y-4 text-[13px]">
-            <Alert type="warning"><strong>{t('createdUserKey.warning')}</strong></Alert>
+            <Alert type="warning">
+              <strong>{t('createdUserKey.warning')}</strong>
+            </Alert>
             <Form.Item label={t('createdUserKey.keyLabel')}>
               <div className="flex items-center gap-2">
                 <code className="flex-1 rounded border bg-muted px-3 py-2 text-[12px] font-mono break-all select-all">
@@ -389,7 +450,9 @@ export function CreatedUserKeyModal({
         </Form>
       </Modal.Body>
       <Modal.Footer>
-        <Button type="primary" onClick={onClose}>{t('createdUserKey.close')}</Button>
+        <Button type="primary" onClick={onClose}>
+          {t('createdUserKey.close')}
+        </Button>
       </Modal.Footer>
     </Modal>
   );

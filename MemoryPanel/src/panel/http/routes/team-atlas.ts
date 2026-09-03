@@ -98,6 +98,7 @@ interface TaskRaw {
   title: string;
   status?: string;
   creator_user_id?: string;
+  owner_user_id?: string;
   source_type?: string;
 }
 
@@ -280,7 +281,7 @@ export function resolveTaskActivityVisibility(
   const canSeeWholeTeam = team.owner_user_id === userId || role === 'admin';
   return Object.fromEntries(tasks.map((task) => [
     task.task_id,
-    canSeeWholeTeam || task.creator_user_id === userId ? 'full' : 'self_only',
+    canSeeWholeTeam || task.owner_user_id === userId ? 'full' : 'self_only',
   ]));
 }
 
@@ -443,7 +444,7 @@ export function buildTeamAtlasIR(
     const activeTaskIds = new Set(tasks.map((task) => task.task_id));
     const referencedIdentityIds = new Set<string>([
       team.owner_user_id,
-      ...tasks.flatMap((task) => (task.creator_user_id ? [task.creator_user_id] : [])),
+      ...tasks.flatMap((task) => [task.creator_user_id, task.owner_user_id].filter((id): id is string => !!id)),
       ...agents.map((agent) => agent.owner_user_id),
       ...snapshot.participationLogs
         .filter((item) => activeTaskIds.has(item.task_id))
@@ -480,6 +481,7 @@ export function buildTeamAtlasIR(
         team_id: team.team_id,
         status: task.status,
         metadata: {
+          owner_user_id: task.owner_user_id ?? task.creator_user_id ?? null,
           creator_user_id: task.creator_user_id ?? null,
           source_type: task.source_type ?? null,
           last_participated_at: lastParticipatedAt || null,

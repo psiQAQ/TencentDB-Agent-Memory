@@ -24,6 +24,7 @@ interface OwnedEntity {
   resource_type: ResourceType;
   resource_id: string;
   team_id: string;
+  owner_user_id: string;
   asset_type?: 'skill' | 'llm_wiki' | 'code_graph' | 'chat_memory';
 }
 
@@ -45,6 +46,21 @@ function assertDeletedOrAbsent(result: DeleteResult, id: string, label: string):
   }
 }
 
+async function finalizeAssetDelete(
+  deps: PanelDeps,
+  ctx: MetaCallContext,
+  assetId: string,
+  ownerUserId: string,
+): Promise<void> {
+  const env = await deps.kernelHttp.postEnvelope<DeleteResult>(
+    '/v3/internal/meta/asset/finalize-delete',
+    { asset_id: assetId, expected_owner_user_id: ownerUserId },
+    toKernelCredentials(ctx, { timeoutMs: deps.config.metadataRemoteTimeoutMs }, { omitUserKey: true }),
+  );
+  if (env.code !== 0) throw new Error(env.message || 'ASSET_FINALIZE_DELETE_FAILED');
+  assertDeletedOrAbsent(env.data ?? {}, assetId, 'ASSET_FINALIZE_DELETE_FAILED');
+}
+
 async function deleteKnowledgeBackingAndMetadata(
   deps: PanelDeps,
   ctx: MetaCallContext,
@@ -64,9 +80,7 @@ async function deleteKnowledgeBackingAndMetadata(
   if (detailEnv.code !== 0) throw new Error(detailEnv.message || 'KNOWLEDGE_DETAIL_DELETE_FAILED');
   assertDeletedOrAbsent(detailEnv.data ?? {}, entity.resource_id, 'KNOWLEDGE_DETAIL_DELETE_FAILED');
 
-  const metaEnv = await deps.metaKernel.invoke('asset/delete', { asset_ids: [entity.resource_id] }, ctx);
-  if (metaEnv.code !== 0) throw new Error(metaEnv.message || 'ASSET_DELETE_FAILED');
-  assertDeletedOrAbsent((metaEnv.data ?? {}) as DeleteResult, entity.resource_id, 'ASSET_DELETE_FAILED');
+  await finalizeAssetDelete(deps, ctx, entity.resource_id, entity.owner_user_id);
 }
 
 function parseResourceRefs(body: Record<string, unknown>): ResourceRef[] | null {
@@ -124,9 +138,7 @@ async function deleteSkill(
   const skills = await listAgentSkills(deps, ctx, userId, teamId, knownAgentId);
   const skill = skills.find((item) => item.skill_id === skillId);
   if (!skill) {
-    const metaEnv = await deps.metaKernel.invoke('asset/delete', { asset_ids: [skillId] }, ctx);
-    if (metaEnv.code !== 0) throw new Error(metaEnv.message || 'ASSET_DELETE_FAILED');
-    assertDeletedOrAbsent((metaEnv.data ?? {}) as DeleteResult, skillId, 'ASSET_DELETE_FAILED');
+    await finalizeAssetDelete(deps, ctx, skillId, userId);
     return;
   }
   const env = await deps.skillKernel.invoke('delete', {
@@ -137,15 +149,14 @@ async function deleteSkill(
     expected_version: skill.version,
   }, ctx);
   if (env.code !== 0 && env.code !== 40401) throw new Error(env.message || 'SKILL_DELETE_FAILED');
-  const metaEnv = await deps.metaKernel.invoke('asset/delete', { asset_ids: [skillId] }, ctx);
-  if (metaEnv.code !== 0) throw new Error(metaEnv.message || 'ASSET_DELETE_FAILED');
-  assertDeletedOrAbsent((metaEnv.data ?? {}) as DeleteResult, skillId, 'ASSET_DELETE_FAILED');
+  await finalizeAssetDelete(deps, ctx, skillId, userId);
 }
 
 async function clearAndDeleteChatMemory(
   deps: PanelDeps,
   ctx: MetaCallContext,
   memoryId: string,
+  ownerUserId: string,
 ): Promise<void> {
   const env = await deps.kernelHttp.postEnvelope<{
     items?: Array<{ memory_id: string; cleared: boolean; reason?: string }>;
@@ -158,9 +169,7 @@ async function clearAndDeleteChatMemory(
   if (env.code !== 0 || env.data?.all_cleared === false) {
     throw new Error(env.message || env.data?.items?.[0]?.reason || 'CHAT_MEMORY_CLEAR_FAILED');
   }
-  const metaEnv = await deps.metaKernel.invoke('asset/delete', { asset_ids: [memoryId] }, ctx);
-  if (metaEnv.code !== 0) throw new Error(metaEnv.message || 'ASSET_DELETE_FAILED');
-  assertDeletedOrAbsent((metaEnv.data ?? {}) as DeleteResult, memoryId, 'ASSET_DELETE_FAILED');
+  await finalizeAssetDelete(deps, ctx, memoryId, ownerUserId);
 }
 
 async function purgeAsset(
@@ -182,7 +191,7 @@ async function purgeAsset(
       return;
     }
     case 'chat_memory':
-      await clearAndDeleteChatMemory(deps, ctx, entity.resource_id);
+      await clearAndDeleteChatMemory(deps, ctx, entity.resource_id, userId);
       return;
     default: {
       const env = await deps.metaKernel.invoke('asset/delete', { asset_ids: [entity.resource_id] }, ctx);
@@ -207,7 +216,7 @@ async function purgeAgent(
   const memoryId = `chat_memory-${entity.team_id}-${entity.resource_id}`;
   const memoryEnv = await deps.metaKernel.invoke('asset/get', { asset_id: memoryId }, ctx);
   if (memoryEnv.code === 0 && memoryEnv.data) {
-    await clearAndDeleteChatMemory(deps, ctx, memoryId);
+    await clearAndDeleteChatMemory(deps, ctx, memoryId, userId);
     deletedChildren.push(memoryId);
   } else if (memoryEnv.code !== 404) {
     throw new Error(memoryEnv.message || 'CHAT_MEMORY_LOOKUP_FAILED');
@@ -219,6 +228,137 @@ async function purgeAgent(
 }
 
 export function registerAccountOwnedResourceRoutes(api: Hono, deps: PanelDeps): void {
+  api.post('/account/ownership/transfer', validatePanelMetaHeaders(deps), async (c) => {
+    const ctx = buildCtx(c);
+    const body = await readJson(c);
+    const teamId = str(body, 'team_id');
+    const idempotencyKey = str(body, 'idempotency_key');
+    if (!teamId) return respondControlError(c, 400, 'MISSING_TEAM_ID');
+    if (!idempotencyKey || !/^[0-9a-f]{8}-[0-9a-f-]{27}$/i.test(idempotencyKey)) {
+      return respondControlError(c, 400, 'INVALID_IDEMPOTENCY_KEY');
+    }
+    if (str(body, 'confirmation') !== 'TRANSFER_OWNERSHIP') {
+      return respondControlError(c, 400, 'CONFIRMATION_REQUIRED');
+    }
+    if (!Array.isArray(body.transfers) || body.transfers.length === 0 || body.transfers.length > 100) {
+      return respondControlError(c, 400, 'INVALID_TRANSFERS');
+    }
+    const callerId = await resolveCallerUserId(deps, ctx);
+    if (!callerId) return respondControlError(c, 401, 'INVALID_USER_KEY');
+    type Transfer = { resource_type: 'team' | 'agent' | 'task' | 'asset'; resource_id: string; to_user_id: string };
+    const regular: Transfer[] = [];
+    const knowledge: Array<Transfer & { asset_type: 'llm_wiki' | 'code_graph' }> = [];
+
+    // Validate the complete batch before the first backing-store mutation.
+    for (const raw of body.transfers) {
+      if (!raw || typeof raw !== 'object') return respondControlError(c, 400, 'INVALID_TRANSFERS');
+      const item = raw as Record<string, unknown>;
+      const resourceType = item.resource_type;
+      const resourceId = typeof item.resource_id === 'string' ? item.resource_id.trim() : '';
+      const toUserId = typeof item.to_user_id === 'string' ? item.to_user_id.trim() : '';
+      if (!['team', 'agent', 'task', 'asset'].includes(String(resourceType)) || !resourceId || !toUserId) {
+        return respondControlError(c, 400, 'INVALID_TRANSFERS');
+      }
+      const transfer = { resource_type: resourceType, resource_id: resourceId, to_user_id: toUserId } as Transfer;
+      const targetEnv = await deps.metaKernel.invoke(
+        'team-member/get',
+        { team_id: teamId, user_id: toUserId },
+        ctx,
+      );
+      if (targetEnv.code !== 0) return respondEnvelope(c, targetEnv);
+      if ((targetEnv.data as { status?: string } | null)?.status !== 'active') {
+        return respondControlError(c, 409, 'TARGET_NOT_ACTIVE_MEMBER');
+      }
+      if (resourceType !== 'asset') {
+        regular.push(transfer);
+        continue;
+      }
+      const assetEnv = await deps.metaKernel.invoke('asset/get', { asset_id: resourceId }, ctx);
+      if (assetEnv.code !== 0) return respondEnvelope(c, assetEnv);
+      const asset = assetEnv.data as { team_id?: string; owner_user_id?: string; asset_type?: string } | null;
+      if (!asset || asset.team_id !== teamId) return respondControlError(c, 400, 'RESOURCE_TEAM_MISMATCH');
+      if (asset.owner_user_id !== callerId) return respondControlError(c, 403, 'NOT_RESOURCE_OWNER');
+      if (asset.asset_type === 'llm_wiki' || asset.asset_type === 'code_graph') {
+        knowledge.push({ ...transfer, asset_type: asset.asset_type });
+      } else {
+        regular.push(transfer);
+      }
+    }
+
+    const items: Array<Record<string, unknown>> = [];
+    if (regular.length > 0) {
+      const env = await deps.metaKernel.invoke('ownership/transfer', {
+        team_id: teamId,
+        transfers: regular,
+        idempotency_key: idempotencyKey,
+      }, ctx);
+      if (env.code !== 0) return respondEnvelope(c, env);
+      const resultItems = (env.data as { items?: Array<Record<string, unknown>> } | null)?.items ?? [];
+      items.push(...resultItems);
+    }
+
+    const kc = deps.knowledgeClientFactory(ctx.instanceId);
+    for (const transfer of knowledge) {
+      const operationBody = {
+        team_id: teamId,
+        asset_id: transfer.resource_id,
+        from_owner_user_id: callerId,
+        to_owner_user_id: transfer.to_user_id,
+        idempotency_key: idempotencyKey,
+      };
+      try {
+        const prepareEnv = await deps.kernelHttp.postEnvelope<{ operation_id: string; status: string }>(
+          '/v3/internal/meta/asset/prepare-transfer',
+          operationBody,
+          toKernelCredentials(ctx, { timeoutMs: deps.config.metadataRemoteTimeoutMs }, { omitUserKey: true }),
+        );
+        if (prepareEnv.code !== 0) {
+          items.push({ ...transfer, transferred: false, reason: prepareEnv.message || 'CORE_PREPARE_FAILED' });
+          continue;
+        }
+        await kc.transferOwnership({
+          resource_type: transfer.asset_type,
+          resource_id: transfer.resource_id,
+          from_owner_user_id: callerId,
+          to_owner_user_id: transfer.to_user_id,
+        });
+        const coreEnv = await deps.kernelHttp.postEnvelope<Record<string, unknown>>(
+          '/v3/internal/meta/asset/finalize-transfer',
+          operationBody,
+          toKernelCredentials(ctx, { timeoutMs: deps.config.metadataRemoteTimeoutMs }, { omitUserKey: true }),
+        );
+        if (coreEnv.code !== 0) {
+          try {
+            await kc.transferOwnership({
+              resource_type: transfer.asset_type,
+              resource_id: transfer.resource_id,
+              from_owner_user_id: transfer.to_user_id,
+              to_owner_user_id: callerId,
+            });
+          } catch {
+            await resolveKnowledgeTransfer(
+              deps, ctx, operationBody, 'inconsistent_retryable', 'CORE_FINALIZE_AND_COMPENSATION_FAILED',
+            ).catch(() => {});
+            items.push({ ...transfer, transferred: false, reason: 'INCONSISTENT_RETRYABLE' });
+            continue;
+          }
+          await resolveKnowledgeTransfer(deps, ctx, operationBody, 'failed', 'CORE_FINALIZE_FAILED');
+          items.push({ ...transfer, transferred: false, reason: coreEnv.message || 'CORE_FINALIZE_FAILED' });
+          continue;
+        }
+        items.push(coreEnv.data ?? { ...transfer, transferred: true });
+      } catch (err) {
+        await resolveKnowledgeTransfer(deps, ctx, operationBody, 'failed', 'KNOWLEDGE_TRANSFER_FAILED').catch(() => {});
+        items.push({
+          ...transfer,
+          transferred: false,
+          reason: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+    return respondEnvelope(c, okEnvelope(c, { items }));
+  });
+
   api.post('/account/owned-resources/purge', validatePanelMetaHeaders(deps), async (c) => {
     const ctx = buildCtx(c);
     const body = await readJson(c);
@@ -252,12 +392,12 @@ export function registerAccountOwnedResourceRoutes(api: Hono, deps: PanelDeps): 
       }
       if (env.code !== 0) return respondEnvelope(c, env);
       const item = env.data as Record<string, unknown>;
-      const ownerField = ref.resource_type === 'task' ? 'creator_user_id' : 'owner_user_id';
-      if (item[ownerField] !== callerId) return respondControlError(c, 403, 'NOT_RESOURCE_OWNER');
+      if (item.owner_user_id !== callerId) return respondControlError(c, 403, 'NOT_RESOURCE_OWNER');
       if (item.team_id !== teamId) return respondControlError(c, 400, 'RESOURCE_TEAM_MISMATCH');
       validated.push({
         ...ref,
         team_id: teamId,
+        owner_user_id: callerId,
         asset_type: ref.resource_type === 'asset'
           ? item.asset_type as OwnedEntity['asset_type']
           : undefined,
@@ -301,4 +441,19 @@ export function registerAccountOwnedResourceRoutes(api: Hono, deps: PanelDeps): 
       : null;
     return respondEnvelope(c, okEnvelope(c, { deleted, failed, remaining }));
   });
+}
+
+async function resolveKnowledgeTransfer(
+  deps: PanelDeps,
+  ctx: MetaCallContext,
+  operation: { team_id: string; asset_id: string; idempotency_key: string },
+  status: 'failed' | 'inconsistent_retryable',
+  errorCode: string,
+): Promise<void> {
+  const env = await deps.kernelHttp.postEnvelope(
+    '/v3/internal/meta/asset/resolve-transfer',
+    { ...operation, status, error_code: errorCode },
+    toKernelCredentials(ctx, { timeoutMs: deps.config.metadataRemoteTimeoutMs }, { omitUserKey: true }),
+  );
+  if (env.code !== 0) throw new Error(env.message || 'CORE_RESOLVE_OPERATION_FAILED');
 }

@@ -27,6 +27,7 @@ export interface OwnedResourceDependency {
   created_at: string;
   membership_role?: 'admin' | 'member' | 'reviewer' | null;
   membership_status: 'active' | 'removed' | 'absent';
+  team_status: string;
 }
 
 export interface UserDependencies {
@@ -35,6 +36,13 @@ export interface UserDependencies {
   limit: number;
   offset: number;
   counts: { teams: number; agents: number; tasks: number; assets: number; total: number };
+  asset_counts: {
+    skill: number;
+    llm_wiki: number;
+    code_graph: number;
+    chat_memory: number;
+    other: number;
+  };
 }
 
 export interface OwnedResourceRef {
@@ -49,6 +57,51 @@ export interface OwnedResourcePurgeResult {
 }
 
 export const ownedResourcesApi = {
+  transfer: async (
+    teamId: string,
+    transfers: Array<{
+      resource_type: 'team' | 'agent' | 'task' | 'asset';
+      resource_id: string;
+      to_user_id: string;
+    }>,
+  ) => {
+    const session = getPanelSession();
+    if (!session) throw new ApiError(401, 'Unauthorized', 'no active panel session');
+    const envelope = await request<
+      MetaEnvelope<{
+        items: Array<{
+          resource_type: string;
+          resource_id: string;
+          transferred: boolean;
+          reason?: string;
+          implicit_asset_ids: string[];
+          removed_binding_ids: string[];
+        }>;
+      }>
+    >(
+      'POST',
+      '/api/v1/account/ownership/transfer',
+      {
+        team_id: teamId,
+        transfers,
+        idempotency_key: crypto.randomUUID(),
+        confirmation: 'TRANSFER_OWNERSHIP',
+      },
+      {
+        'X-Tdai-Service-Id': session.instanceId,
+        'X-Tdai-User-Key': session.userKey,
+      },
+    );
+    if (envelope.code !== 0 || !envelope.data) {
+      throw new ApiError(envelope.code, envelope.message, '', {
+        code: envelope.code,
+        requestId: envelope.request_id,
+        rawMessage: envelope.message,
+        data: envelope.data,
+      });
+    }
+    return envelope.data;
+  },
   purge: async (teamId: string, resources: OwnedResourceRef[]) => {
     const session = getPanelSession();
     if (!session) throw new ApiError(401, 'Unauthorized', 'no active panel session');
@@ -75,15 +128,28 @@ export const ownedResourcesApi = {
 
 export const usersApi = {
   /** 分页列出用户；可传入 { username } 精确匹配或 { user_ids } 过滤 */
-  list: (params?: { username?: string; user_ids?: string[] }) => metaListAll<PublicUser>('user/list', { ...params }),
+  list: (params?: { username?: string; user_ids?: string[] }) =>
+    metaListAll<PublicUser>('user/list', { ...params }),
 
   /** 用户详情 */
   get: (userId: string) => metaPost<PublicUser>('user/get', { user_id: userId }),
 
   dependencies: (
     userId: string,
-    params: { team_id?: string; resource_type?: OwnedResourceType; status?: string; limit?: number; offset?: number } = {},
-  ) => metaPost<UserDependencies>('user/dependencies', { user_id: userId, limit: 100, offset: 0, ...params }),
+    params: {
+      team_id?: string;
+      resource_type?: OwnedResourceType;
+      status?: string;
+      limit?: number;
+      offset?: number;
+    } = {},
+  ) =>
+    metaPost<UserDependencies>('user/dependencies', {
+      user_id: userId,
+      limit: 100,
+      offset: 0,
+      ...params,
+    }),
 
   dependenciesAll: async (
     userId: string,
@@ -106,7 +172,14 @@ export const usersApi = {
     }
     return latest
       ? { ...latest, items, total: items.length, limit: items.length, offset: 0 }
-      : { items: [], total: 0, limit: 0, offset: 0, counts: { teams: 0, agents: 0, tasks: 0, assets: 0, total: 0 } };
+      : {
+          items: [],
+          total: 0,
+          limit: 0,
+          offset: 0,
+          counts: { teams: 0, agents: 0, tasks: 0, assets: 0, total: 0 },
+          asset_counts: { skill: 0, llm_wiki: 0, code_graph: 0, chat_memory: 0, other: 0 },
+        };
   },
 
   /**
@@ -117,8 +190,13 @@ export const usersApi = {
    *
    * ⚠️ 权限：须当前用户持有 system_admin 权限；普通用户 → 403。
    */
-  create: (data: { username: string; auth_provider: string; external_id: string; display_name?: string; email?: string }) =>
-    metaPost<CreateUserResult>('user/create', data),
+  create: (data: {
+    username: string;
+    auth_provider: string;
+    external_id: string;
+    display_name?: string;
+    email?: string;
+  }) => metaPost<CreateUserResult>('user/create', data),
 
   /**
    * 新建用户并显式指定 user_key（透明代理至后端 user/create-with-key）。
@@ -137,10 +215,11 @@ export const usersApi = {
    *
    * ⚠️ 权限同上，须 system_admin 才能调用。
    */
-  delete: (userId: string) => metaPost<{ deleted_ids: string[]; failed: Array<{ id: string; reason: string }> }>(
-    'user/delete',
-    { user_ids: [userId] },
-  ),
+  delete: (userId: string) =>
+    metaPost<{ deleted_ids: string[]; failed: Array<{ id: string; reason: string }> }>(
+      'user/delete',
+      { user_ids: [userId] },
+    ),
 };
 
 // ========================= User API Keys（meta/user-key/*）=========================
@@ -173,7 +252,8 @@ export const userKeysApi = {
     ),
 
   /** 创建一把新 Key；返回值里的 key_value 明文只展示这一次，调用方需立即展示给用户 */
-  create: (data: { name?: string; expires_at?: string; user_id?: string }) => metaPost<UserKey>('user-key/create', data),
+  create: (data: { name?: string; expires_at?: string; user_id?: string }) =>
+    metaPost<UserKey>('user-key/create', data),
 
   /** 吊销一把 Key */
   revoke: (keyId: string) => metaPost<{ ok: boolean }>('user-key/revoke', { key_id: keyId }),
@@ -181,7 +261,8 @@ export const userKeysApi = {
 
 // ========================= User Config（meta/config/user/*）=========================
 
-export type AssetCapabilityKey = 'skill.enabled' | 'llm_wiki.enabled' | 'code_graph.enabled' | 'chat_memory.enabled';
+export type AssetCapabilityKey =
+  'skill.enabled' | 'llm_wiki.enabled' | 'code_graph.enabled' | 'chat_memory.enabled';
 
 export interface UserConfigItem {
   module: string;

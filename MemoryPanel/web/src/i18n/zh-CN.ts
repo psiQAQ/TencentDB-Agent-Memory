@@ -15,6 +15,7 @@ export const zhCN = {
   'menu.team_agents': 'Agents 管理',
   'menu.owned_resources': '我的资源依赖',
   'menu.user_management': '用户管理',
+  'menu.zombie_resources': '僵尸资源',
   'menu.api_keys': 'API Key',
   'menu.group.workbench': '工作台',
   'menu.group.organization': '组织与权限',
@@ -111,6 +112,21 @@ export const zhCN = {
   'menu.desc.owned_resources': '查看 ownership 与永久清理',
   'menu.desc.user_management': '全局账号 / 类型 / 创建与安全删除',
   'menu.desc.api_keys': '管理你的 API Key，用于外部客户端接入',
+  'menu.desc.zombie_resources': '扫描并治理失去合法归属路径的残留数据',
+  'orphans.title': '僵尸资源治理',
+  'orphans.desc': '查看来源、原 Team/owner 和可执行动作；扫描结果不包含业务内容或凭证。',
+  'orphans.scan': '重新扫描',
+  'orphans.boundary':
+    'Team 和用户仍存在的 recoverable_dependency 只能走恢复 membership 与本人交接，system_admin 不能清理。',
+  'orphans.pending': '待处置',
+  'orphans.history': '历史保留',
+  'orphans.empty': '没有可处置的完整性问题。',
+  'orphans.reason': '填写治理原因（至少 3 个字符）',
+  'orphans.purge.action': '清理选中僵尸',
+  'orphans.purge.confirm': '确认清理 {{count}} 项真正僵尸？',
+  'orphans.purge.desc': '服务端会按 finding fingerprint 重新验证；状态变化的条目将拒绝清理。',
+  'orphans.purge.partial': '{{failed}} 项因状态变化或清理失败而保留。',
+  'orphans.purge.success': '已清理 {{count}} 项僵尸关系。',
 
   // ===== 用户管理（仅 system_admin）=====
   'users.title': '用户管理',
@@ -133,28 +149,55 @@ export const zhCN = {
   'users.create.emptyKey': '请输入自定义 User_Key。',
   'users.create.submit': '创建 normal 用户',
   'users.delete.confirm': '删除用户「{{username}}」？',
-  'users.delete.desc': 'user_id：{{userId}}。若该用户仍拥有 Team、Agent、Task 或 Asset，Core 将拒绝整次删除。',
+  'users.delete.desc':
+    'user_id：{{userId}}。若该用户仍拥有 Team、Agent、Task 或 Asset，Core 将拒绝整次删除。',
   'users.delete.systemAdminLocked': 'bootstrap system_admin 不可删除',
   'users.dependencies.title': '资源与组织依赖',
-  'users.dependencies.counts': 'Team {{teams}} · Agent {{agents}} · Task {{tasks}} · Asset {{assets}}',
-  'users.dependencies.blockedWorkflow': '该账号仍有 ownership，不能删除。处理顺序：Team admin 恢复 membership → 用户本人永久清理 → Team admin 移除 membership → system_admin 删除账号。归档不解除 ownership。',
+  'users.dependencies.counts':
+    'Team {{teams}} · Agent {{agents}} · Task {{tasks}} · Asset {{assets}}',
+  'users.dependencies.blockedWorkflow':
+    '该账号仍有 ownership，不能删除。处理顺序：Team admin 恢复 membership → 用户本人永久清理 → Team admin 移除 membership → system_admin 删除账号。归档不解除 ownership。',
   'users.dependencies.empty': '该用户没有 ownership 依赖，可以进入账号删除确认。',
   'users.dependencies.orphan': '资源存在，但用户已不在 Team',
 
   // ===== 我的资源依赖 =====
   'resources.title': '我的资源依赖',
-  'resources.desc': '查看自己在所有 Team 中拥有的资源；永久清理仅对本人拥有且 membership=active 的资源开放。',
+  'resources.transfer.title': '转移 ownership',
+  'resources.transfer.action': '转移 ownership',
+  'resources.transfer.confirm': '将 {{count}} 项资源直接转给 {{target}}？',
+  'resources.transfer.desc':
+    '接收者无需确认。Agent 会连同 self Chat Memory 和 Agent-owned Skills 一并转移；Team 只能转给 active admin。',
+  'resources.transfer.partial': '{{failed}} 项转移失败，请刷新后仅重试失败项。',
+  'resources.transfer.success': '已转移 {{count}} 项资源。',
+  'resources.desc':
+    '查看自己在所有 Team 中拥有的资源；永久清理仅对本人拥有且 membership=active 的资源开放。',
   'resources.membership': 'membership',
-  'resources.counts': 'Team {{teams}} · Agent {{agents}} · Task {{tasks}} · Asset {{assets}} · 合计 {{total}}',
+  'resources.counts':
+    'Team {{teams}} · Agent {{agents}} · Task {{tasks}} · Asset {{assets}} · 合计 {{total}}',
   'resources.empty': '当前账号没有 ownership 依赖。',
-  'resources.absent': '资源仍在，但你已不在该 Team。请联系 Team owner/admin 恢复 membership，之后才能由你本人清理。',
-  'resources.teamOwned': '你是该 Team 的 owner。Team ownership 不由永久清理处理；请先清理业务资源，再使用现有 Team 删除流程。',
+  'resources.absent':
+    '资源仍在，但你已不在该 Team。请联系 Team owner/admin 恢复 membership，之后才能由你本人清理。',
+  'resources.teamOwned':
+    '你是该 Team 的 owner。Team ownership 不由永久清理处理；请先清理业务资源，再使用现有 Team 删除流程。',
   'resources.selectAll': '全选/取消当前 Team',
   'resources.purge.action': '永久清理',
   'resources.purge.confirm': '永久清理选中的 {{count}} 项资源？',
-  'resources.purge.desc': '该操作会删除 backing data、metadata 和关系，无法通过普通“归档”恢复。请确认这些资源不再需要。',
+  'resources.purge.desc':
+    '该操作会删除 backing data、metadata 和关系，无法通过普通“归档”恢复。请确认这些资源不再需要。',
   'resources.purge.success': '已永久清理 {{count}} 项资源。',
-  'resources.purge.partial': '已清理 {{deleted}} 项，{{failed}} 项失败；失败项 metadata 已保留，可修复后重试。',
+  'resources.purge.partial':
+    '已清理 {{deleted}} 项，{{failed}} 项失败；失败项 metadata 已保留，可修复后重试。',
+  'resources.filter.allTeams': '全部 Team',
+  'resources.filter.allTypes': '全部类型',
+  'resources.filter.allStatuses': '全部状态',
+  'resources.type.team': 'Team',
+  'resources.type.agent': 'Agent',
+  'resources.type.task': 'Task',
+  'resources.type.skill': 'Skill',
+  'resources.type.llm_wiki': 'Wiki',
+  'resources.type.code_graph': 'Code Graph',
+  'resources.type.chat_memory': 'Chat Memory',
+  'resources.type.other': '其他 Asset',
 
   // ===== GlobalHeader =====
   'header.guide': '使用说明',
@@ -210,7 +253,8 @@ export const zhCN = {
   'login.placeholder.instance': '加载记忆实例中…',
   'login.placeholder.instanceError': '加载失败，请刷新重试',
   'login.placeholder.userKey': 'user_key，如 sk-mem-xxxxxxxxxxxxxxxx',
-  'login.hint.userKey': '请使用 system_admin 为你创建的 User_Key；Team 管理员只能邀请已有账号加入 Team。',
+  'login.hint.userKey':
+    '请使用 system_admin 为你创建的 User_Key；Team 管理员只能邀请已有账号加入 Team。',
   'login.submit': '登录',
   'login.submitting': '登录中…',
   'login.error.loadInstances': '加载记忆实例列表失败，请刷新页面重试{{detail}}',
@@ -285,8 +329,7 @@ export const zhCN = {
   'task.delete.description': 'Task ID: {{id}}',
   'task.delete.okText': '删除',
   'task.delete.cancelText': '取消',
-  'task.delete.noPermission':
-    '你不是 task「{{title}}」的创建者，无法删除。创建者: {{creator}}',
+  'task.delete.noPermission': '你不是 task「{{title}}」的创建者，无法删除。创建者: {{creator}}',
   'task.edit': '编辑',
   'task.edit.tooltip': '编辑任务详情（标题、描述）',
   'task.save': '保存',
@@ -789,7 +832,8 @@ export const zhCN = {
   'memory.detail.updated': '更新：{{time}}',
   'memory.detail.noL0': '该记忆块未保留 L0 对话原文。',
   'memory.detail.noL0InRange': '当前时间范围内没有 L0 对话原文，可调整右上角的时间筛选范围试试。',
-  'memory.detail.emptyLayerInRange': '当前时间范围内在 {{layer}} 层暂无条目，可调整右上角的时间筛选范围试试。',
+  'memory.detail.emptyLayerInRange':
+    '当前时间范围内在 {{layer}} 层暂无条目，可调整右上角的时间筛选范围试试。',
   'memory.detail.rangeTooLarge': '记忆条数过多，建议缩短筛选的时间范围',
   'memory.detail.loadMore': '加载更早的对话',
   'memory.detail.allLoaded': '已加载全部对话',
@@ -812,7 +856,8 @@ export const zhCN = {
   'memory.detail.clickToLoad': '点击加载该层内容',
   'memory.detail.modeBrowse': '浏览',
   'memory.detail.modeSearch': '搜索',
-  'memory.detail.searchPrompt': '输入关键词按语义搜索本记忆，搜索结果按相关度排序（不受时间范围限制）。',
+  'memory.detail.searchPrompt':
+    '输入关键词按语义搜索本记忆，搜索结果按相关度排序（不受时间范围限制）。',
   'memory.detail.emptyLayer': '该记忆块在 {{layer}} 层暂无条目。可由 curator / 高层提炼后写入。',
   'memory.detail.loading': '加载中…',
   'memory.detail.collapseBody': '收起原文',
@@ -921,10 +966,20 @@ export const zhCN = {
   'team.loading': '加载中…',
   'team.empty.hint': '请在右上角选择一个 team，或新建一个 team 开始。',
   'team.createTeam': '新建 Team',
+  'team.settings': 'Team 设置',
+  'team.danger.title': 'Danger Zone：永久解散 Team',
+  'team.danger.edit': '编辑 Team 信息',
+  'team.danger.loading': '正在获取权威删除预检…',
+  'team.danger.preview':
+    'active 成员 {{members}}；Agent {{agents}}；Task {{tasks}}；Asset {{assets}}；活动关系 {{associations}}。只有仅剩 owner 且全部归零时才能解散。',
+  'team.danger.typeName': '输入完整 Team 名称“{{name}}”确认。',
+  'team.danger.delete': '永久解散空 Team',
+  'team.danger.ownerOnly': 'Team admin 可编辑信息；只有 Team owner 可以永久解散空 Team。',
   'team.editTeam': '编辑 Team',
   'team.editTeam.tooltip': '修改当前 team 的名称 / 描述（仅 owner / 管理员）',
   'team.deleteTeam': '删除当前 Team',
-  'team.deleteTeam.tooltip': '删除当前 team 及其全部成员 / Agent / 任务 / 资产（仅 owner / 管理员）',
+  'team.deleteTeam.tooltip':
+    '删除当前 team 及其全部成员 / Agent / 任务 / 资产（仅 owner / 管理员）',
   'team.deleteTeam.confirm': '确认删除 team「{{name}}」？',
   'team.deleteTeam.desc':
     '删除后将级联移除 {{members}} 名成员、{{agents}} 个 Agent，以及该 team 下的全部任务与资产，且不可恢复。',
@@ -1057,12 +1112,16 @@ export const zhCN = {
   'agentGrid.table.actions': '操作',
   'agentGrid.table.delete': '删除',
   'agentGrid.owner.you': '（你）',
-  'agentGrid.defaultCreate.hint': '你在当前 Team 尚无自有 Agent。可显式确认从 Team 默认模板创建；也可继续使用“新建 Agent”手动创建。',
+  'agentGrid.defaultCreate.hint':
+    '你在当前 Team 尚无自有 Agent。可显式确认从 Team 默认模板创建；也可继续使用“新建 Agent”手动创建。',
   'agentGrid.defaultCreate.action': '从 Team 默认模板创建',
   'agentGrid.defaultCreate.confirm': '为自己创建默认 Agent？',
-  'agentGrid.defaultCreate.descFallback': '当前 Team 未设置模板：将创建 default-agent-{username} 与三个预置 Skill。重复请求不会重复创建。',
-  'agentGrid.defaultCreate.descTemplate': '将创建 Agent「{{name}}」，并复制 {{skills}} 个 Skill、绑定 {{codeGraphs}} 个 Code Graph 和 {{wikis}} 个 Wiki。重复请求不会重复创建。',
-  'agentGrid.defaultCreate.partial': 'Agent 已就绪，但有 {{count}} 个模板资产创建失败；再次确认会补齐缺失项。',
+  'agentGrid.defaultCreate.descFallback':
+    '当前 Team 未设置模板：将创建 default-agent-{username} 与三个预置 Skill。重复请求不会重复创建。',
+  'agentGrid.defaultCreate.descTemplate':
+    '将创建 Agent「{{name}}」，并复制 {{skills}} 个 Skill、绑定 {{codeGraphs}} 个 Code Graph 和 {{wikis}} 个 Wiki。重复请求不会重复创建。',
+  'agentGrid.defaultCreate.partial':
+    'Agent 已就绪，但有 {{count}} 个模板资产创建失败；再次确认会补齐缺失项。',
   'agentGrid.defaultCreate.success': '默认 Agent「{{name}}」创建完成。',
 
   // ===== DefaultAgentTemplate（默认 Agent 模板，仅 admin 可见）=====
@@ -1079,8 +1138,7 @@ export const zhCN = {
   'defaultAgent.edit': '修改配置',
   'defaultAgent.edit.tooltip': '修改当前 team 的默认 Agent 模板',
   'defaultAgent.edit.caption': '修改默认 Agent 模板',
-  'defaultAgent.edit.desc':
-    '覆盖式更新当前 Team 的默认 Agent 模板；不修改已经生成的 Agent。',
+  'defaultAgent.edit.desc': '覆盖式更新当前 Team 的默认 Agent 模板；不修改已经生成的 Agent。',
   'defaultAgent.save': '保存配置',
   'defaultAgent.name': '默认 Agent 名字 *',
   'defaultAgent.name.hint': '成员显式确认模板创建时，将以此名字创建其专属默认 Agent。',
@@ -1098,14 +1156,22 @@ export const zhCN = {
   'member.remove.desc': '此操作仅将该用户移出当前团队，不会删除用户账号。',
   'member.remove.ok': '移除',
   'member.remove.tooltip': '移除该成员',
+  'member.remove.action': '移出 Team',
+  'member.leave.action': '退出当前 Team',
+  'member.leave.confirm': '确认退出当前 Team？',
+  'member.leave.desc':
+    '服务端会在同一事务内复检 Team ownership、Agent、Task、各类 Asset 和活动授权；任一未完成交接都会阻止退出。',
+  'member.leave.transferFirst': '先转移 Team ownership',
   'member.remove.blockedTitle': '该成员仍拥有当前 Team 资源',
-  'member.remove.blockedDesc': '{{userId}} 仍拥有 Agent {{agents}}、Task {{tasks}}、Asset {{assets}}，membership 未修改。请由该用户本人永久清理后重试。',
+  'member.remove.blockedDesc':
+    '{{userId}} 仍拥有 Agent {{agents}}、Task {{tasks}}、Asset {{assets}}，membership 未修改。请由该用户本人永久清理后重试。',
   'member.role.creator': ' · 创建者',
   'member.me': ' （你）',
 
   // ===== AddMemberDialog =====
   'addMember.caption': '添加成员到「{{name}}」',
-  'addMember.existingOnlyHint': '这里只能添加已有账号；请由 system_admin 先在「用户管理」创建账号。',
+  'addMember.existingOnlyHint':
+    '这里只能添加已有账号；请由 system_admin 先在「用户管理」创建账号。',
   'addMember.adminOnlyHint': '仅 team admin 可授予 admin 角色',
   'addMember.mode': '方式',
   'addMember.mode.existing': '添加已有用户',
@@ -1130,10 +1196,12 @@ export const zhCN = {
   'addMember.error.invalidName': '用户名仅支持英文字母、数字、下划线，不能包含其他符号或空格。',
   'addMember.error.emptyKey': '已开启自定义 User_Key，请填写要下发给用户的 key。',
   'addMember.customKey.label': '自定义 User_Key',
-  'addMember.customKey.hint': '默认关闭时由后端自动生成一次性 key；开启后由你手动指定用户初始 key。',
+  'addMember.customKey.hint':
+    '默认关闭时由后端自动生成一次性 key；开启后由你手动指定用户初始 key。',
   'addMember.customKey.value': 'User_Key',
   'addMember.customKey.placeholder': '例如 sk-mem-xxxxxxxxxxxxxxxx',
-  'addMember.customKey.valueHint': '将作为该用户的默认 User_Key；不可与已有用户的 key 重复，否则创建会被拒绝。',
+  'addMember.customKey.valueHint':
+    '将作为该用户的默认 User_Key；不可与已有用户的 key 重复，否则创建会被拒绝。',
 
   // ===== CreatedUserKeyModal =====
   'createdUserKey.caption': '用户创建成功',
@@ -1173,7 +1241,8 @@ export const zhCN = {
   // ===== ApiKeyPanel =====
   'apiKey.title': 'User_Key 管理',
   'apiKey.desc': '管理你的 User Key，用于外部客户端接入（如 CodeBuddy / ClaudeCode CLI）。',
-  'apiKey.desc.admin': '管理实例内全部用户（含未加入 Team 的用户）的 User Key；既有 Key 只显示脱敏前缀。',
+  'apiKey.desc.admin':
+    '管理实例内全部用户（含未加入 Team 的用户）的 User Key；既有 Key 只显示脱敏前缀。',
   'apiKey.create': '新建 Key',
   'apiKey.fresh.desc':
     '以下是 {{keyId}} 的完整 Key（仅展示这一次，请立即复制并安全保存；关闭后将无法再次查看明文）：',
@@ -1396,7 +1465,8 @@ export const zhCN = {
   'error.ALREADY_ALLOCATED': '这条资产已经分配给该 Agent，无需重复分配。',
   'error.IMPORT_LIMIT_EXCEEDED': '该 Agent 最多只能借入 2 条其它 Agent 的记忆。',
   'error.ASSET_PRIVATE_INACCESSIBLE': '该资产已被 owner 设为私密，你无权访问。',
-  'error.ASSET_NOT_BINDABLE': '该资产的可见范围不允许绑定到此 Agent。请让 owner 将它设为团队可见后重试。',
+  'error.ASSET_NOT_BINDABLE':
+    '该资产的可见范围不允许绑定到此 Agent。请让 owner 将它设为团队可见后重试。',
   'error.INVALID_TITLE': '标题不能为空且不能超过长度限制。',
   'error.MISSING_MESSAGES': '缺少对话消息。',
   'error.TOO_MANY_MESSAGES': '一次最多导入 100 条消息。',
@@ -1528,8 +1598,10 @@ export const zhCN = {
   'guide.quick.ide.sub': '配置 Proxy 与模型',
   'guide.quick.history.title': '获取历史数据',
   'guide.quick.history.sub': '让多 Agent 共享记忆和 Skill',
-  'guide.quick.history.desc': '在仓库根目录运行脚本，从本机 IDE 导入历史 Session 和 Skill，让多个 Agent 共享已有记忆与能力。',
-  'guide.quick.history.sources': '{{sources}} 等 source 均可导入；将目标 Team 和 Agent ID 替换后运行。',
+  'guide.quick.history.desc':
+    '在仓库根目录运行脚本，从本机 IDE 导入历史 Session 和 Skill，让多个 Agent 共享已有记忆与能力。',
+  'guide.quick.history.sources':
+    '{{sources}} 等 source 均可导入；将目标 Team 和 Agent ID 替换后运行。',
   'guide.quick.history.dupHint': ' 若已在脚本配置最后选择导入，则无需重复执行。',
 
   // 准备信息
@@ -1557,11 +1629,13 @@ export const zhCN = {
   'guide.method.skill.sub': '推荐 · 由 Agent 引导配置',
   'guide.method.skill.step1': '在仓库根目录准备 Skill',
   'guide.method.skill.step2': '将下面的提示词发送给 Agent',
-  'guide.method.skill.hint': 'Agent 会探测环境和 Proxy，再调用配套脚本写入配置，并询问是否导入本地 Skill 与历史对话。',
+  'guide.method.skill.hint':
+    'Agent 会探测环境和 Proxy，再调用配套脚本写入配置，并询问是否导入本地 Skill 与历史对话。',
   'guide.method.script.title': '方式二：脚本配置',
   'guide.method.script.sub': '在终端运行交互向导',
   'guide.method.script.step1': '在仓库根目录运行',
-  'guide.method.script.hint': '脚本会扫描现有配置、检查 Proxy 并写入所选 IDE；最后可选择导入本地 Skill 与历史对话。',
+  'guide.method.script.hint':
+    '脚本会扫描现有配置、检查 Proxy 并写入所选 IDE；最后可选择导入本地 Skill 与历史对话。',
 
   // 手动配置
   'guide.manual.expand': '无法启动命令？手动配置',
@@ -1657,7 +1731,8 @@ export const zhCN = {
   // 手动配置注意事项
   'guide.manual.note.claude': '直接启动 claude 即可从 settings.json 读取环境变量',
   'guide.manual.note.codebuddy': '在 CodeBuddy 对话框中选择模型 proxy-memory-agent',
-  'guide.manual.note.codex': '首次对话前先切到 Plan 模式（Shift+Tab）选 Team→Agent→Task，再切回 Agent 模式',
+  'guide.manual.note.codex':
+    '首次对话前先切到 Plan 模式（Shift+Tab）选 Team→Agent→Task，再切回 Agent 模式',
   'guide.manual.note.workbuddy': '在 WorkBuddy 自定义模型列表中选择该模型',
   'guide.manual.note.dsh.0': '需同时配置两个文件',
   'guide.manual.note.dsh.1': '权限要求：chmod 700 ~/.dsh，chmod 600 ~/.dsh/.credentials.yaml',

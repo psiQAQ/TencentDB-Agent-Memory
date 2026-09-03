@@ -27,6 +27,7 @@ export type PageId =
   | 'team_agents'
   | 'owned_resources'
   | 'user_management'
+  | 'zombie_resources'
   | 'api_keys';
 
 /** 页面元数据 */
@@ -46,7 +47,14 @@ export interface PageMeta {
 export function usePageMeta(): Record<PageId, PageMeta> {
   const { t } = useTranslation();
   return {
-    workbench_board: { id: 'workbench_board', label: t('menu.workbench_board'), desc: t('menu.desc.workbench_board'), group: t('menu.group.workbench'), order: 0, affix: true },
+    workbench_board: {
+      id: 'workbench_board',
+      label: t('menu.workbench_board'),
+      desc: t('menu.desc.workbench_board'),
+      group: t('menu.group.workbench'),
+      order: 0,
+      affix: true,
+    },
     team_atlas: {
       id: 'team_atlas',
       label: t('menu.team_atlas'),
@@ -54,15 +62,76 @@ export function usePageMeta(): Record<PageId, PageMeta> {
       group: t('menu.group.workbench'),
       order: 1,
     },
-    wiki:            { id: 'wiki',            label: t('menu.wiki'), desc: t('menu.desc.wiki'), group: t('menu.group.assets'), order: 2 },
-    code:            { id: 'code',            label: t('menu.code'), desc: t('menu.desc.code'), group: t('menu.group.assets'), order: 3 },
-    skills:          { id: 'skills',          label: t('menu.skills'), desc: t('menu.desc.skills'), group: t('menu.group.assets'), order: 4 },
-    chat_memory:     { id: 'chat_memory',     label: t('menu.chat_memory'), desc: t('menu.desc.chat_memory'), group: t('menu.group.assets'), order: 5 },
-    team_members:    { id: 'team_members',    label: t('menu.team_members'), desc: t('menu.desc.team_members'), group: t('menu.group.organization'), order: 0 },
-    team_agents:     { id: 'team_agents',     label: t('menu.team_agents'), desc: t('menu.desc.team_agents'), group: t('menu.group.organization'), order: 1 },
-    owned_resources: { id: 'owned_resources', label: t('menu.owned_resources'), desc: t('menu.desc.owned_resources'), group: t('menu.group.organization'), order: 2 },
-    user_management: { id: 'user_management', label: t('menu.user_management'), desc: t('menu.desc.user_management'), group: t('menu.group.organization'), order: 3 },
-    api_keys:        { id: 'api_keys',        label: t('menu.api_keys'), desc: t('menu.desc.api_keys'), group: t('menu.group.organization'), order: 4 },
+    wiki: {
+      id: 'wiki',
+      label: t('menu.wiki'),
+      desc: t('menu.desc.wiki'),
+      group: t('menu.group.assets'),
+      order: 2,
+    },
+    code: {
+      id: 'code',
+      label: t('menu.code'),
+      desc: t('menu.desc.code'),
+      group: t('menu.group.assets'),
+      order: 3,
+    },
+    skills: {
+      id: 'skills',
+      label: t('menu.skills'),
+      desc: t('menu.desc.skills'),
+      group: t('menu.group.assets'),
+      order: 4,
+    },
+    chat_memory: {
+      id: 'chat_memory',
+      label: t('menu.chat_memory'),
+      desc: t('menu.desc.chat_memory'),
+      group: t('menu.group.assets'),
+      order: 5,
+    },
+    user_management: {
+      id: 'user_management',
+      label: t('menu.user_management'),
+      desc: t('menu.desc.user_management'),
+      group: t('menu.group.organization'),
+      order: 0,
+    },
+    zombie_resources: {
+      id: 'zombie_resources',
+      label: t('menu.zombie_resources'),
+      desc: t('menu.desc.zombie_resources'),
+      group: t('menu.group.organization'),
+      order: 1,
+    },
+    team_members: {
+      id: 'team_members',
+      label: t('menu.team_members'),
+      desc: t('menu.desc.team_members'),
+      group: t('menu.group.organization'),
+      order: 2,
+    },
+    team_agents: {
+      id: 'team_agents',
+      label: t('menu.team_agents'),
+      desc: t('menu.desc.team_agents'),
+      group: t('menu.group.organization'),
+      order: 3,
+    },
+    owned_resources: {
+      id: 'owned_resources',
+      label: t('menu.owned_resources'),
+      desc: t('menu.desc.owned_resources'),
+      group: t('menu.group.organization'),
+      order: 4,
+    },
+    api_keys: {
+      id: 'api_keys',
+      label: t('menu.api_keys'),
+      desc: t('menu.desc.api_keys'),
+      group: t('menu.group.organization'),
+      order: 5,
+    },
   };
 }
 
@@ -96,6 +165,7 @@ export const ITEM_ICON: Record<PageId, JSX.Element> = {
   team_agents: <UsergroupIcon size={16} />,
   owned_resources: <ToolsIcon size={16} />,
   user_management: <UserIcon size={16} />,
+  zombie_resources: <ToolsIcon size={16} />,
   api_keys: <LockOnIcon size={16} />,
   wiki: <BooksIcon size={16} />,
   code: <CodeIcon size={16} />,
@@ -106,7 +176,14 @@ export const ITEM_ICON: Record<PageId, JSX.Element> = {
 /** 分组图标（工作台 / 组织与权限 / 资产管理） */
 export const GROUP_ICON: Record<string, JSX.Element> = {
   workbench: (
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+    <svg
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.8"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
       <rect x="3" y="3" width="7" height="7" rx="1.5" />
       <rect x="14" y="3" width="7" height="7" rx="1.5" />
       <rect x="3" y="14" width="7" height="7" rx="1.5" />
@@ -114,7 +191,14 @@ export const GROUP_ICON: Record<string, JSX.Element> = {
     </svg>
   ),
   organization: (
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+    <svg
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.8"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
       <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2" />
       <circle cx="9" cy="7" r="4" />
       <path d="M23 21v-2a4 4 0 0 0-3-3.87" />
@@ -122,7 +206,14 @@ export const GROUP_ICON: Record<string, JSX.Element> = {
     </svg>
   ),
   assets: (
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+    <svg
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.8"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
       <path d="M12 2l9 5-9 5-9-5 9-5z" />
       <path d="M3 12l9 5 9-5" />
       <path d="M3 17l9 5 9-5" />

@@ -4,27 +4,18 @@
  * 从侧边栏迁移到顶栏后的行内 pill 样式版本：使用 Tea `Dropdown` 承载弹出面板
  * （自带定位、遮罩点击关闭、滚动关闭等能力），面板内部用 `List`/`Input`/`Button` 组装。
  *
- * 团队编辑入口：当前 active team 行右侧（owner / admin 可见）提供「编辑」「删除」
- * 图标按钮，复用 EditTeamDialog + tea.confirm 二级确认。这把 TeamManagementPanel
- * Header 上的「编辑 Team / 删除当前 Team」入口迁到了此处统一收纳。
+ * 这里只负责切换和创建。编辑与永久解散位于 Team 设置 Danger Zone。
  */
 import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Dropdown, Input, Button } from 'tea-component';
-import { ChevronDownIcon, AddIcon, EditIcon, DeleteIcon } from 'tea-icons-react';
-import {
-  useTeams,
-  writeActiveTeamId,
-  invalidateBackendCache,
-  isTeamAdmin,
-} from '@/services';
+import { ChevronDownIcon, AddIcon } from 'tea-icons-react';
+import { useTeams, writeActiveTeamId, invalidateBackendCache } from '@/services';
 import { useBackendStore } from '@/stores/backend';
 import { teamsApi } from '@/lib/teamApi';
-import { getPanelSession } from '@/lib/panelSession';
 import { teamColor } from '@/utils/color';
 import { tea } from '@/lib/tea-bridge';
 import { getErrorMessage } from '@/lib/error-message';
-import EditTeamDialog from '@/components/team/EditTeamDialog';
 import './team-switcher.css';
 
 export function TeamSwitcher() {
@@ -35,15 +26,9 @@ export function TeamSwitcher() {
   const [newTeamName, setNewTeamName] = useState('');
   const [newTeamDesc, setNewTeamDesc] = useState('');
   const [creating, setCreating] = useState(false);
-  // 编辑弹窗可见状态
-  const [editingTeamId, setEditingTeamId] = useState<string | null>(null);
 
   const myTeams = teams;
   const active = myTeams.find((tm) => tm.team_id === activeTeamId) ?? null;
-  // 当前用户 user_id（panelSession 同步可读）
-  const currentUserId = getPanelSession()?.user?.user_id ?? '';
-  // 是否可编辑 / 删除当前 active team：只看真实 Team owner/admin 角色。
-  const canManageActiveTeam = !!active && isTeamAdmin(active, currentUserId);
 
   function resetCreateForm() {
     setShowCreateTeam(false);
@@ -80,49 +65,6 @@ export function TeamSwitcher() {
     }
   }
 
-  async function handleUpdateTeam(input: { name: string; description: string }) {
-    const id = editingTeamId;
-    if (!id) return;
-    try {
-      await teamsApi.update(id, input);
-      invalidateBackendCache();
-      setEditingTeamId(null);
-    } catch (err) {
-      tea.notify.error(getErrorMessage(err));
-    }
-  }
-
-  async function handleDeleteTeam(teamId: string, teamName: string, memberCount: number) {
-    // 取一次 agent 数（用于级联展示）—— 走 store 缓存避免额外请求
-    let agentCount = 0;
-    try {
-      const cached = useBackendStore.getState().agentsByTeam[teamId];
-      if (cached) agentCount = cached.length;
-    } catch {
-      /* 静默：仅用于展示级联范围，拿不到不影响删除 */
-    }
-    const ok = await tea.confirm({
-      message: t('teamSwitcher.delete.confirm', { name: teamName }),
-      description: t('teamSwitcher.delete.desc', {
-        members: memberCount,
-        agents: agentCount,
-      }),
-      okText: t('common.delete'),
-    });
-    if (!ok) return;
-    try {
-      await teamsApi.delete(teamId);
-      // 删除当前 active team 时清空 activeTeamId，让 ensureValidActiveTeamId
-      // 在 store 刷新后自动落到剩余的第一个 team（或空态）。
-      if (teamId === activeTeamId) writeActiveTeamId(null);
-      invalidateBackendCache();
-    } catch (err) {
-      tea.notify.error(getErrorMessage(err));
-    }
-  }
-
-  const editingTeam = editingTeamId ? myTeams.find((tm) => tm.team_id === editingTeamId) ?? null : null;
-
   return (
     <>
       <Dropdown
@@ -134,7 +76,9 @@ export function TeamSwitcher() {
         // 静默刷新：仅让下拉框里的 team 列表保新鲜，不翻转 teamsLoading，
         // 否则 TeamManagementPanel 等消费方会整体进入 loading 占位（表现为
         // "点开选择 team 的选项框，成员/Agents 管理页面就刷新一下"）。
-        onOpen={() => { void refreshTeams({ silent: true }); }}
+        onOpen={() => {
+          void refreshTeams({ silent: true });
+        }}
         onClose={resetCreateForm}
         button={
           <button
@@ -142,12 +86,18 @@ export function TeamSwitcher() {
             className="_memory-team-switcher-trigger"
             title={active?.name ?? t('teamSwitcher.selectTeam')}
           >
-            <span className={`_memory-team-switcher-avatar ${active ? teamColor(active.team_id) : 'bg-primary'}`}>
+            <span
+              className={`_memory-team-switcher-avatar ${active ? teamColor(active.team_id) : 'bg-primary'}`}
+            >
               {(active?.name ?? '?').slice(0, 1).toUpperCase()}
             </span>
             <span className="_memory-team-switcher-meta">
-              <span className="_memory-team-switcher-name">{active?.name ?? t('teamSwitcher.selectTeam')}</span>
-              <span className="_memory-team-switcher-id">{active?.team_id ?? t('teamSwitcher.noTeam')}</span>
+              <span className="_memory-team-switcher-name">
+                {active?.name ?? t('teamSwitcher.selectTeam')}
+              </span>
+              <span className="_memory-team-switcher-id">
+                {active?.team_id ?? t('teamSwitcher.noTeam')}
+              </span>
             </span>
             <ChevronDownIcon size={12} className="_memory-team-switcher-chevron" />
           </button>
@@ -157,18 +107,16 @@ export function TeamSwitcher() {
           <div className="_memory-team-switcher-panel">
             <div className="_memory-team-switcher-panel-header">
               <div className="_memory-team-switcher-panel-title">{t('teamSwitcher.title')}</div>
-              <div className="_memory-team-switcher-panel-desc">
-                {t('teamSwitcher.desc')}
-              </div>
+              <div className="_memory-team-switcher-panel-desc">{t('teamSwitcher.desc')}</div>
             </div>
 
-            <div className="_memory-team-switcher-panel-label">{t('teamSwitcher.teamCount', { count: myTeams.length })}</div>
+            <div className="_memory-team-switcher-panel-label">
+              {t('teamSwitcher.teamCount', { count: myTeams.length })}
+            </div>
 
             <div className="_memory-team-switcher-list-wrap">
               {myTeams.length === 0 ? (
-                <div className="_memory-team-switcher-empty">
-                  {t('teamSwitcher.empty.member')}
-                </div>
+                <div className="_memory-team-switcher-empty">{t('teamSwitcher.empty.member')}</div>
               ) : (
                 // 用原生 ul/li 而非 Tea List：Tea 的 List.Item selected 会自动渲染 ✓
                 // 并改变内边距，split="divide" 又会注入 padding/border-top，与自定义
@@ -177,8 +125,6 @@ export function TeamSwitcher() {
                 <ul className="_memory-team-switcher-list">
                   {myTeams.map((tm) => {
                     const isActive = tm.team_id === activeTeamId;
-                    // 仅当前 active team 行显示编辑/删除按钮，且仅 owner/admin 可操作
-                    const showOps = isActive && canManageActiveTeam;
                     return (
                       <li key={tm.team_id} className="_memory-team-switcher-row">
                         <button
@@ -187,7 +133,9 @@ export function TeamSwitcher() {
                           aria-current={isActive || undefined}
                           onClick={() => pick(tm.team_id, close)}
                         >
-                          <span className={`_memory-team-switcher-item-avatar ${teamColor(tm.team_id)}`}>
+                          <span
+                            className={`_memory-team-switcher-item-avatar ${teamColor(tm.team_id)}`}
+                          >
                             {tm.name.slice(0, 1).toUpperCase()}
                           </span>
                           <span className="_memory-team-switcher-item-meta">
@@ -199,30 +147,6 @@ export function TeamSwitcher() {
                           {/* 选中态由背景色 + 描边传达，不再额外显示 ✓ —— 避免与右侧
                               操作按钮挤在一起。操作按钮为绝对定位浮层，不占行内布局宽度。 */}
                         </button>
-                        {showOps && (
-                          <span className="_memory-team-switcher-item-ops">
-                            <button
-                              type="button"
-                              className="_memory-team-switcher-item-op"
-                              title={t('teamSwitcher.edit.tooltip')}
-                              aria-label={t('teamSwitcher.edit.tooltip')}
-                              onClick={() => setEditingTeamId(tm.team_id)}
-                            >
-                              <EditIcon size={14} />
-                            </button>
-                            <button
-                              type="button"
-                              className="_memory-team-switcher-item-op _memory-team-switcher-item-op-danger"
-                              title={t('teamSwitcher.delete.tooltip')}
-                              aria-label={t('teamSwitcher.delete.tooltip')}
-                              onClick={() => {
-                                void handleDeleteTeam(tm.team_id, tm.name, tm.members.length);
-                              }}
-                            >
-                              <DeleteIcon size={14} />
-                            </button>
-                          </span>
-                        )}
                       </li>
                     );
                   })}
@@ -248,7 +172,8 @@ export function TeamSwitcher() {
                   />
                   <div className="_memory-team-switcher-create-actions">
                     <Button onClick={resetCreateForm}>{t('teamSwitcher.cancel')}</Button>
-                    <Button type="primary"
+                    <Button
+                      type="primary"
                       loading={creating}
                       disabled={!newTeamName.trim() || creating}
                       onClick={handleCreate}
@@ -258,7 +183,8 @@ export function TeamSwitcher() {
                   </div>
                 </div>
               ) : (
-                <Button type="text"
+                <Button
+                  type="text"
                   className="_memory-team-switcher-create-trigger"
                   onClick={() => setShowCreateTeam(true)}
                 >
@@ -270,16 +196,6 @@ export function TeamSwitcher() {
           </div>
         )}
       </Dropdown>
-
-      {/* 编辑弹窗挂在 Dropdown 之外：避免 Dropdown clickClose 干扰 Modal 可见性 */}
-      {editingTeam && (
-        <EditTeamDialog
-          team={editingTeam}
-          onClose={() => setEditingTeamId(null)}
-          onSave={handleUpdateTeam}
-          busy={false}
-        />
-      )}
     </>
   );
 }

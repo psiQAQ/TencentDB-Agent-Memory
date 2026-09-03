@@ -7,6 +7,7 @@ function buildApp(options: {
   owner?: string;
   resourceCode?: number;
   clearCode?: number;
+  assetType?: 'chat_memory' | 'llm_wiki' | 'code_graph';
 } = {}) {
   const invoke = vi.fn(async (action: string, body: Record<string, unknown>) => {
     if (action === 'auth/verify') {
@@ -17,10 +18,10 @@ function buildApp(options: {
     }
     if (action === 'task/get') {
       if (options.resourceCode === 404) return { code: 404, message: 'not found', data: null };
-      return { code: 0, message: 'ok', data: { task_id: body.task_id, team_id: 'team-1', creator_user_id: options.owner ?? 'caller' } };
+      return { code: 0, message: 'ok', data: { task_id: body.task_id, team_id: 'team-1', owner_user_id: options.owner ?? 'caller', creator_user_id: 'original-creator' } };
     }
     if (action === 'asset/get') {
-      return { code: 0, message: 'ok', data: { asset_id: body.asset_id, team_id: 'team-1', owner_user_id: options.owner ?? 'caller', asset_type: 'chat_memory' } };
+      return { code: 0, message: 'ok', data: { asset_id: body.asset_id, team_id: 'team-1', owner_user_id: options.owner ?? 'caller', asset_type: options.assetType ?? 'chat_memory' } };
     }
     if (action === 'task/delete' || action === 'asset/delete') {
       const ids = (body.task_ids ?? body.asset_ids) as string[];
@@ -31,20 +32,27 @@ function buildApp(options: {
     }
     throw new Error(`unexpected meta action: ${action}`);
   });
-  const kernelPost = vi.fn(async () => ({
-    code: options.clearCode ?? 0,
-    message: options.clearCode ? 'clear failed' : 'ok',
-    data: { all_cleared: !options.clearCode },
-  }));
+  const kernelPost = vi.fn(async (path: string) => {
+    if (path.endsWith('/prepare-transfer')) return { code: 0, message: 'ok', data: { operation_id: 'op-1', status: 'pending' } };
+    if (path.endsWith('/finalize-transfer')) return { code: 0, message: 'ok', data: { resource_type: 'asset', resource_id: 'wiki-1', transferred: true } };
+    if (path.endsWith('/finalize-delete')) return { code: 0, message: 'ok', data: { deleted_ids: ['memory-1'], failed: [] } };
+    return {
+      code: options.clearCode ?? 0,
+      message: options.clearCode ? 'clear failed' : 'ok',
+      data: { all_cleared: !options.clearCode },
+    };
+  });
+  const transferOwnership = vi.fn(async () => ({ resource_id: 'wiki-1', owner_user_id: 'target', status: 'ready' }));
   const deps = {
     instanceRegistry: { resolve: () => ({ instance_id: 'local', gateway_endpoint: 'http://core', api_key: 'gateway' }) },
     metaKernel: { invoke },
     kernelHttp: { postEnvelope: kernelPost },
+    knowledgeClientFactory: () => ({ transferOwnership }),
     config: { metadataRemoteTimeoutMs: 10_000 },
   } as never;
   const app = new Hono();
   registerAccountOwnedResourceRoutes(app, deps);
-  return { app, invoke, kernelPost };
+  return { app, invoke, kernelPost, transferOwnership };
 }
 
 function purge(app: Hono, resources: Array<{ resource_type: string; resource_id: string }>) {
@@ -87,5 +95,35 @@ describe('owner-only owned resource purge', () => {
     const body = await response.json() as { data: { failed: unknown[] } };
     expect(body.data.failed).toHaveLength(1);
     expect(failed.invoke.mock.calls.some(([action]) => action === 'asset/delete')).toBe(false);
+  });
+});
+
+describe('ownership transfer lifecycle', () => {
+  it('prepares Core, CAS-transfers knowledge backing, then finalizes Core metadata', async () => {
+    const fixture = buildApp({ assetType: 'llm_wiki' });
+    const response = await fixture.app.request('/account/ownership/transfer', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'X-Tdai-Service-Id': 'local',
+        'X-Tdai-User-Key': 'key',
+      },
+      body: JSON.stringify({
+        team_id: 'team-1',
+        transfers: [{ resource_type: 'asset', resource_id: 'wiki-1', to_user_id: 'target' }],
+        idempotency_key: '33333333-3333-4333-8333-333333333333',
+        confirmation: 'TRANSFER_OWNERSHIP',
+      }),
+    });
+    expect(response.status).toBe(200);
+    expect(fixture.kernelPost.mock.calls.map(([path]) => path)).toEqual([
+      '/v3/internal/meta/asset/prepare-transfer',
+      '/v3/internal/meta/asset/finalize-transfer',
+    ]);
+    expect(fixture.transferOwnership).toHaveBeenCalledWith(expect.objectContaining({
+      resource_type: 'llm_wiki',
+      from_owner_user_id: 'caller',
+      to_owner_user_id: 'target',
+    }));
   });
 });

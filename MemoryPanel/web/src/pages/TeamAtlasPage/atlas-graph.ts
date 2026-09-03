@@ -86,7 +86,7 @@ const TYPE_X: Record<TeamAtlasNodeType, number> = {
 
 export function isAtlasNodeOwnedByCurrent(node: TeamAtlasNode, userId: string): boolean {
   if (node.type === 'identity') return node.metadata?.is_current === true;
-  if (node.type === 'task') return node.metadata?.creator_user_id === userId;
+  if (node.type === 'task') return node.metadata?.owner_user_id === userId;
   return (
     (node.type === 'team' || node.type === 'agent' || ASSET_TYPES.has(node.type)) &&
     node.metadata?.owner_user_id === userId
@@ -139,7 +139,8 @@ export function teamAgentCounts(
   const agents = ir.nodes.filter((node) => node.type === 'agent' && node.team_id === teamId);
   const archived = agents.filter(isArchivedAtlasAgent).length;
   const unavailable = agents.filter(
-    (node) => node.metadata?.agent_state === 'unavailable' || node.metadata?.agent_state === 'unknown',
+    (node) =>
+      node.metadata?.agent_state === 'unavailable' || node.metadata?.agent_state === 'unknown',
   ).length;
   const active = agents.length - archived - unavailable;
   return {
@@ -470,7 +471,8 @@ export function projectAtlas(
     nodes = filterArchivedAgentLifecycleNodes(nodes);
     const retainedIds = new Set(nodes.map((node) => node.id));
     nodes = nodes.filter((node) => {
-      if (node.type !== 'identity' || typeof node.metadata?.identity_state !== 'string') return true;
+      if (node.type !== 'identity' || typeof node.metadata?.identity_state !== 'string')
+        return true;
       return edges.some(
         (edge) =>
           (edge.source === node.id && retainedIds.has(edge.target)) ||
@@ -645,7 +647,7 @@ export function summarizeAtlas(
 
   for (const node of visibleNodes) {
     if (node.type === 'team' && ir.scope.team_ids.includes(node.entity_id)) mine.add(node.id);
-    if (node.type === 'task' && node.metadata?.creator_user_id === userId) mine.add(node.id);
+    if (node.type === 'task' && node.metadata?.owner_user_id === userId) mine.add(node.id);
     if (node.type === 'agent' && ownAgentIds.has(node.id)) mine.add(node.id);
     if (ASSET_TYPES.has(node.type) && node.metadata?.owner_user_id === userId) mine.add(node.id);
   }

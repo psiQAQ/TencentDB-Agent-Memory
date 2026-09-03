@@ -132,6 +132,9 @@ export function registerKnowledgeWikiRoutes(api: Hono, deps: PanelDeps): void {
     for (const wikiId of wikiIds) {
       const gate = await requireKnowledgeRead(deps, c, ctx, wikiId, { action: 'write' });
       if ('error' in gate) return gate.error;
+      if (!gate.asset || gate.asset.owner_user_id !== gate.userId) {
+        return respondControlError(c, 403, 'NOT_RESOURCE_OWNER');
+      }
     }
     const kc = deps.knowledgeClientFactory(ctx.instanceId);
     return runKs(c, async () => {

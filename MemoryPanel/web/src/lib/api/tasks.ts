@@ -11,6 +11,7 @@ export type TaskSourceType = 'manual' | 'tapd' | 'github' | 'other';
 export interface BackendTask {
   task_id: string;
   team_id: string;
+  owner_user_id: string;
   creator_user_id: string;
   title: string;
   description?: string;
@@ -93,7 +94,7 @@ export const tasksApi = {
       source_url?: string;
       risk_level?: 'low' | 'medium' | 'high';
       linked_agents?: string[];
-    }
+    },
   ) => {
     const me = await getCurrentUser();
     return metaPost<BackendTask>('task/create', {
@@ -117,7 +118,7 @@ export const tasksApi = {
       status: TaskStatus;
       risk_level: 'low' | 'medium' | 'high';
       source_url: string;
-    }>
+    }>,
   ) => metaPost<BackendTask>('task/update', { task_id: taskId, ...data }),
 
   /** 删除 task（meta task/delete，字段为 task_ids 数组） */

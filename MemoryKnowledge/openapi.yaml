@@ -44,6 +44,8 @@ tags:
     description: Wiki knowledge base management and querying.
   - name: Code-Graph
     description: Code repository indexing and structured code queries.
+  - name: Internal Lifecycle
+    description: Bearer-protected control-plane ownership and integrity coordination.
 
 paths:
   # ═══════════════════════════════════════════════
@@ -185,6 +187,8 @@ paths:
     post:
       tags: [LLM-Wiki]
       summary: Batch delete wikis
+      security:
+        - LifecycleBearer: []
       description: |
         Deletes wikis in any status, including `pending`/`processing` (008): a
         delete never returns 409. In-flight ingest is signalled to abort at its
@@ -539,6 +543,8 @@ paths:
     post:
       tags: [Code-Graph]
       summary: Batch delete code graphs
+      security:
+        - LifecycleBearer: []
       description: |
         Deletes code graphs in any status, including `pending`/`processing`
         (008): a delete never returns 409. In-flight clone/index is signalled to
@@ -711,7 +717,55 @@ paths:
         default:
           $ref: '#/components/responses/ErrorResponse'
 
+  /internal/lifecycle/ownership/transfer:
+    post:
+      tags: [Internal Lifecycle]
+      summary: Compare-and-swap Wiki or Code Graph backing owner
+      operationId: transferKnowledgeOwnershipInternal
+      security:
+        - LifecycleBearer: []
+      parameters:
+        - $ref: '#/components/parameters/ServiceIdHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [resource_type, resource_id, from_owner_user_id, to_owner_user_id]
+              properties:
+                resource_type:
+                  type: string
+                  enum: [llm_wiki, code_graph]
+                resource_id: { type: string }
+                from_owner_user_id: { type: string }
+                to_owner_user_id: { type: string }
+      responses:
+        '200': { description: Backing owner transferred or already at target }
+        '401': { description: Invalid lifecycle authorization }
+        '409': { description: Owner changed or resource is processing }
+        '503': { description: Lifecycle authorization is not configured }
+
+  /internal/lifecycle/integrity/inventory:
+    post:
+      tags: [Internal Lifecycle]
+      summary: List content-free Knowledge inventory for integrity reconciliation
+      operationId: listKnowledgeIntegrityInventoryInternal
+      security:
+        - LifecycleBearer: []
+      parameters:
+        - $ref: '#/components/parameters/ServiceIdHeader'
+      responses:
+        '200': { description: Content-free Wiki and Code Graph inventory }
+        '401': { description: Invalid lifecycle authorization }
+        '503': { description: Lifecycle authorization is not configured }
+
 components:
+  securitySchemes:
+    LifecycleBearer:
+      type: http
+      scheme: bearer
+      description: KNOWLEDGE_AUTH_TOKEN for Panel control-plane calls only.
   parameters:
     ServiceIdHeader:
       name: x-tdai-service-id

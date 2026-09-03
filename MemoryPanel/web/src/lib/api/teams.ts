@@ -41,7 +41,24 @@ export const teamsApi = {
    * 会被 zod 静默 strip 后因缺 `team_ids` 校验失败 → 400。删除为级联操作，
    * 会一并删除该 team 的成员、agent、task 与全部资产。
    */
-  delete: (teamId: string) => metaPost<{ ok: boolean }>('team/delete', { team_ids: [teamId] }),
+  deletePreview: (teamId: string) =>
+    metaPost<{
+      team_id: string;
+      team_name: string;
+      revision: string;
+      active_members: number;
+      counts: { teams: number; agents: number; tasks: number; assets: number };
+      active_associations: number;
+      ready: boolean;
+    }>('team/delete-preview', { team_id: teamId }),
+
+  delete: (teamId: string, teamName: string, revision: string) =>
+    metaPost<{ deleted_ids: string[] }>('team/delete', {
+      team_id: teamId,
+      team_name: teamName,
+      revision,
+      confirmation: 'DELETE_TEAM',
+    }),
 };
 
 export const membersApi = {
@@ -58,10 +75,24 @@ export const membersApi = {
    * 传入 `{ username }` 做精确匹配。
    */
   add: (teamId: string, data: { user_id: string; role: 'admin' | 'member' | 'reviewer' }) =>
-    metaPost<TeamMember>('team-member/add', { team_id: teamId, user_id: data.user_id, role: data.role }),
+    metaPost<TeamMember>('team-member/add', {
+      team_id: teamId,
+      user_id: data.user_id,
+      role: data.role,
+    }),
+
+  updateRole: (teamId: string, userId: string, role: 'admin' | 'member' | 'reviewer') =>
+    metaPost<TeamMember>('team-member/update-role', { team_id: teamId, user_id: userId, role }),
 
   /** 移除成员 */
   remove: async (teamId: string, userId: string) => {
     await metaPost<{ ok: boolean }>('team-member/remove', { team_id: teamId, user_id: userId });
+  },
+
+  leave: async (teamId: string) => {
+    await metaPost<{ ok: boolean }>('team-member/leave', {
+      team_id: teamId,
+      confirmation: 'LEAVE_TEAM',
+    });
   },
 };

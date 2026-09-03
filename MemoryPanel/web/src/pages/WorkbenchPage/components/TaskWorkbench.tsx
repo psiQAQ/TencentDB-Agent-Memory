@@ -36,7 +36,9 @@ function EmptyTeam() {
   return (
     <Card>
       <Card.Body className="_memory-workbench-empty-card">
-        <Text theme="strong" className="_memory-workbench-empty-title">{t('task.emptyTeam.title')}</Text>
+        <Text theme="strong" className="_memory-workbench-empty-title">
+          {t('task.emptyTeam.title')}
+        </Text>
         <Text theme="weak" className="_memory-workbench-empty-desc">
           {t('task.emptyTeam.desc')}
         </Text>
@@ -50,7 +52,7 @@ export default function TaskWorkbench(props: {
   onTabChange?: (tab: WorkbenchTab) => void;
   /** 当前激活的 team id（可空：未选时只显示 empty state） */
   activeTeamId: string | null;
-  /** 当前用户名（task 的 creator_user_id） */
+  /** 当前用户 ID（新建 task 时同时成为初始 owner）。 */
   currentUser: string;
   /** 当前 team 下可关联的 Agent 列表（来自 TeamManagementPanel 的同源数据） */
   agents: AgentOption[];
@@ -60,22 +62,28 @@ export default function TaskWorkbench(props: {
   // 后端分页：useTasks 根据 page + pageSize 调 Panel 聚合接口，内核只返回当前页
   const PAGE_SIZE = 12;
   const [currentPage, setCurrentPage] = useState(1);
-  const { tasks, total: tasksTotal, loading: tasksLoading } = useTasks(activeTeamId, currentPage, PAGE_SIZE);
+  const {
+    tasks,
+    total: tasksTotal,
+    loading: tasksLoading,
+  } = useTasks(activeTeamId, currentPage, PAGE_SIZE);
   const { teams, activeTeam } = useTeams();
   const participationByTask = useTeamParticipation(activeTeamId);
   const [showCreate, setShowCreate] = useState(false);
   const [selectedId, setSelectedId] = useState<string | null>(null);
 
   // 切换 team 时重置到第 1 页
-  useEffect(() => { setCurrentPage(1); }, [activeTeamId]);
+  useEffect(() => {
+    setCurrentPage(1);
+  }, [activeTeamId]);
 
   const sortedTasks = useMemo(() => {
     return [...tasks].sort((a, b) => b.updated_at_ms - a.updated_at_ms);
   }, [tasks]);
 
   const selected = useMemo(
-    () => (selectedId ? tasks.find((t) => t.task_id === selectedId) ?? null : null),
-    [selectedId, tasks]
+    () => (selectedId ? (tasks.find((t) => t.task_id === selectedId) ?? null) : null),
+    [selectedId, tasks],
   );
 
   /**
@@ -97,7 +105,7 @@ export default function TaskWorkbench(props: {
         description: draft.description,
         source_type: draft.source_type,
         source_url: draft.source_url,
-        linked_agents: draft.linked_agents
+        linked_agents: draft.linked_agents,
       });
       setSelectedId(task.task_id);
       setShowCreate(false);
@@ -115,68 +123,71 @@ export default function TaskWorkbench(props: {
           {/* 当前 team 概览（与 team 管理页同一组件） */}
           {activeTeam && <TeamHeaderCard team={activeTeam} />}
           <BoardView
-          tasks={sortedTasks}
-          tasksLoading={tasksLoading}
-          tasksTotal={tasksTotal}
-          currentPage={currentPage}
-          setCurrentPage={setCurrentPage}
-          pageSize={PAGE_SIZE}
-          selected={selected}
-          onSelect={(id) => setSelectedId(id)}
-          onCreate={() => setShowCreate(true)}
-          onDelete={async (task) => {
-            // 权限：Core 的 task/delete 是 creator-only。
-            const team = teams.find((t) => t.team_id === task.team_id) ?? null;
-            if (!canDeleteTask(task, team, currentUser)) {
-              tea.notify.warning(
-                t('task.delete.noPermission', { title: task.title, creator: task.creator_user_id })
-              );
-              return;
-            }
-            const ok = await tea.confirm({
-              message: t('task.delete.confirm', { title: task.title }),
-              description: t('task.delete.description', { id: task.task_id }),
-              okText: t('task.delete.okText'),
-              cancelText: t('task.delete.cancelText'),
-            });
-            if (ok) {
+            tasks={sortedTasks}
+            tasksLoading={tasksLoading}
+            tasksTotal={tasksTotal}
+            currentPage={currentPage}
+            setCurrentPage={setCurrentPage}
+            pageSize={PAGE_SIZE}
+            selected={selected}
+            onSelect={(id) => setSelectedId(id)}
+            onCreate={() => setShowCreate(true)}
+            onDelete={async (task) => {
+              // 权限：Core 的 task/delete 由当前 owner 控制；creator 只保留审计事实。
+              const team = teams.find((t) => t.team_id === task.team_id) ?? null;
+              if (!canDeleteTask(task, team, currentUser)) {
+                tea.notify.warning(
+                  t('task.delete.noPermission', {
+                    title: task.title,
+                    creator: task.creator_user_id,
+                  }),
+                );
+                return;
+              }
+              const ok = await tea.confirm({
+                message: t('task.delete.confirm', { title: task.title }),
+                description: t('task.delete.description', { id: task.task_id }),
+                okText: t('task.delete.okText'),
+                cancelText: t('task.delete.cancelText'),
+              });
+              if (ok) {
+                try {
+                  await deleteTask(task.task_id);
+                  if (selectedId === task.task_id) setSelectedId(null);
+                } catch (err) {
+                  tea.notify.error(errMsg(err));
+                }
+              }
+            }}
+            onUpdateStatus={async (task, status) => {
+              // 权限：Core 的 task/update（含切换 status）是 creator-only。
+              const team = teams.find((t) => t.team_id === task.team_id) ?? null;
+              if (!canEditTask(task, team, currentUser)) {
+                tea.notify.warning(t('task.noPermissionEdit'));
+                return;
+              }
               try {
-                await deleteTask(task.task_id);
-                if (selectedId === task.task_id) setSelectedId(null);
+                await updateTaskStatus(task.task_id, status, currentUser);
               } catch (err) {
                 tea.notify.error(errMsg(err));
               }
-            }
-          }}
-          onUpdateStatus={async (task, status) => {
-            // 权限：Core 的 task/update（含切换 status）是 creator-only。
-            const team = teams.find((t) => t.team_id === task.team_id) ?? null;
-            if (!canEditTask(task, team, currentUser)) {
-              tea.notify.warning(t('task.noPermissionEdit'));
-              return;
-            }
-            try {
-              await updateTaskStatus(task.task_id, status, currentUser);
-            } catch (err) {
-              tea.notify.error(errMsg(err));
-            }
-          }}
-          onUpdateTask={async (task, patch) => {
-            const team = teams.find((t) => t.team_id === task.team_id) ?? null;
-            if (!canEditTask(task, team, currentUser)) {
-              tea.notify.warning(t('task.noPermissionEdit'));
-              return;
-            }
-            try {
-              await updateTask(task.task_id, patch, currentUser);
-            } catch (err) {
-              tea.notify.error(errMsg(err));
-            }
-          }}
-          agents={agents}
-          teams={teams}
-          currentUser={currentUser}
-          participationByTask={participationByTask}
+            }}
+            onUpdateTask={async (task, patch) => {
+              const team = teams.find((t) => t.team_id === task.team_id) ?? null;
+              if (!canEditTask(task, team, currentUser)) {
+                tea.notify.warning(t('task.noPermissionEdit'));
+                return;
+              }
+              try {
+                await updateTask(task.task_id, patch, currentUser);
+              } catch (err) {
+                tea.notify.error(errMsg(err));
+              }
+            }}
+            agents={agents}
+            teams={teams}
+            currentUser={currentUser}
+            participationByTask={participationByTask}
           />
         </>
       )}

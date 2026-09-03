@@ -6,7 +6,7 @@
  */
 import { createHashRouter, type RouteObject } from 'react-router-dom';
 import { ConsoleLayout } from '@/layouts/ConsoleLayout';
-import { SystemAdminGuard } from '@/components/RouteGuards';
+import { MemberManageGuard, SystemAdminGuard } from '@/components/RouteGuards';
 
 export const routes: RouteObject[] = [
   {
@@ -39,7 +39,16 @@ export const routes: RouteObject[] = [
       },
       {
         path: 'team/members',
-        lazy: async () => ({ Component: (await import('@/pages/MembersPage')).MembersPage }),
+        lazy: async () => {
+          const { MembersPage } = await import('@/pages/MembersPage');
+          return {
+            Component: () => (
+              <MemberManageGuard>
+                <MembersPage />
+              </MemberManageGuard>
+            ),
+          };
+        },
       },
       {
         path: 'team/agents',
@@ -47,13 +56,34 @@ export const routes: RouteObject[] = [
       },
       {
         path: 'account/resources',
-        lazy: async () => ({ Component: (await import('@/pages/OwnedResourcesPage')).OwnedResourcesPage }),
+        lazy: async () => ({
+          Component: (await import('@/pages/OwnedResourcesPage')).OwnedResourcesPage,
+        }),
       },
       {
         path: 'users',
         lazy: async () => {
           const { UsersPage } = await import('@/pages/UsersPage');
-          return { Component: () => <SystemAdminGuard><UsersPage /></SystemAdminGuard> };
+          return {
+            Component: () => (
+              <SystemAdminGuard>
+                <UsersPage />
+              </SystemAdminGuard>
+            ),
+          };
+        },
+      },
+      {
+        path: 'admin/orphans',
+        lazy: async () => {
+          const { OrphansPage } = await import('@/pages/OrphansPage');
+          return {
+            Component: () => (
+              <SystemAdminGuard>
+                <OrphansPage />
+              </SystemAdminGuard>
+            ),
+          };
         },
       },
       {

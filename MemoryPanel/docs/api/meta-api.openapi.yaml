@@ -488,6 +488,36 @@ paths:
           $ref: "#/components/responses/KernelUnavailable"
         '504':
           $ref: "#/components/responses/KernelTimeout"
+  /api/v1/meta/team/delete-preview:
+    post:
+      tags: ["Meta · Team"]
+      operationId: meta_team_delete-preview
+      summary: team/delete-preview
+      description: "透明代理至内核；字段见 08-metadata-v3-api-reference.md。须 Header 双凭证。"
+      security: []
+      parameters:
+        - $ref: '#/components/parameters/TdaiServiceId'
+        - $ref: '#/components/parameters/TdaiUserKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
+      responses:
+        '200':
+          description: 内核风格信封（业务成败优先看 body.code）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponse'
+        '400':
+          $ref: "#/components/responses/ControlBadRequest"
+        '502':
+          $ref: "#/components/responses/KernelUnavailable"
+        '504':
+          $ref: "#/components/responses/KernelTimeout"
   /api/v1/meta/team/delete:
     post:
       tags: ["Meta · Team"]
@@ -608,6 +638,66 @@ paths:
           $ref: "#/components/responses/KernelUnavailable"
         '504':
           $ref: "#/components/responses/KernelTimeout"
+  /api/v1/meta/team-member/update-role:
+    post:
+      tags: ["Meta · Team Member"]
+      operationId: meta_team-member_update-role
+      summary: team-member/update-role
+      description: "透明代理至内核；字段见 08-metadata-v3-api-reference.md。须 Header 双凭证。"
+      security: []
+      parameters:
+        - $ref: '#/components/parameters/TdaiServiceId'
+        - $ref: '#/components/parameters/TdaiUserKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
+      responses:
+        '200':
+          description: 内核风格信封（业务成败优先看 body.code）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponse'
+        '400':
+          $ref: "#/components/responses/ControlBadRequest"
+        '502':
+          $ref: "#/components/responses/KernelUnavailable"
+        '504':
+          $ref: "#/components/responses/KernelTimeout"
+  /api/v1/meta/team-member/leave:
+    post:
+      tags: ["Meta · Team Member"]
+      operationId: meta_team-member_leave
+      summary: team-member/leave
+      description: "透明代理至内核；字段见 08-metadata-v3-api-reference.md。须 Header 双凭证。"
+      security: []
+      parameters:
+        - $ref: '#/components/parameters/TdaiServiceId'
+        - $ref: '#/components/parameters/TdaiUserKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
+      responses:
+        '200':
+          description: 内核风格信封（业务成败优先看 body.code）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponse'
+        '400':
+          $ref: "#/components/responses/ControlBadRequest"
+        '502':
+          $ref: "#/components/responses/KernelUnavailable"
+        '504':
+          $ref: "#/components/responses/KernelTimeout"
   /api/v1/meta/team-member/list:
     post:
       tags: ["Meta · Team Member"]
@@ -644,6 +734,96 @@ paths:
       operationId: meta_team-member_get
       summary: team-member/get
       description: "透明代理；响应 TeamMemberEntity 含 username（v3.2.2+，读时 JOIN）。须为 team active 成员。须 Header 双凭证。"
+      security: []
+      parameters:
+        - $ref: '#/components/parameters/TdaiServiceId'
+        - $ref: '#/components/parameters/TdaiUserKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
+      responses:
+        '200':
+          description: 内核风格信封（业务成败优先看 body.code）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponse'
+        '400':
+          $ref: "#/components/responses/ControlBadRequest"
+        '502':
+          $ref: "#/components/responses/KernelUnavailable"
+        '504':
+          $ref: "#/components/responses/KernelTimeout"
+  /api/v1/meta/ownership/transfer:
+    post:
+      tags: [Meta]
+      operationId: meta_ownership_transfer
+      summary: ownership/transfer
+      description: "透明代理至内核；字段见 08-metadata-v3-api-reference.md。须 Header 双凭证。"
+      security: []
+      parameters:
+        - $ref: '#/components/parameters/TdaiServiceId'
+        - $ref: '#/components/parameters/TdaiUserKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
+      responses:
+        '200':
+          description: 内核风格信封（业务成败优先看 body.code）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponse'
+        '400':
+          $ref: "#/components/responses/ControlBadRequest"
+        '502':
+          $ref: "#/components/responses/KernelUnavailable"
+        '504':
+          $ref: "#/components/responses/KernelTimeout"
+  /api/v1/meta/integrity/scan:
+    post:
+      tags: [Meta]
+      operationId: meta_integrity_scan
+      summary: integrity/scan
+      description: "透明代理至内核；字段见 08-metadata-v3-api-reference.md。须 Header 双凭证。"
+      security: []
+      parameters:
+        - $ref: '#/components/parameters/TdaiServiceId'
+        - $ref: '#/components/parameters/TdaiUserKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
+      responses:
+        '200':
+          description: 内核风格信封（业务成败优先看 body.code）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponse'
+        '400':
+          $ref: "#/components/responses/ControlBadRequest"
+        '502':
+          $ref: "#/components/responses/KernelUnavailable"
+        '504':
+          $ref: "#/components/responses/KernelTimeout"
+  /api/v1/meta/integrity/purge:
+    post:
+      tags: [Meta]
+      operationId: meta_integrity_purge
+      summary: integrity/purge
+      description: "透明代理至内核；字段见 08-metadata-v3-api-reference.md。须 Header 双凭证。"
       security: []
       parameters:
         - $ref: '#/components/parameters/TdaiServiceId'

@@ -167,6 +167,9 @@ export function registerKnowledgeCodeGraphRoutes(api: Hono, deps: PanelDeps): vo
         allowInFlightCodeOwner: true,
       });
       if ('error' in gate) return gate.error;
+      if (gate.asset && gate.asset.owner_user_id !== gate.userId) {
+        return respondControlError(c, 403, 'NOT_RESOURCE_OWNER');
+      }
     }
     const kc = deps.knowledgeClientFactory(ctx.instanceId);
     return runKs(c, async () => {

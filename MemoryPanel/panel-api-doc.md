@@ -106,6 +106,8 @@
 | POST | `/api/v1/agent/delete-cascade` | 删除 Agent（级联清 skill 后 archive） |
 | POST | `/api/v1/agent/create-default` | 本人确认后幂等创建 Team 默认 Agent/资产 |
 | POST | `/api/v1/account/owned-resources/purge` | owner-only 永久清理业务资源 |
+| POST | `/api/v1/account/ownership/transfer` | owner 本人在 Team 内直接转移 ownership |
+| POST | `/api/v1/admin/orphans/scan/start` 等 | system_admin 僵尸扫描与受控清理 |
 | POST | `/api/v1/knowledge/wiki/*` | Wiki 知识库业务路由（14 个，见 §3.8） |
 | POST | `/api/v1/knowledge/code-graph/*` | Code-Graph 业务路由（8 个，见 §3.9） |
 | POST | `/api/v1/knowledge/allocate` 等 | 知识分配/授权（5 个，见 §3.10） |
@@ -784,7 +786,8 @@ UI 在发请求前完成。
 
 ### POST /agent/delete-cascade
 
-删除 Agent：先级联删除其名下所有 active skill，再调内核 `agent/archive`（archive 内部会顺手清 chat_memory）。
+删除 Agent：先 backing-first 清理其 Skill、Chat Memory、关系，再调用内部 lifecycle
+finalizer 物理删除 metadata。公开 `agent/delete`/`asset/delete` 不能绕过受管资源清理。
 
 **上游**：`skill/list`、`skill/delete`、`meta/agent/archive`。
 
@@ -840,6 +843,43 @@ active member，并且必须是请求中每项资源的 owner/creator；先校�
 **错误**：`MISSING_TEAM_ID`、`INVALID_RESOURCES`、`CONFIRMATION_REQUIRED`、
 `INVALID_USER_KEY`、`ACTIVE_TEAM_MEMBERSHIP_REQUIRED`、`NOT_RESOURCE_OWNER`、
 `RESOURCE_TEAM_MISMATCH`。
+
+### POST /account/ownership/transfer
+
+owner 本人在当前 Team 内直接转移最多 100 项 ownership；每项可选择不同接收者，接收者
+无需确认。Team 仅可转给 active admin；Agent、Task、Wiki、Code Graph 可转给同 Team
+任意 active member。Agent 是聚合根，Chat Memory 与 Agent-owned Skill 随 Agent 转移，
+不能独立转给用户。
+
+```json
+{
+  "team_id": "team-xxx",
+  "transfers": [{
+    "resource_type": "agent",
+    "resource_id": "agt-xxx",
+    "to_user_id": "usr-xxx"
+  }],
+  "idempotency_key": "uuid",
+  "confirmation": "TRANSFER_OWNERSHIP"
+}
+```
+
+Wiki/Code Graph 使用 operation journal 协调 Knowledge backing 与 Core metadata；Agent
+同时迁移 L0/L1 当前 owner。失败时优先补偿，补偿失败进入
+`inconsistent_retryable` 并继续阻止离组。响应逐项包含 transferred、隐式资产和解除的
+private binding，可用同一幂等键重试失败项。
+
+### POST /admin/orphans/*
+
+仅 `system_admin`。接口集合：`scan/start`、`scan/get`、`list`、`get`、`purge`、
+`operation/get`。扫描聚合 Core metadata/关系与 Knowledge backing inventory，分类为
+`recoverable_dependency`、`operational_orphan`、`cache_residue`、`inconsistent`、
+`retained_history`。响应只含来源、ID、原 Team/owner、类型、状态、计数/大小和原因，
+不返回 prompt、描述、内容、content_ref、凭证或绝对路径。
+
+purge 只提交 finding ID/fingerprint，要求治理原因和 `PURGE_ZOMBIES`；服务端重新扫描并
+验证 snapshot，过期返回 `409 stale_integrity_scan`。Alice 这类仍有正常恢复路径的
+`recoverable_dependency` 只可查看，不允许 system_admin purge。
 
 ---
 

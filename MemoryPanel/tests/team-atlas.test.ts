@@ -441,8 +441,8 @@ describe('buildTeamAtlasIR', () => {
 describe('task activity permissions', () => {
   const team = { team_id: 'team-1', name: 'Atlas', owner_user_id: 'owner' };
   const tasks = [
-    { task_id: 'mine', team_id: 'team-1', title: 'Mine', creator_user_id: 'member' },
-    { task_id: 'other', team_id: 'team-1', title: 'Other', creator_user_id: 'owner' },
+    { task_id: 'mine', team_id: 'team-1', title: 'Mine', owner_user_id: 'member', creator_user_id: 'owner' },
+    { task_id: 'other', team_id: 'team-1', title: 'Other', owner_user_id: 'owner', creator_user_id: 'member' },
   ];
 
   it('allows owner and admin to see full team activity', () => {
@@ -450,7 +450,7 @@ describe('task activity permissions', () => {
     expect(resolveTaskActivityVisibility('reviewer', team, 'admin', tasks)).toEqual({ mine: 'full', other: 'full' });
   });
 
-  it('allows a task creator full activity only on their task', () => {
+  it('allows a task owner full activity only on their task', () => {
     expect(resolveTaskActivityVisibility('member', team, 'member', tasks)).toEqual({ mine: 'full', other: 'self_only' });
   });
 });

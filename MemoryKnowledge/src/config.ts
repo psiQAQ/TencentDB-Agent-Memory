@@ -73,6 +73,8 @@ export interface ServiceConfig {
   publicBaseUrl: string;
   /** TMC callback URL for status notifications (empty = no callback). */
   tmcCallbackUrl: string;
+  /** Shared control-plane token required by /v3/internal/lifecycle/*. */
+  internalAuthToken: string;
   /** Optional ClickHouse request telemetry. Disabled by default. */
   clickhouse: ClickHouseTelemetryConfig;
 }
@@ -159,6 +161,7 @@ export function loadConfig(): ServiceConfig {
     apiPrefix: env("API_PREFIX", "/v3"),
     publicBaseUrl: env("KNOWLEDGE_PUBLIC_BASE_URL", ""),
     tmcCallbackUrl: env("TMC_CALLBACK_URL", ""),
+    internalAuthToken: env("KNOWLEDGE_AUTH_TOKEN", ""),
     clickhouse,
     llm: {
       mode: env("LLM_MODE", "proxy") === "custom" ? "custom" : "proxy",

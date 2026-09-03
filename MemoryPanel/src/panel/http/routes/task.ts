@@ -41,6 +41,8 @@ function okEnvelope<T>(c: Context, data: T): MetaEnvelope<T> {
 interface TaskEntity {
   task_id: string;
   team_id: string;
+  owner_user_id: string;
+  creator_user_id: string;
   title: string;
   description?: string;
   status: string;

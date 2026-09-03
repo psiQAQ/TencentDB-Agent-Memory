@@ -28,6 +28,7 @@ const PATH_TO_PAGE: Record<string, PageId> = {
   '/team/agents': 'team_agents',
   '/account/resources': 'owned_resources',
   '/users': 'user_management',
+  '/admin/orphans': 'zombie_resources',
   '/team/api-keys': 'api_keys',
 };
 
@@ -144,7 +145,8 @@ export function ConsoleLayout() {
 
     for (const meta of Object.values(PAGE_META)) {
       if (userRole === 'reviewer' && meta.id === 'team_members') continue;
-      if (meta.id === 'user_management' && !auth?.isAdmin) continue;
+      if ((meta.id === 'user_management' || meta.id === 'zombie_resources') && !auth?.isAdmin)
+        continue;
       const list = byGroup.get(meta.group) ?? [];
       list.push(meta);
       byGroup.set(meta.group, list);

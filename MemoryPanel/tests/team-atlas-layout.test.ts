@@ -87,13 +87,13 @@ describe('Team Atlas projection and layout', () => {
     expect(isAtlasActivationKey('Escape')).toBe(false);
   });
 
-  it('marks only Tasks created by the current Panel user as owned', () => {
+  it('marks only Tasks currently owned by the current Panel user as owned', () => {
     expect(isAtlasNodeOwnedByCurrent(
-      { id: 'task:mine', entity_id: 'mine', type: 'task', label: 'Mine', metadata: { creator_user_id: 'user-1' } },
+      { id: 'task:mine', entity_id: 'mine', type: 'task', label: 'Mine', metadata: { owner_user_id: 'user-1', creator_user_id: 'user-2' } },
       'user-1',
     )).toBe(true);
     expect(isAtlasNodeOwnedByCurrent(
-      { id: 'task:other', entity_id: 'other', type: 'task', label: 'Other', metadata: { creator_user_id: 'user-2' } },
+      { id: 'task:other', entity_id: 'other', type: 'task', label: 'Other', metadata: { owner_user_id: 'user-2', creator_user_id: 'user-1' } },
       'user-1',
     )).toBe(false);
   });

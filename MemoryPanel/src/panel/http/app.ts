@@ -14,6 +14,7 @@ import { registerKnowledgeRoutes } from './routes/knowledge/index.js';
 import { registerTeamAtlasRoutes } from './routes/team-atlas.js';
 import { registerChatMemoryStatusRoutes } from './routes/chat-memory-status.js';
 import { registerAccountOwnedResourceRoutes } from './routes/account-owned-resources.js';
+import { registerAdminOrphanRoutes } from './routes/admin-orphans.js';
 
 const API_PREFIX = '/api/v1';
 
@@ -40,6 +41,7 @@ export function buildPanelApp(deps: PanelDeps): Hono {
   registerTeamAtlasRoutes(api, deps);
   registerChatMemoryStatusRoutes(api, deps);
   registerAccountOwnedResourceRoutes(api, deps);
+  registerAdminOrphanRoutes(api, deps);
   app.route(API_PREFIX, api);
 
   // The Hub is frequently rebuilt in place during local development. Never let a

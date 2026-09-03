@@ -197,36 +197,30 @@ export async function ensureKnowledgeAsset(
   return { ok: true };
 }
 
-/** 删除内核明细 entity_knowledge（S2S，/v3/knowledge/delete）。best-effort，不抛。 */
+/** 删除内核明细 entity_knowledge（S2S，/v3/knowledge/delete）；失败必须显式上抛。 */
 export async function deleteKnowledgeDetail(
   deps: PanelDeps,
   ctx: MetaCallContext,
   ids: string[],
 ): Promise<void> {
-  try {
-    const cred = toKernelCredentials(ctx, { timeoutMs: deps.config.metadataRemoteTimeoutMs }, { omitUserKey: true });
-    await deps.kernelHttp.postEnvelope('/v3/knowledge/delete', { knowledge_ids: ids }, cred);
-  } catch {
-    /* best-effort */
-  }
+  const cred = toKernelCredentials(ctx, { timeoutMs: deps.config.metadataRemoteTimeoutMs }, { omitUserKey: true });
+  const env = await deps.kernelHttp.postEnvelope('/v3/knowledge/delete', { knowledge_ids: ids }, cred);
+  if (env.code !== 0) throw new Error(env.message || 'KNOWLEDGE_DETAIL_DELETE_FAILED');
 }
 
-/** 删除 meta_asset（ForCaller，asset/delete）。best-effort，不抛。
+/** 删除 meta_asset（ForCaller，asset/delete）；失败必须显式上抛。
  *  kernel 侧 asset/delete 会级联清理 agent-fixed-asset 绑定 + ACL，无需额外解绑。 */
 export async function deleteKnowledgeAssets(
   deps: PanelDeps,
   ctx: MetaCallContext,
   ids: string[],
 ): Promise<void> {
-  try {
-    await deps.metaKernel.invoke('asset/delete', { asset_ids: ids }, ctx);
-  } catch {
-    /* best-effort */
-  }
+  const env = await deps.metaKernel.invoke('asset/delete', { asset_ids: ids }, ctx);
+  if (env.code !== 0) throw new Error(env.message || 'ASSET_DELETE_FAILED');
 }
 
 /** 删除 knowledge 的远端侧级联：entity_knowledge 明细 + meta_asset（含 agent 绑定级联）。
- *  KS 侧删除由调用方负责（返回 KS result 给前端）。两步均 best-effort，不抛。 */
+ * KS 侧删除由调用方负责；任一步失败均上抛，禁止伪报完整成功。 */
 export async function deleteKnowledgeCascade(
   deps: PanelDeps,
   ctx: MetaCallContext,

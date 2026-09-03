@@ -80,6 +80,28 @@ export class HttpKnowledgeClient implements KnowledgeClientPort {
     }
   }
 
+  async transferOwnership(input: {
+    resource_type: 'llm_wiki' | 'code_graph';
+    resource_id: string;
+    from_owner_user_id: string;
+    to_owner_user_id: string;
+  }): Promise<{ resource_id: string; owner_user_id: string; status: string; idempotent?: boolean }> {
+    return this.post('/v3/internal/lifecycle/ownership/transfer', input);
+  }
+
+  async listIntegrityInventory() {
+    return this.post<{ items: Array<{
+      resource_type: 'llm_wiki' | 'code_graph';
+      resource_id: string;
+      team_id: string;
+      owner_user_id: string | null;
+      status: string;
+      name: string;
+      created_at: string;
+      updated_at: string;
+    }> }>('/v3/internal/lifecycle/integrity/inventory', {});
+  }
+
   // ═══════════════ Wiki · 资产层 ═══════════════
 
   async wikiCreate(teamId: string, name: string, userId?: string): Promise<WikiDetail> {

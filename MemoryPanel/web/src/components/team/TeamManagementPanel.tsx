@@ -2,9 +2,7 @@
  * TeamManagementPanel — 团队管理。
  *
  * 承担「Team + 成员 + Agent」管理：
- *   - 顶部是当前 team 概览 + team 级操作入口（仅新建 Team）；
- *     团队级「编辑 / 删除」已统一迁到左上角 TeamSwitcher 下拉框（active team 行右侧），
- *     不再在此面板重复入口。
+ *   - 顶部是当前 team 概览与 Team 设置入口；永久解散位于 owner-only Danger Zone。
  *   - 中部是当前 team 的成员管理：按 user_id 添加 / 删除成员
  *   - 下部是当前 team 的 Agent 卡片网格：新建 / 编辑 / 删除
  *
@@ -13,19 +11,16 @@
  *   - 写操作成功后统一调用 invalidateBackendCache()，驱动 useTeams/useAgents 重新拉取；
  *   - 后端 schema 还没有的展示字段，序列化进 agent.metadata_json 的 "ui" namespace。
  *
- * 已知限制（如实反映后端当前能力，不做假 UI）：
- *   - Agent owner 由后端在创建时固定为当前登录用户，暂不支持转交；
- *   - Team 删除为级联操作（连带删除成员/agent/task/资产），仅 owner / admin 可删
- *     （入口在 TeamSwitcher 下拉框）。
+ * Ownership 转交与永久清理由“我的资源依赖”统一编排；TeamSwitcher 只负责切换和创建。
  *
  * 文件拆分（本文件仅保留组合/编排逻辑，具体实现见同目录下）：
  *   - types.ts / useAgentAssets.ts / shared.tsx / AgentGrid.tsx / MemberSection.tsx /
  *     CreateTeamDialog.tsx / CreateAgentDialog.tsx / AgentEditDialog.tsx
- *   - EditTeamDialog 已迁到 TeamSwitcher 共用（@/layouts/GlobalHeader/TeamSwitcher）
+ *   - Team 设置/Danger Zone 只使用安全 delete-preview + revision 流程。
  */
 
 import { useState, useMemo } from 'react';
-import { Button } from 'tea-component';
+import { Alert, Button, Input } from 'tea-component';
 import { useTranslation } from 'react-i18next';
 import { UsergroupIcon, AddIcon } from 'tea-icons-react';
 import {
@@ -35,6 +30,7 @@ import {
   canManageAsset,
   invalidateBackendCache,
   writeAgentUiMeta,
+  writeActiveTeamId,
   type Agent as StoreAgent,
 } from '@/services';
 import { teamsApi, agentsApi, skillApi } from '@/lib/teamApi';
@@ -53,6 +49,7 @@ import CreateTeamDialog from './CreateTeamDialog';
 import CreateAgentDialog from './CreateAgentDialog';
 import AgentEditDialog from './AgentEditDialog';
 import DefaultAgentTemplateSection from './DefaultAgentTemplateSection';
+import EditTeamDialog from './EditTeamDialog';
 
 function errMsg(e: unknown): string {
   return getErrorMessage(e);
@@ -96,6 +93,12 @@ export default function TeamManagementPanel({
   const [showAddMember, setShowAddMember] = useState(false);
   const [editingAgent, setEditingAgent] = useState<StoreAgent | null>(null);
   const [busy, setBusy] = useState(false);
+  const [showTeamSettings, setShowTeamSettings] = useState(false);
+  const [editingTeamSettings, setEditingTeamSettings] = useState(false);
+  const [deleteName, setDeleteName] = useState('');
+  const [deletePreview, setDeletePreview] = useState<Awaited<
+    ReturnType<typeof teamsApi.deletePreview>
+  > | null>(null);
 
   async function handleCreateAgent(card: Omit<AgentCard, 'id' | 'icon' | 'accent'>) {
     if (!activeTeamId || !activeTeam) return;
@@ -163,7 +166,14 @@ export default function TeamManagementPanel({
       )
     ) {
       tea.notify.error(
-        t('team.deleteAgent.noPermission', { name: agent.name, id: agent.agent_id, teamName: activeTeam.name, owner: agent.owner_user_id ? resolveUserName(agent.owner_user_id) : t('team.deleteAgent.ownerUnset') }),
+        t('team.deleteAgent.noPermission', {
+          name: agent.name,
+          id: agent.agent_id,
+          teamName: activeTeam.name,
+          owner: agent.owner_user_id
+            ? resolveUserName(agent.owner_user_id)
+            : t('team.deleteAgent.ownerUnset'),
+        }),
       );
       return;
     }
@@ -181,9 +191,7 @@ export default function TeamManagementPanel({
       // —— 明确告诉用户去 skill 面板处理后重试，别只给一句技术错误码
       const raw = err instanceof Error ? err.message : String(err);
       if (raw.includes('SKILL_DELETE_FAILED')) {
-        tea.notify.error(
-          t('team.deleteAgent.skillFailed', { name: agent.name, raw }),
-        );
+        tea.notify.error(t('team.deleteAgent.skillFailed', { name: agent.name, raw }));
       } else {
         tea.notify.error(errMsg(err));
       }
@@ -218,7 +226,9 @@ export default function TeamManagementPanel({
       const result = await agentsApi.createDefault(activeTeamId);
       invalidateBackendCache();
       if (result.failed_assets.length > 0) {
-        tea.notify.warning(t('agentGrid.defaultCreate.partial', { count: result.failed_assets.length }));
+        tea.notify.warning(
+          t('agentGrid.defaultCreate.partial', { count: result.failed_assets.length }),
+        );
       } else {
         tea.notify.success(t('agentGrid.defaultCreate.success', { name: result.agent_name }));
       }
@@ -241,6 +251,35 @@ export default function TeamManagementPanel({
     }
     setBusy(false);
     setShowCreateTeam(false);
+  }
+
+  async function refreshDeletePreview() {
+    if (!activeTeamId) return;
+    try {
+      setDeletePreview(await teamsApi.deletePreview(activeTeamId));
+    } catch (err) {
+      tea.notify.error(errMsg(err));
+    }
+  }
+
+  async function handleUpdateTeam(input: { name: string; description: string }) {
+    if (!activeTeamId) return;
+    await teamsApi.update(activeTeamId, input);
+    invalidateBackendCache();
+    setEditingTeamSettings(false);
+  }
+
+  async function handleDeleteTeam() {
+    if (!activeTeam || !deletePreview || deleteName !== activeTeam.name) return;
+    try {
+      await teamsApi.delete(activeTeam.team_id, activeTeam.name, deletePreview.revision);
+      writeActiveTeamId(null);
+      invalidateBackendCache();
+      setShowTeamSettings(false);
+    } catch (err) {
+      tea.notify.error(errMsg(err));
+      await refreshDeletePreview();
+    }
   }
 
   return (
@@ -280,15 +319,23 @@ export default function TeamManagementPanel({
               <Button onClick={() => setShowCreateTeam(true)} title={t('team.createTeam')}>
                 <AddIcon size={14} /> {t('team.createTeam')}
               </Button>
+              {showMembers && isTeamAdmin(activeTeam, currentUser) && (
+                <Button
+                  onClick={() => {
+                    setShowTeamSettings((value) => !value);
+                    void refreshDeletePreview();
+                  }}
+                >
+                  {t('team.settings')}
+                </Button>
+              )}
             </>
           }
         />
       ) : (
         <div className="_memory-panel-card">
           <div className="_memory-team-header-row">
-            <div className="_memory-team-header-empty-hint">
-              {t('team.empty.hint')}
-            </div>
+            <div className="_memory-team-header-empty-hint">{t('team.empty.hint')}</div>
           </div>
         </div>
       )}
@@ -301,9 +348,7 @@ export default function TeamManagementPanel({
           {t('team.loading')}
         </div>
       ) : !activeTeam ? (
-        <EmptyTeamState
-          onCreateTeam={() => setShowCreateTeam(true)}
-        />
+        <EmptyTeamState onCreateTeam={() => setShowCreateTeam(true)} />
       ) : (
         <>
           {/* === Members === */}
@@ -315,12 +360,48 @@ export default function TeamManagementPanel({
             />
           )}
 
+          {showMembers && showTeamSettings && isTeamAdmin(activeTeam, currentUser) && (
+            <div className="_memory-panel-card" style={{ borderColor: 'var(--tea-color-error)' }}>
+              <h3>{t('team.danger.title')}</h3>
+              <Button onClick={() => setEditingTeamSettings(true)}>{t('team.danger.edit')}</Button>
+              <Alert type="warning" style={{ marginTop: 12 }}>
+                {deletePreview
+                  ? t('team.danger.preview', {
+                      members: deletePreview.active_members,
+                      agents: deletePreview.counts.agents,
+                      tasks: deletePreview.counts.tasks,
+                      assets: deletePreview.counts.assets,
+                      associations: deletePreview.active_associations,
+                    })
+                  : t('team.danger.loading')}
+              </Alert>
+              {activeTeam.owner_user_id === currentUser ? (
+                <>
+                  <p>{t('team.danger.typeName', { name: activeTeam.name })}</p>
+                  <Input
+                    value={deleteName}
+                    onChange={setDeleteName}
+                    placeholder={activeTeam.name}
+                  />{' '}
+                  <Button
+                    type="primary"
+                    disabled={!deletePreview?.ready || deleteName !== activeTeam.name}
+                    onClick={() => void handleDeleteTeam()}
+                  >
+                    {t('team.danger.delete')}
+                  </Button>
+                </>
+              ) : (
+                <Alert type="info" style={{ marginTop: 12 }}>
+                  {t('team.danger.ownerOnly')}
+                </Alert>
+              )}
+            </div>
+          )}
+
           {/* === 默认 Agent 模板（仅当前 Team owner/admin 可见）=== */}
           {showAgents && isTeamAdmin(activeTeam, currentUser) && (
-            <DefaultAgentTemplateSection
-              teamId={activeTeam.team_id}
-              teamName={activeTeam.name}
-            />
+            <DefaultAgentTemplateSection teamId={activeTeam.team_id} teamName={activeTeam.name} />
           )}
 
           {/* === Agent grid === */}
@@ -371,9 +452,14 @@ export default function TeamManagementPanel({
         />
       )}
       {editingAgent && activeTeam && (
-        <AgentEditDialog
-          agent={editingAgent}
-          onClose={() => setEditingAgent(null)}
+        <AgentEditDialog agent={editingAgent} onClose={() => setEditingAgent(null)} />
+      )}
+      {editingTeamSettings && activeTeam && (
+        <EditTeamDialog
+          team={activeTeam}
+          onClose={() => setEditingTeamSettings(false)}
+          onSave={handleUpdateTeam}
+          busy={busy}
         />
       )}
     </div>
