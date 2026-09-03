@@ -236,11 +236,6 @@ export function registerMetaProxyRoutes(api: Hono, deps: PanelDeps): void {
 
     const envelope = await deps.metaKernel.invoke(action, body, ctx);
 
-    // team-member/add 成功后，为默认 Agent 复制模板资产（best-effort，异步不阻塞响应）
-    if (action === 'team-member/add' && envelope.code === 0) {
-      void cloneDefaultAgentForNewMember(body, ctx, deps);
-    }
-
     if (action === 'user/list' && envelope.code === 0) {
       hideKnowledgeServiceUser(envelope.data);
     }
@@ -252,28 +247,50 @@ export function registerMetaProxyRoutes(api: Hono, deps: PanelDeps): void {
   });
 }
 
-// ── team-member/add 成功后：为默认 Agent 复制模板资产（best-effort）──
+// ── 用户显式确认后创建默认 Agent 与模板资产 ──
 
 // 默认 Agent 预置字段（对齐内核 DEFAULT_AGENT_*，无模板时建 default-agent 用）
 const DEFAULT_AGENT_NAME = 'default-agent';
 const DEFAULT_AGENT_DESCRIPTION = '默认助手，可处理通用开发任务与日常协作。';
 const DEFAULT_AGENT_PROMPT = '';
-const DEFAULT_AGENT_METADATA_JSON = JSON.stringify({
-  ui: { role_prompt: '', rules_prompt: '' },
-});
+const DEFAULT_AGENT_METADATA = { ui: { role_prompt: '', rules_prompt: '' } };
+
+export interface DefaultAgentProvisionResult {
+  agent_id: string;
+  agent_name: string;
+  agent_created: boolean;
+  failed_assets: string[];
+}
+
+function provisioningMetadata(raw: string | undefined, teamId: string, userId: string): string {
+  let parsed: Record<string, unknown> = {};
+  try {
+    const value = JSON.parse(raw ?? '{}') as unknown;
+    if (value && typeof value === 'object' && !Array.isArray(value)) parsed = value as Record<string, unknown>;
+  } catch {
+    parsed = {};
+  }
+  return JSON.stringify({
+    ...parsed,
+    panel_provisioning: {
+      source: 'default_template',
+      schema_version: 1,
+      team_id: teamId,
+      created_for_user_id: userId,
+    },
+  });
+}
 
 /**
  * 有模板 → 建同名 Agent（owner=新用户）→ 复制模板资产（skill fork / code_graph·wiki allocate）；
  * 无模板 → 建 default-agent-{username} → 导入预置 Skill。
  */
-async function cloneDefaultAgentForNewMember(
-  body: Record<string, unknown>,
+export async function provisionDefaultAgentForCaller(
+  userId: string,
+  teamId: string,
   ctx: MetaCallContext,
   deps: PanelDeps,
-): Promise<void> {
-  const userId = body.user_id as string | undefined;
-  const teamId = body.team_id as string | undefined;
-  if (!userId || !teamId) return;
+): Promise<DefaultAgentProvisionResult> {
 
   // 1. 读本地模板文件
   const template = readTemplateFile(deps.config.agentTemplateDir, ctx.instanceId, teamId);
@@ -281,6 +298,7 @@ async function cloneDefaultAgentForNewMember(
 
   // 2. 拿 username（拼 default-agent 名）
   const userEnv = await deps.metaKernel.invoke('user/get', { user_id: userId }, ctx);
+  if (userEnv.code !== 0) throw new Error(userEnv.message || 'USER_LOOKUP_FAILED');
   const user = userEnv.code === 0 ? (userEnv.data as { username?: string } | null) : null;
   const defaultAgentName = `${DEFAULT_AGENT_NAME}-${user?.username ?? userId}`;
 
@@ -291,13 +309,28 @@ async function cloneDefaultAgentForNewMember(
   const agentsEnv = await deps.metaKernel.invoke('agent/list', {
     team_id: teamId,
     owner_user_id: userId,
+    status: 'active',
     limit: 50,
     offset: 0,
   }, ctx);
+  if (agentsEnv.code !== 0) throw new Error(agentsEnv.message || 'AGENT_LIST_FAILED');
   const agents = agentsEnv.code === 0
-    ? ((agentsEnv.data as { items?: Array<{ agent_id: string; name: string }> })?.items ?? [])
+    ? ((agentsEnv.data as { items?: Array<{ agent_id: string; name: string; metadata_json?: string }> })?.items ?? [])
     : [];
-  let defaultAgent = agents.find((a) => a.name === agentName);
+  const markedAgent = agents.find((candidate) => {
+    try {
+      const metadata = JSON.parse(candidate.metadata_json ?? '{}') as {
+        panel_provisioning?: { source?: string; team_id?: string; created_for_user_id?: string };
+      };
+      return metadata.panel_provisioning?.source === 'default_template'
+        && metadata.panel_provisioning.team_id === teamId
+        && metadata.panel_provisioning.created_for_user_id === userId;
+    } catch {
+      return false;
+    }
+  });
+  let defaultAgent = markedAgent ?? agents.find((a) => a.name === agentName);
+  let agentCreated = false;
 
   if (!defaultAgent) {
     // 建本体（owner=新用户；有模板用模板字段，无模板用 default-agent 预置字段）
@@ -308,7 +341,11 @@ async function cloneDefaultAgentForNewMember(
       description: hasTemplate ? template!.description ?? null : DEFAULT_AGENT_DESCRIPTION,
       prompt: hasTemplate ? template!.prompt ?? '' : DEFAULT_AGENT_PROMPT,
       visibility: hasTemplate ? template!.visibility ?? 'team' : 'team',
-      metadata_json: hasTemplate ? template!.metadata_json ?? '{}' : DEFAULT_AGENT_METADATA_JSON,
+      metadata_json: provisioningMetadata(
+        hasTemplate ? template!.metadata_json : JSON.stringify(DEFAULT_AGENT_METADATA),
+        teamId,
+        userId,
+      ),
       status: 'active',
     }, ctx);
     if (createEnv.code !== 0) {
@@ -316,8 +353,9 @@ async function cloneDefaultAgentForNewMember(
         instanceId: ctx.instanceId, userId, teamId, agentName,
         code: createEnv.code, message: createEnv.message,
       });
-      return;
+      throw new Error(createEnv.message || 'DEFAULT_AGENT_CREATE_FAILED');
     }
+    agentCreated = true;
     defaultAgent = {
       agent_id: (createEnv.data as { agent_id: string }).agent_id,
       name: agentName,
@@ -325,11 +363,15 @@ async function cloneDefaultAgentForNewMember(
   }
 
   // 5. 有模板 → 复制资产；无模板 → 导入预置 skill
-  if (hasTemplate) {
-    await cloneTemplateAssets(deps, ctx, userId, teamId, template!, defaultAgent.agent_id);
-  } else {
-    await importDefaultSkillsForNewMember(body, ctx, deps);
-  }
+  const failedAssets = hasTemplate
+    ? await cloneTemplateAssets(deps, ctx, userId, teamId, template!, defaultAgent.agent_id)
+    : await importDefaultSkillsForAgent(userId, teamId, defaultAgent.agent_id, ctx, deps);
+  return {
+    agent_id: defaultAgent.agent_id,
+    agent_name: defaultAgent.name,
+    agent_created: agentCreated,
+    failed_assets: failedAssets,
+  };
 }
 
 /** 复制模板资产：skill fork 副本 + code_graph/wiki allocate 引用。 */
@@ -340,12 +382,14 @@ async function cloneTemplateAssets(
   teamId: string,
   template: AgentTemplateConfig,
   agentId: string,
-): Promise<void> {
+): Promise<string[]> {
+  const failed: string[] = [];
   // skills：fork 独立副本
   for (const skillId of template.asset_ids?.skills ?? []) {
     try {
       await forkSkillToAgent(deps, ctx, userId, teamId, skillId, agentId);
     } catch (err) {
+      failed.push(skillId);
       deps.logger.warn('fork template skill failed', {
         instanceId: ctx.instanceId, skillId, agentId,
         error: err instanceof Error ? err.message : String(err),
@@ -362,12 +406,14 @@ async function cloneTemplateAssets(
     try {
       await allocateKnowledgeToAgent(deps, ctx, agentId, k.assetId, k.assetType);
     } catch (err) {
+      failed.push(k.assetId);
       deps.logger.warn('allocate template knowledge failed', {
         instanceId: ctx.instanceId, assetId: k.assetId, agentId,
         error: err instanceof Error ? err.message : String(err),
       });
     }
   }
+  return failed;
 }
 
 /** fork skill 到目标 agent（get → files/read → create），复用前端 forkToAgent 的语义。 */
@@ -473,75 +519,45 @@ async function allocateKnowledgeToAgent(
   }
 }
 
-// ── team-member/add 成功后：为 default-agent 导入预置 Skill ──
+// ── 用户确认后：为 default-agent 导入预置 Skill ──
 
-async function importDefaultSkillsForNewMember(
-  body: Record<string, unknown>,
+async function importDefaultSkillsForAgent(
+  userId: string,
+  teamId: string,
+  agentId: string,
   ctx: MetaCallContext,
   deps: PanelDeps,
-): Promise<void> {
-  try {
-    const userId = body.user_id as string | undefined;
-    const teamId = body.team_id as string | undefined;
-    if (!userId || !teamId) return;
-
-    // 1. 获取用户信息（拿 username 拼 agent 名称）
-    const userEnv = await deps.metaKernel.invoke('user/get', { user_id: userId }, ctx);
-    if (userEnv.code !== 0) return;
-    const user = userEnv.data as { username?: string };
-    const agentName = `default-agent-${user.username ?? userId}`;
-
-    // 2. 查 default-agent
-    const agentsEnv = await deps.metaKernel.invoke('agent/list', {
-      team_id: teamId,
-      owner_user_id: userId,
-      limit: 50,
-      offset: 0,
-    }, ctx);
-    if (agentsEnv.code !== 0) return;
-    const agents = (agentsEnv.data as { items?: Array<{ agent_id: string; name: string }> })?.items ?? [];
-    const defaultAgent = agents.find(a => a.name === agentName);
-    if (!defaultAgent) {
-      deps.logger.warn('default agent not found, skip skill import', {
-        instanceId: ctx.instanceId, userId, teamId, agentName,
-      });
-      return;
-    }
-
-    // 3. 创建预置 Skill（依赖内核 name 唯一约束做幂等，42201 直接跳过）
-    for (const skill of DEFAULT_SKILLS) {
-      try {
-        const createEnv = await deps.skillKernel.invoke('create', {
-          user_id: userId,
-          team_id: teamId,
-          agent_id: defaultAgent.agent_id,
-          name: skill.name,
-          content: skill.content,
-        }, ctx);
-        if (createEnv.code === 0) {
-          deps.logger.info(`default skill "${skill.name}" created`, {
-            instanceId: ctx.instanceId,
-            agentId: defaultAgent.agent_id,
-          });
-        } else if (createEnv.code !== 42201) {
-          // 42201 = SKILL_NAME_DUPLICATE，忽略
-          deps.logger.warn(`default skill "${skill.name}" create failed`, {
-            instanceId: ctx.instanceId,
-            code: createEnv.code,
-            message: createEnv.message,
-          });
-        }
-      } catch (err) {
-        deps.logger.warn(`default skill "${skill.name}" create error`, {
+): Promise<string[]> {
+  const failed: string[] = [];
+  for (const skill of DEFAULT_SKILLS) {
+    try {
+      const createEnv = await deps.skillKernel.invoke('create', {
+        user_id: userId,
+        team_id: teamId,
+        agent_id: agentId,
+        name: skill.name,
+        content: skill.content,
+      }, ctx);
+      if (createEnv.code === 0) {
+        deps.logger.info(`default skill "${skill.name}" created`, {
           instanceId: ctx.instanceId,
-          error: err instanceof Error ? err.message : String(err),
+          agentId,
+        });
+      } else if (createEnv.code !== 42201) {
+        failed.push(skill.name);
+        deps.logger.warn(`default skill "${skill.name}" create failed`, {
+          instanceId: ctx.instanceId,
+          code: createEnv.code,
+          message: createEnv.message,
         });
       }
+    } catch (err) {
+      failed.push(skill.name);
+      deps.logger.warn(`default skill "${skill.name}" create error`, {
+        instanceId: ctx.instanceId,
+        error: err instanceof Error ? err.message : String(err),
+      });
     }
-  } catch (err) {
-    deps.logger.warn('import default skills for new member failed', {
-      instanceId: ctx.instanceId,
-      error: err instanceof Error ? err.message : String(err),
-    });
   }
+  return failed;
 }

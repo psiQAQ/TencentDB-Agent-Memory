@@ -118,9 +118,12 @@ Coding agent 用记忆必须落到具体 `team / agent / task` 三元组上：
 1. **Team**（团队）：点击顶栏左侧 TeamSwitcher → “新建团队”
    - 一个 Team 是一组资产的归属容器（memory、skill、knowledge 都归 Team）
    - 任意已认证用户都可以创建自己的 Team；创建后自动成为 owner/Team `admin`
-2. **Agent**（智能体）：左侧“Agents 管理”→ “新建 Agent”
-   - 给它填一段清晰的 `description` + `system prompt`（就是这个 agent 的角色说明）
-   - 例：`bug-fix 工程师`、`前端评审 agent`、`SQL 优化师`
+2. **Agent**（智能体）：左侧“Agents 管理”，二选一
+   - “从 Team 默认模板创建”：先显示将创建的 Agent/模板资产摘要，确认后才创建；
+     Team 没有模板时会创建 `default-agent-{username}` 和三个预置 Skill
+   - “新建 Agent”：手动填写 `description` + `system prompt`；例如
+     `bug-fix 工程师`、`前端评审 agent`、`SQL 优化师`
+   - 默认模板创建支持重复点击/超时重试，已完成项不会重复，部分失败时再次确认只补缺失项
 3. **Task**（任务，可选）：左侧“任务看板”→“新建 Task”
    - Task 是**这一次工作的抓手**，比如「修复登录页 XSS」「上线 v1.4 灰度」
    - 记忆会关联到 Task；不建 Task 也能用，但 L2/L3 会缺 Task 维度
@@ -136,6 +139,28 @@ Coding agent 用记忆必须落到具体 `team / agent / task` 三元组上：
 “成员管理”不会创建全局账号。owner 的角色以及操作者自己的角色被锁定；owner
 不可移除。全局 `system_admin` 也只有在当前 Team 确实为 owner/admin 时才会看到
 编辑/删除 Team、增删成员和修改角色等入口。
+
+添加成员只建立 membership，**不会静默创建 Agent 或 Asset**。新成员首次登录后，
+自行进入“Agents 管理”，选择“从 Team 默认模板创建”并确认，或使用普通表单手动创建。
+
+### 第 2.6 步：安全离组和删除账号
+
+ownership 不随 membership 自动转移或删除。移除成员或删除账号前按以下顺序处理：
+
+1. 用户在左侧“我的资源依赖”查看自己拥有的 Team、Agent、Task、Asset；inactive、
+   archived 状态也会显示并计入 blocker。
+2. 如果页面标记 `membership=absent`，由该 Team owner/admin 在“成员管理”按
+   `user_id` 恢复 membership。恢复不会自动生成默认资源。
+3. 用户本人在 active membership 下选择当前 Team 的业务资源，二次确认“永久清理”。
+   这会清 backing data、metadata 和关系；普通 Agent“归档”不等于解除 ownership。
+4. 资源依赖归零后，Team owner/admin 才能移除 membership；随后 `system_admin`
+   才能在“用户管理”删除账号。
+
+`team-member/remove` 会在写入前重新检查目标用户在当前 Team 所有状态的 Agent、Task、
+Asset；有依赖时返回 `409 member_has_owned_resources` 且 membership 保持不变。
+`user/delete` 同样检查所有状态的 Team、Agent、Task、Asset，批量请求中任一用户有依赖
+都会整批拒绝。`system_admin` 可在用户详情查看依赖名称、状态、Team 和 membership，
+但页面不提供业务资源清理或 membership 修改按钮；它也不能代替资源 owner 清理。
 
 ### 第 3 步：把 Claude Code 指向 Proxy
 

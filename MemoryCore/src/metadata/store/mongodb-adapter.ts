@@ -53,6 +53,8 @@ import type {
   AssetFilter,
   BatchDeleteResult,
   UserOwnedResourceCounts,
+  UserOwnedResourceDependency,
+  UserOwnedResourceFilter,
   ListPage,
   PaginationParams,
   InstanceUserListFilter,
@@ -509,14 +511,97 @@ export class MongoMetadataStore implements IMetadataStore {
     return this.col("meta_teams").countDocuments({});
   }
 
-  async getUserOwnedResourceCounts(userId: string): Promise<UserOwnedResourceCounts> {
+  async getUserOwnedResourceCounts(userId: string, teamId?: string): Promise<UserOwnedResourceCounts> {
+    const scoped = (ownerField: "owner_user_id" | "creator_user_id"): Document => ({
+      [ownerField]: userId,
+      ...(teamId ? { team_id: teamId } : {}),
+    });
     const [teams, agents, tasks, assets] = await Promise.all([
-      this.col("meta_teams").countDocuments({ owner_user_id: userId } as Document),
-      this.col("meta_agents").countDocuments({ owner_user_id: userId } as Document),
-      this.col("meta_tasks").countDocuments({ creator_user_id: userId } as Document),
-      this.col("meta_assets").countDocuments({ owner_user_id: userId } as Document),
+      this.col("meta_teams").countDocuments(scoped("owner_user_id")),
+      this.col("meta_agents").countDocuments(scoped("owner_user_id")),
+      this.col("meta_tasks").countDocuments(scoped("creator_user_id")),
+      this.col("meta_assets").countDocuments(scoped("owner_user_id")),
     ]);
     return { teams, agents, tasks, assets };
+  }
+
+  async listUserOwnedResources(
+    userId: string,
+    pagination?: PaginationParams | null,
+    filter?: UserOwnedResourceFilter,
+  ): Promise<ListPage<UserOwnedResourceDependency>> {
+    const scope = filter?.team_id ? { team_id: filter.team_id } : {};
+    const [teams, agents, tasks, assets] = await Promise.all([
+      this.col<TeamEntity>("meta_teams").find({ owner_user_id: userId, ...scope }, { projection: PROJECT_NO_ID }).toArray(),
+      this.col<AgentEntity>("meta_agents").find({ owner_user_id: userId, ...scope }, { projection: PROJECT_NO_ID }).toArray(),
+      this.col<TaskEntity>("meta_tasks").find({ creator_user_id: userId, ...scope }, { projection: PROJECT_NO_ID }).toArray(),
+      this.col<AssetEntity>("meta_assets").find({ owner_user_id: userId, ...scope }, { projection: PROJECT_NO_ID }).toArray(),
+    ]);
+    const raw = [
+      ...teams.map((item) => ({
+        resource_type: "team" as const,
+        resource_id: item.team_id,
+        team_id: item.team_id,
+        name: item.name,
+        status: item.status,
+        asset_type: null,
+        created_at: item.created_at,
+      })),
+      ...agents.map((item) => ({
+        resource_type: "agent" as const,
+        resource_id: item.agent_id,
+        team_id: item.team_id,
+        name: item.name,
+        status: item.status,
+        asset_type: null,
+        created_at: item.created_at,
+      })),
+      ...tasks.map((item) => ({
+        resource_type: "task" as const,
+        resource_id: item.task_id,
+        team_id: item.team_id,
+        name: item.title,
+        status: item.status,
+        asset_type: null,
+        created_at: item.created_at,
+      })),
+      ...assets.map((item) => ({
+        resource_type: "asset" as const,
+        resource_id: item.asset_id,
+        team_id: item.team_id,
+        name: item.name,
+        status: item.status,
+        asset_type: item.asset_type,
+        created_at: item.created_at,
+      })),
+    ].filter((item) => (!filter?.resource_type || item.resource_type === filter.resource_type)
+      && (!filter?.status || item.status === filter.status));
+
+    const teamIds = [...new Set(raw.map((item) => item.team_id))];
+    const [teamRows, memberships] = await Promise.all([
+      this.col<TeamEntity>("meta_teams").find({ team_id: { $in: teamIds } } as Document, { projection: PROJECT_NO_ID }).toArray(),
+      this.col<TeamMemberEntity>("meta_team_members").find(
+        { team_id: { $in: teamIds }, user_id: userId } as Document,
+        { projection: PROJECT_NO_ID },
+      ).toArray(),
+    ]);
+    const teamNames = new Map(teamRows.map((team) => [team.team_id, team.name]));
+    const membershipByTeam = new Map(memberships.map((member) => [member.team_id, member]));
+    const rows: UserOwnedResourceDependency[] = raw
+      .map((item) => {
+        const membership = membershipByTeam.get(item.team_id);
+        return {
+          ...item,
+          team_name: teamNames.get(item.team_id) ?? item.team_id,
+          membership_role: membership?.role ?? null,
+          membership_status: (membership?.status ?? "absent") as UserOwnedResourceDependency["membership_status"],
+        };
+      })
+      .sort((a, b) => b.created_at.localeCompare(a.created_at)
+        || a.resource_type.localeCompare(b.resource_type)
+        || a.resource_id.localeCompare(b.resource_id));
+    const p = pagination ?? DEFAULT_PAGINATION;
+    return { items: rows.slice(p.offset, p.offset + p.limit), total: rows.length };
   }
 
   // ============================================================

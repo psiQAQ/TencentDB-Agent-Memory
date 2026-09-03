@@ -1,5 +1,5 @@
 /**
- * v3 元数据 API 请求体 Zod schema（55 公开接口）。
+ * v3 元数据 API 请求体 Zod schema（公开接口）。
  *
  * 对应设计文档 §7.1。每个 schema 校验对应路由的请求体；
  * 路由 handler 用 `schema.safeParse(body)` 校验后再调用 MetadataService。
@@ -58,6 +58,12 @@ export const initAdminSchema = z.object({
 });
 export const userGetSchema = userIdOrKeySchema;
 export const userDeleteSchema = z.object({ user_ids: idList });
+export const userDependenciesSchema = z.object({
+  user_id: nonEmpty,
+  team_id: nonEmpty.optional(),
+  resource_type: z.enum(["team", "agent", "task", "asset"]).optional(),
+  status: nonEmpty.optional(),
+}).merge(paginationInputSchema);
 export const userListSchema = z
   .object({
     team_id: nonEmpty.optional(),
@@ -377,7 +383,7 @@ export const internalListUsersByInstanceSchema = z.object({
   user_ids: optionalUserIdsFilter,
 }).merge(paginationInputSchema);
 
-/** 路由 → schema 映射（55 公开接口）。 */
+/** 路由 → schema 映射。 */
 // ── ConfigParam（v3.2）──
 export const instanceQuotaGetSchema = z.object({});
 
@@ -398,6 +404,7 @@ export const V3_SCHEMAS = {
   "/v3/meta/user/create-with-key": userCreateWithKeySchema,
   "/v3/meta/user/get": userGetSchema,
   "/v3/meta/user/delete": userDeleteSchema,
+  "/v3/meta/user/dependencies": userDependenciesSchema,
   "/v3/meta/user/list": userListSchema,
   "/v3/meta/user-key/create": userKeyCreateSchema,
   "/v3/meta/user-key/list": userKeyListSchema,

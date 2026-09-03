@@ -804,7 +804,7 @@ upsert 知识明细（幂等）。
 
 ---
 
-## 3.7 Meta 元数据（55）
+## 3.7 Meta 元数据（56）
 
 > 元数据面 `/v3/meta/*`，鉴权 `Bearer + x-tdai-service-id + x-tdai-user-key`（`auth/verify` 免 user-key）。
 > 失败 message 格式 `"{error_code}: {detail}"`，HTTP 状态由 mapErrorCode 映射（见 §4.2）。
@@ -816,7 +816,7 @@ upsert 知识明细（幂等）。
 Team/Agent/Task/Asset 及关联关系的读取要求 caller 是资源所属 Team 的 active member，
 Team 更新、删除及人员变更仅限真实 Team owner/admin。
 
-### 3.7.1 User（5）
+### 3.7.1 User（6）
 
 | 接口 | 鉴权 | 说明 |
 |---|---|---|
@@ -824,6 +824,7 @@ Team 更新、删除及人员变更仅限真实 Team owner/admin。
 | `POST /user/create-with-key` | system_admin | 姊妹接口，可显式指定 user_key |
 | `POST /user/get` | 本人/system_admin | 按 user_id 或 user_key 查 |
 | `POST /user/delete` | system_admin | 安全批量删除 |
+| `POST /user/dependencies` | 本人/Team owner-admin/system_admin | ownership 依赖只读预览 |
 | `POST /user/list` | system_admin 或 Team member | 实例/Team 范围分页列表 |
 
 **create 请求体**：`username`、`user_id?`（可指定确定性 ID）。
@@ -831,8 +832,17 @@ Team 更新、删除及人员变更仅限真实 Team owner/admin。
 **get 请求体**：`user_id` 或 `user_key`（二选一）。
 **list 请求体**：`team_id?`、`user_ids?`(≤100)、`username?` + 分页。
 **delete 请求体**：`user_ids: string[]`。任一目标仍拥有 Team、Agent、Task 或 Asset
-时整批返回 `409 user_has_owned_resources`，message 含各类数量，且不删除任何数据；
+时整批返回 `409 user_has_owned_resources`，`data.blockers` 含每个用户的分类计数，且不
+删除任何数据。active、inactive、archived 等所有状态都计入；
 最后一个 `system_admin` 仍受 `last_system_admin` 保护。
+
+**dependencies 请求体**：`user_id` 必填；`team_id?`、`resource_type?`
+(`team|agent|task|asset`)、`status?`、`limit?`、`offset?`。本人可查询自己在全部 Team
+中的 ownership（包括 membership 已缺失的历史孤儿）；Team owner/admin 查询他人时
+必须传自己管理的 `team_id`；`system_admin` 可跨 Team 只读查询。`counts` 统计权限范围
+内所有状态，不受 items 的 `resource_type/status` 筛选影响。items 仅包含资源类型、ID、
+Team/名称、状态、asset_type、创建时间及 membership role/status；不会返回 prompt、
+描述、内容、content_ref、业务 metadata 或凭证。该接口不授予资源 CRUD 权限。
 
 **UserPublic 响应**：`{ user_id, user_type: "normal"\|"system_admin", username, created_at }`。
 
@@ -1139,7 +1149,7 @@ owner 角色不可降级，Team admin 不可用 add 修改自己的角色。
 | 401 | invalid_credentials / invalid_password / unauthorized | 鉴权失败 |
 | 403 | permission_denied / agent_team_mismatch / task_agent_not_linked / user_inactive | 权限/归属 |
 | 404 | `*_not_found`（team/agent/task/asset/user_key 等） | 资源不存在 |
-| 409 | duplicate_entry / duplicate_user_key / key_limit_exceeded / user_limit_exceeded / team_limit_exceeded / last_key_cannot_revoke / already_initialized / last_system_admin / user_has_owned_resources / member_already_exists / asset_not_bindable | 冲突/超限/安全删除拒绝 |
+| 409 | duplicate_entry / duplicate_user_key / key_limit_exceeded / user_limit_exceeded / team_limit_exceeded / last_key_cannot_revoke / already_initialized / last_system_admin / user_has_owned_resources / member_has_owned_resources / member_already_exists / asset_not_bindable | 冲突/超限/安全删除或离组拒绝 |
 
 #### 数据面 / knowledge / chat-memory / memory-prompt / generation-log（标准 HTTP code，message 纯文本或枚举）
 

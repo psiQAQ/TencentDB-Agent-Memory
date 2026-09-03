@@ -52,9 +52,15 @@ export {
 // ── Users + UserKeys + UserConfig ──
 export {
   usersApi,
+  ownedResourcesApi,
   userKeysApi,
   userConfigApi,
   type CreateUserResult,
+  type OwnedResourceType,
+  type OwnedResourceDependency,
+  type UserDependencies,
+  type OwnedResourceRef,
+  type OwnedResourcePurgeResult,
   type UserKey,
   type AssetCapabilityKey,
   type UserConfigItem,

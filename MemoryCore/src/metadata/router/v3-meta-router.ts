@@ -1,5 +1,5 @@
 /**
- * v3 元数据路由（/v3/meta/*，55 接口）。
+ * v3 元数据路由（/v3/meta/*）。
  *
  * 对应设计文档 §7 + 实施计划 M3.3。镜像 v2-router 的 dispatch 模式：
  *   - 仅 POST，前缀 /v3/meta
@@ -73,7 +73,7 @@ function bind<S2 extends ZodType>(schema: S2, fn: BizFn<S2["_output"]>): Handler
 
 const OK = { ok: true } as const;
 
-// ── Route table（55 接口）──
+// ── Route table ──
 const routeTable: Record<string, Handler> = {
   // User
   [`${V3_PREFIX}/user/create`]: bind(S.userCreateSchema, async (d, c, s) => {
@@ -91,6 +91,15 @@ const routeTable: Record<string, Handler> = {
     return s.getUserForCaller(userId, c);
   }),
   [`${V3_PREFIX}/user/delete`]: bind(S.userDeleteSchema, (d, c, s) => s.deleteUsersForCaller(d.user_ids, c)),
+  [`${V3_PREFIX}/user/dependencies`]: bind(S.userDependenciesSchema, (d, c, s) => {
+    const { user_id, team_id, resource_type, status, limit, offset } = d;
+    return s.listUserDependenciesForCaller(
+      user_id,
+      { team_id, resource_type, status },
+      c,
+      resolvePagination({ limit, offset }),
+    );
+  }),
   [`${V3_PREFIX}/user/list`]: bind(S.userListSchema, (d, c, s) =>
     s.listUsersForCaller(d, c, resolvePagination(d)),
   ),
@@ -327,6 +336,7 @@ function mapErrorCode(code: string): number {
     case "already_initialized":
     case "last_system_admin":
     case "user_has_owned_resources":
+    case "member_has_owned_resources":
     case "member_already_exists":
       return 409;
     case "invalid_credentials":
@@ -375,7 +385,7 @@ export async function handleV3MetaRoute(
       const code = mapErrorCode(err.code);
       const message = `${err.code}: ${err.message}`;
       logMetaApiRejected(traceCtx, { httpStatus: code, envelopeCode: code, message });
-      sendJson(res, code, errorEnvelope(code, message, requestId));
+      sendJson(res, code, errorEnvelope(code, message, requestId, err.data));
       return true;
     }
     throw err;
@@ -445,7 +455,7 @@ export async function handleV3MetaRoute(
       const message = `${err.code}: ${err.message}`;
       deps.logger.warn?.(`${TAG} [${pathname}] ${message}`);
       logMetaApiError(traceCtx, err, { envelopeCode: code, httpStatus: code });
-      sendJson(res, code, errorEnvelope(code, message, requestId));
+      sendJson(res, code, errorEnvelope(code, message, requestId, err.data));
     } else {
       const msg = err instanceof Error ? err.message : String(err);
       deps.logger.error?.(`${TAG} [${pathname}] unexpected: ${msg}`);

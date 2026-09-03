@@ -9,7 +9,13 @@ import { Alert, Button, Copy, Form, Input, Modal, Select, Tag } from 'tea-compon
 import { useTranslation } from 'react-i18next';
 import { AddIcon, CloseIcon } from 'tea-icons-react';
 import { isTeamAdmin, invalidateBackendCache, type Team } from '@/services';
-import { membersApi } from '@/lib/teamApi';
+import {
+  ApiError,
+  membersApi,
+  usersApi,
+  type OwnedResourceDependency,
+  type UserDependencies,
+} from '@/lib/teamApi';
 import { tea } from '@/lib/tea-bridge';
 import { getErrorMessage } from '@/lib/error-message';
 import { canRemoveMember } from './types';
@@ -27,10 +33,22 @@ export function MemberSection({
 }) {
   const [removing, setRemoving] = useState<string | null>(null);
   const [updating, setUpdating] = useState<string | null>(null);
+  const [blocker, setBlocker] = useState<{ userId: string; dependencies: UserDependencies } | null>(null);
   const { t } = useTranslation();
   const canManageMembers = isTeamAdmin(team, currentUser);
 
   async function handleRemove(userId: string) {
+    let dependencies: UserDependencies;
+    try {
+      dependencies = await usersApi.dependenciesAll(userId, { team_id: team.team_id });
+    } catch (err) {
+      tea.notify.error(getErrorMessage(err));
+      return;
+    }
+    if (dependencies.counts.agents + dependencies.counts.tasks + dependencies.counts.assets > 0) {
+      setBlocker({ userId, dependencies });
+      return;
+    }
     const ok = await tea.confirm({
       message: t('member.remove.confirm', { userId }),
       description: t('member.remove.desc'),
@@ -42,7 +60,18 @@ export function MemberSection({
       await membersApi.remove(team.team_id, userId);
       invalidateBackendCache();
     } catch (err) {
-      tea.notify.error(getErrorMessage(err));
+      if (err instanceof ApiError && err.status === 409 && err.data) {
+        try {
+          setBlocker({
+            userId,
+            dependencies: await usersApi.dependenciesAll(userId, { team_id: team.team_id }),
+          });
+        } catch (refreshErr) {
+          tea.notify.error(getErrorMessage(refreshErr));
+        }
+      } else {
+        tea.notify.error(getErrorMessage(err));
+      }
     } finally {
       setRemoving(null);
     }
@@ -100,6 +129,62 @@ export function MemberSection({
           );
         })}
       </div>
+
+      {blocker && (
+        <OwnedResourceBlockerModal
+          userId={blocker.userId}
+          dependencies={blocker.dependencies}
+          onClose={() => setBlocker(null)}
+        />
+      )}
+    </div>
+  );
+}
+
+function OwnedResourceBlockerModal({
+  userId,
+  dependencies,
+  onClose,
+}: {
+  userId: string;
+  dependencies: UserDependencies;
+  onClose: () => void;
+}) {
+  const { t } = useTranslation();
+  const items = dependencies.items.filter((item) => item.resource_type !== 'team');
+  return (
+    <Modal visible caption={t('member.remove.blockedTitle')} size="l" onClose={onClose}>
+      <Modal.Body>
+        <Alert type="warning">
+          {t('member.remove.blockedDesc', {
+            userId,
+            agents: dependencies.counts.agents,
+            tasks: dependencies.counts.tasks,
+            assets: dependencies.counts.assets,
+          })}
+        </Alert>
+        <DependencyList items={items} />
+      </Modal.Body>
+      <Modal.Footer>
+        <Button type="primary" onClick={onClose}>{t('header.profile.close')}</Button>
+      </Modal.Footer>
+    </Modal>
+  );
+}
+
+function DependencyList({ items }: { items: OwnedResourceDependency[] }) {
+  const { t } = useTranslation();
+  if (items.length === 0) return null;
+  return (
+    <div style={{ marginTop: 12, maxHeight: 320, overflow: 'auto' }}>
+      {items.map((item) => (
+        <div key={`${item.resource_type}:${item.resource_id}`} style={{ padding: '8px 0', borderBottom: '1px solid var(--tea-color-border-secondary)' }}>
+          <div><Tag size="sm">{item.resource_type}</Tag> <strong>{item.name || item.resource_id}</strong></div>
+          <div style={{ marginTop: 4, color: 'var(--tea-color-text-secondary)' }}>
+            <code>{item.resource_id}</code> · {item.status} · {t('resources.membership')}: {item.membership_status}
+          </div>
+        </div>
+      ))}
     </div>
   );
 }

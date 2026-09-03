@@ -82,7 +82,7 @@
 |---|---|---|
 | GET | `/health` | 健康检查（无鉴权，裸 JSON） |
 | GET | `/api/v1/meta/instances` | 实例列表（无鉴权，裸 JSON） |
-| POST | `/api/v1/meta/*` | 元数据透明代理（53 个 action，见 §3.2） |
+| POST | `/api/v1/meta/*` | 元数据透明代理（54 个 action，见 §3.2） |
 | POST | `/api/v1/skill/*` | Skill 数据面透明代理（15 个 action，见 §3.3） |
 | POST | `/api/v1/chat-memory/team-assets` | 团队记忆资产列表 |
 | POST | `/api/v1/chat-memory/agent-fixed` | 指定 Agent 的固定资产记忆 |
@@ -104,6 +104,8 @@
 | POST | `/api/v1/topology/bootstrap` | Team Atlas 可见拓扑聚合 |
 | POST | `/api/v1/chat-memory/status` | Chat Memory 四层数量状态（不返回正文） |
 | POST | `/api/v1/agent/delete-cascade` | 删除 Agent（级联清 skill 后 archive） |
+| POST | `/api/v1/agent/create-default` | 本人确认后幂等创建 Team 默认 Agent/资产 |
+| POST | `/api/v1/account/owned-resources/purge` | owner-only 永久清理业务资源 |
 | POST | `/api/v1/knowledge/wiki/*` | Wiki 知识库业务路由（14 个，见 §3.8） |
 | POST | `/api/v1/knowledge/code-graph/*` | Code-Graph 业务路由（8 个，见 §3.9） |
 | POST | `/api/v1/knowledge/allocate` 等 | 知识分配/授权（5 个，见 §3.10） |
@@ -171,11 +173,11 @@ caller 的 active membership 与真实 `admin/member/reviewer` 角色决定。
 - 路径最后一段即 action 名（如 `POST /meta/agent/list` → 内核 `agent/list`）。
 - 白名单之外 action 返回 `404 UNKNOWN_META_ACTION`；`agent-fixed-asset/*` 返回 `501 NOT_IN_SCOPE`（该类操作由 Panel 业务路由内部直调，见 §3.4/§3.10）。
 
-**开放 action 清单（53 条）**：
+**开放 action 清单（54 条）**：
 
 | 实体 | action |
 |---|---|
-| user | create、create-with-key、get、delete、list |
+| user | create、create-with-key、get、delete、dependencies、list |
 | user-key | create、list、get、revoke、update |
 | team | create、get、update、delete、list |
 | team-member | add、remove、list、get |
@@ -198,7 +200,7 @@ caller 的 active membership 与真实 `admin/member/reviewer` 角色决定。
 | `user/create`、`user/create-with-key`、`team/create`、`agent/create`、`task/create` | 先按 name/username/title 查重，重名返回 `409` 中文提示 |
 | `agent/set-default-template` | **不转发内核**，Panel 本地写模板文件；需当前 Team owner/admin（真实 role=`admin`），否则 `403 permission_denied` |
 | `agent/get-default-template` | **不转发内核**，Panel 本地读模板文件；需当前 Team active membership |
-| `team-member/add` | 成功后异步为默认 Agent 复制模板资产（best-effort） |
+| `team-member/add` | 只创建/恢复 membership，不创建 Agent 或 Asset |
 | `user/list` | 隐藏内部 `knowledge-service` 计费用户 |
 
 人员管理约定：`user/create` 与 `user/create-with-key` 只允许 `system_admin`，且固定
@@ -206,6 +208,11 @@ caller 的 active membership 与真实 `admin/member/reviewer` 角色决定。
 Agent、Task 或 Asset 时内核返回 `409 user_has_owned_resources` 并保持整批不变。
 `team-member/add` 只添加已有账号，可写 `admin/member/reviewer`，已有成员调用时更新角色。
 `system_admin` 的 Teamless 用户同样属于 User-Key 管理范围。
+
+`user/dependencies` 返回删除/离组前的只读 ownership 预览：本人查自己；Team owner/admin
+查询他人时必须限定当前 `team_id`；`system_admin` 可跨 Team 查看名称、状态和 membership，
+但不能据此获取或清理业务内容。`team-member/remove` 会再次检查所有状态的 Agent、Task、
+Asset；有依赖时返回 `409 member_has_owned_resources` 和结构化 counts，membership 不变。
 
 **示例**（`agent/create`）：
 
@@ -758,7 +765,22 @@ L0/L1 列表批量删除。**仅资产 Owner**。
 
 ---
 
-## 3.7 Agent 生命周期
+## 3.7 Agent 与账号资源生命周期
+
+### POST /agent/create-default
+
+当前认证用户显式确认后，为自己在指定 Team 创建默认 Agent。请求只接受 `team_id`，
+`owner_user_id` 从 User-Key 派生；caller 必须是 Team active member。
+
+**请求体**：`{ "team_id": "team-xxx" }`。接口不接受任意 `user_id`；确认动作由 Panel
+UI 在发请求前完成。
+
+有 Team 模板时创建同名 Agent 并补齐模板资产；无模板时创建
+`default-agent-{username}` 和三个预置 Skill。Agent 带 `panel_provisioning` metadata，
+并按 owner+Team+name 与资产自身查重；重复点击、超时重试只补缺失项。
+
+**响应** `data`：`agent_id`、`agent_name`、`agent_created`、`failed_assets`。部分资产
+失败时 Agent 和成功项保留，再次调用可恢复。
 
 ### POST /agent/delete-cascade
 
@@ -793,6 +815,31 @@ L0/L1 列表批量删除。**仅资产 Owner**。
   "data": { "archived": true, "agent_id": "agt_1", "deleted_skill_count": 2, "deleted_skill_ids": ["skl_1", "skl_2"] }
 }
 ```
+
+### POST /account/owned-resources/purge
+
+由资源 owner 本人永久清理当前 Team 的 Agent、Task 或 Asset。caller 必须是目标 Team
+active member，并且必须是请求中每项资源的 owner/creator；先校验整批，任一越权时不
+删除任何项。Team owner/admin、`system_admin` 均不能代替其他 owner 调用。
+
+**请求体**：
+
+```json
+{
+  "team_id": "team-xxx",
+  "resources": [{ "resource_type": "agent", "resource_id": "agt-xxx" }],
+  "confirmation": "PERMANENT_DELETE"
+}
+```
+
+最多 100 项。Task 物理删除 metadata/关系；Skill、Wiki、Code Graph、Chat Memory 先
+清 backing data，再删 metadata；Agent 先清本人子资产、chat memory 与关系，再物理
+删除。跨服务无法形成单事务，因此响应逐项给出 `deleted/failed` 和重新查询后的
+`remaining`；backing data 失败的项保留 metadata，可重试；已不存在项按幂等成功。
+
+**错误**：`MISSING_TEAM_ID`、`INVALID_RESOURCES`、`CONFIRMATION_REQUIRED`、
+`INVALID_USER_KEY`、`ACTIVE_TEAM_MEMBERSHIP_REQUIRED`、`NOT_RESOURCE_OWNER`、
+`RESOURCE_TEAM_MISMATCH`。
 
 ---
 

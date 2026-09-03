@@ -1,5 +1,5 @@
 // ── 冷启动预置 Skill 常量 ──
-// 在 initAdminUser 时自动导入到默认 Agent，让用户开箱即用。
+// 仅在用户显式确认“从 Team 默认模板创建”且 Team 未配置模板时导入。
 // 每个 Skill 的 content 是完整的 SKILL.md 全文（YAML frontmatter + Markdown body）。
 
 export const DEFAULT_SKILL_CODE_REVIEW_CONTENT = `---

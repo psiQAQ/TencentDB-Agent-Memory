@@ -26,6 +26,7 @@ const PATH_TO_PAGE: Record<string, PageId> = {
   '/memory': 'chat_memory',
   '/team/members': 'team_members',
   '/team/agents': 'team_agents',
+  '/account/resources': 'owned_resources',
   '/users': 'user_management',
   '/team/api-keys': 'api_keys',
 };
@@ -45,6 +46,7 @@ function legacyHashToPath(): string | null {
   if (leaf === 'skills' || leaf === 'skill') return '/skills';
   if (leaf === 'chat_memory' || leaf === 'memory' || leaf === 'chat-memory') return '/memory';
   if (leaf === 'agents' || leaf === 'team_agents') return '/team/agents';
+  if (leaf === 'owned_resources' || leaf === 'resources') return '/account/resources';
   if (leaf === 'users' || leaf === 'user_management') return '/users';
   if (leaf === 'team' || leaf === 'members' || leaf === 'team_members') return '/team/members';
   if (leaf === 'api_keys' || leaf === 'apikey' || leaf === 'api-keys') return '/team/api-keys';

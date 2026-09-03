@@ -79,6 +79,8 @@ import type {
   AssetFilter,
   BatchDeleteResult,
   UserOwnedResourceCounts,
+  UserOwnedResourceFilter,
+  UserDependenciesResult,
   AssetType,
   AssetVisibility,
   AssetStatus,
@@ -125,6 +127,7 @@ export class MetadataError extends Error {
   constructor(
     public readonly code: string,
     message: string,
+    public readonly data?: Record<string, unknown>,
   ) {
     super(message);
     this.name = "MetadataError";
@@ -545,6 +548,7 @@ export class MetadataService {
       throw new MetadataError(
         "user_has_owned_resources",
         `cannot delete users with owned resources: ${details}`,
+        { blockers: ownedResources },
       );
     }
     return this.deleteUsers(userIds);
@@ -552,6 +556,38 @@ export class MetadataService {
 
   async deleteUsers(userIds: string[]): Promise<BatchDeleteResult> {
     return this.store.deleteUsers(userIds);
+  }
+
+  async listUserDependenciesForCaller(
+    userId: string,
+    filter: UserOwnedResourceFilter,
+    ctx: V3AuthContext,
+    pagination: PaginationParams = DEFAULT_PAGINATION,
+  ): Promise<UserDependenciesResult> {
+    if (!(await this.getUserById(userId))) {
+      throw new MetadataError("user_not_found", `user not found: ${userId}`);
+    }
+    const callerId = this.requireCallerId(ctx);
+    if (userId !== callerId && !ctx.isSystemAdmin) {
+      if (!filter.team_id) {
+        throw new MetadataError(
+          "permission_denied",
+          "team_id is required when querying another user's dependencies",
+        );
+      }
+      await this.assertCallerIsTeamOwnerOrAdmin(ctx, filter.team_id);
+    }
+    const [counts, page] = await Promise.all([
+      this.store.getUserOwnedResourceCounts(userId, filter.team_id),
+      this.store.listUserOwnedResources(userId, pagination, filter),
+    ]);
+    return {
+      ...formatListResult(page, pagination),
+      counts: {
+        ...counts,
+        total: counts.teams + counts.agents + counts.tasks + counts.assets,
+      },
+    };
   }
 
   async listUsersForCaller(
@@ -1942,6 +1978,15 @@ export class MetadataService {
     if (!team) throw new MetadataError("team_not_found", `team not found: ${teamId}`);
     if (userId === team.owner_user_id) {
       throw new MetadataError("permission_denied", "cannot remove team owner");
+    }
+    const counts = await this.store.getUserOwnedResourceCounts(userId, teamId);
+    if (counts.agents || counts.tasks || counts.assets) {
+      throw new MetadataError(
+        "member_has_owned_resources",
+        `cannot remove member with owned resources: ${userId}`
+          + `(agents=${counts.agents}, tasks=${counts.tasks}, assets=${counts.assets})`,
+        { user_id: userId, team_id: teamId, counts },
+      );
     }
     return this.removeTeamMember(teamId, userId);
   }

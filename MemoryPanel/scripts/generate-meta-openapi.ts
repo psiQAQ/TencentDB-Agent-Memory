@@ -52,6 +52,9 @@ function panelDescription(action: string): string {
   if (action === 'user/list') {
     return '透明代理；team_id 仅 system_admin 可省略（实例级 list）。可选 user_ids、username（精确匹配）过滤。响应 UserPublic 含 username。';
   }
+  if (action === 'user/dependencies') {
+    return 'ownership 依赖预览。本人可查自己全部依赖；Team owner/admin 查他人时必须传当前 team_id；system_admin 可跨 Team 只读。counts 始终统计过滤范围内所有状态，items 可按 resource_type/status 分页筛选，且不返回 prompt、内容、描述、metadata 或凭证。';
+  }
   if (action === 'team-member/list') {
     return '分页 list；body 须 team_id。响应 items 为 TeamMemberEntity（含读时 JOIN 的 username，v3.2.2+）；仅 active 团队成员可调用。默认 joined_at DESC。须 Header 双凭证。';
   }
@@ -62,7 +65,7 @@ function panelDescription(action: string): string {
     return '透明代理；团队 admin。禁对自己 add、禁 demote owner。响应 TeamMemberEntity **不含** username（v3.2.2+）；添加后请 team-member/list 获取展示名。v3.2.3+：active 同 role 重复 add → 409 member_already_exists。';
   }
   if (action === 'team-member/remove') {
-    return '透明代理；团队 admin。禁移除 team owner（403 cannot remove team owner）。物理删除成员行。须 Header 双凭证。';
+    return '透明代理；团队 admin。禁移除 team owner/自己。目标仍拥有该 Team 的任意状态 Agent、Task 或 Asset 时返回结构化 409 member_has_owned_resources 且 membership 不变；否则物理删除成员行。';
   }
   if (action === 'team/update') {
     return '透明代理；team owner 或 admin。不可改 owner_user_id（传入静默忽略）。字段见 08-metadata-v3-api-reference.md。须 Header 双凭证。';

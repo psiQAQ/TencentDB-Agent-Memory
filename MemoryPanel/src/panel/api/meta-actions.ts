@@ -6,6 +6,7 @@
 
 export const META_LIST_ACTIONS = new Set([
   'user/list',
+  'user/dependencies',
   'user-key/list',
   'team/list',
   'team-member/list',
@@ -27,6 +28,7 @@ export const META_ACTIONS = [
   'user/create-with-key',
   'user/get',
   'user/delete',
+  'user/dependencies',
   'user/list',
   'user-key/create',
   'user-key/list',

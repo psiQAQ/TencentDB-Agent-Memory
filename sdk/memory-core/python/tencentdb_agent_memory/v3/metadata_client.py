@@ -11,7 +11,7 @@
 封装范围
 --------
 
-- ``/v3/meta/*`` 公开接口 54 条（与 Panel Control ``META_ACTIONS`` 对齐，含 ``user-key/*``）
+- ``/v3/meta/*`` 公开接口 56 条（含 ownership dependencies 与 ``user-key/*``）
 - ``/v3/knowledge/*`` Knowledge 实体 CRUD 5 条（非 meta 前缀，保留兼容）
 
 >>> from tencentdb_agent_memory.v3 import MetadataClient
@@ -67,6 +67,9 @@ class _MetadataMethodsMixin:
 
     def _delete_users(self, user_ids: List[str]) -> Dict[str, Any]:
         return self._stub.post(f"{_V3}/user/delete", {"user_ids": user_ids})
+
+    def _list_user_dependencies(self, request: Dict[str, Any]) -> Dict[str, Any]:
+        return self._stub.post(f"{_V3}/user/dependencies", _body(request))
 
     def _list_users(
         self,
@@ -373,6 +376,9 @@ class MetadataClient(_MetadataMethodsMixin):
     def delete_users(self, user_ids: List[str]) -> Dict[str, Any]:
         return self._delete_users(user_ids)
 
+    def list_user_dependencies(self, request: Dict[str, Any]) -> Dict[str, Any]:
+        return self._list_user_dependencies(request)
+
     def list_users(
         self,
         team_id_or_request: Union[str, Dict[str, Any], None] = None,
@@ -657,6 +663,9 @@ class AsyncMetadataClient(_MetadataMethodsMixin):
 
     async def delete_users(self, user_ids: List[str]) -> Dict[str, Any]:
         return await self._delete_users(user_ids)
+
+    async def list_user_dependencies(self, request: Dict[str, Any]) -> Dict[str, Any]:
+        return await self._list_user_dependencies(request)
 
     async def list_users(
         self,

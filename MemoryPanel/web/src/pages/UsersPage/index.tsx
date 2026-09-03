@@ -17,7 +17,13 @@ import {
 } from 'tea-component';
 import { AddIcon } from 'tea-icons-react';
 import { useTranslation } from 'react-i18next';
-import { usersApi, type PublicUser } from '@/lib/teamApi';
+import {
+  ApiError,
+  usersApi,
+  type OwnedResourceDependency,
+  type PublicUser,
+  type UserDependencies,
+} from '@/lib/teamApi';
 import { useAuthStore } from '@/stores/auth';
 import { tea } from '@/lib/tea-bridge';
 import { getErrorMessage } from '@/lib/error-message';
@@ -39,7 +45,7 @@ export function UsersPage() {
   const [keyword, setKeyword] = useState('');
   const [loading, setLoading] = useState(true);
   const [createOpen, setCreateOpen] = useState(false);
-  const [detail, setDetail] = useState<PublicUser | null>(null);
+  const [detail, setDetail] = useState<{ user: PublicUser; dependencies: UserDependencies } | null>(null);
   const [fresh, setFresh] = useState<{ username: string; userId: string; keyValue: string } | null>(null);
 
   const refresh = useCallback(async () => {
@@ -66,13 +72,28 @@ export function UsersPage() {
 
   async function showDetail(userId: string) {
     try {
-      setDetail(await usersApi.get(userId));
+      const [user, dependencies] = await Promise.all([
+        usersApi.get(userId),
+        usersApi.dependenciesAll(userId),
+      ]);
+      setDetail({ user, dependencies });
     } catch (err) {
       tea.notify.error(getErrorMessage(err));
     }
   }
 
   async function deleteUser(user: PublicUser) {
+    let dependencies: UserDependencies;
+    try {
+      dependencies = await usersApi.dependenciesAll(user.user_id);
+    } catch (err) {
+      tea.notify.error(getErrorMessage(err));
+      return;
+    }
+    if (dependencies.counts.total > 0) {
+      setDetail({ user, dependencies });
+      return;
+    }
     const ok = await tea.confirm({
       message: t('users.delete.confirm', { username: user.username }),
       description: t('users.delete.desc', { userId: user.user_id }),
@@ -83,7 +104,15 @@ export function UsersPage() {
       await usersApi.delete(user.user_id);
       await refresh();
     } catch (err) {
-      tea.notify.error(getErrorMessage(err));
+      if (err instanceof ApiError && err.status === 409 && err.data) {
+        try {
+          setDetail({ user, dependencies: await usersApi.dependenciesAll(user.user_id) });
+        } catch (refreshErr) {
+          tea.notify.error(getErrorMessage(refreshErr));
+        }
+      } else {
+        tea.notify.error(getErrorMessage(err));
+      }
     }
   }
 
@@ -174,7 +203,13 @@ export function UsersPage() {
         />
       )}
       {fresh && <CreatedUserKeyModal info={fresh} onClose={() => setFresh(null)} />}
-      {detail && <UserDetailModal user={detail} onClose={() => setDetail(null)} />}
+      {detail && (
+        <UserDetailModal
+          user={detail.user}
+          dependencies={detail.dependencies}
+          onClose={() => setDetail(null)}
+        />
+      )}
     </div>
   );
 }
@@ -270,10 +305,18 @@ function CreateUserDialog({
   );
 }
 
-function UserDetailModal({ user, onClose }: { user: PublicUser; onClose: () => void }) {
+function UserDetailModal({
+  user,
+  dependencies,
+  onClose,
+}: {
+  user: PublicUser;
+  dependencies: UserDependencies;
+  onClose: () => void;
+}) {
   const { t } = useTranslation();
   return (
-    <Modal visible caption={t('users.detail.caption')} size="s" onClose={onClose}>
+    <Modal visible caption={t('users.detail.caption')} size="l" onClose={onClose}>
       <Modal.Body>
         <Form>
           <Form.Item label={t('users.column.username')}><Input value={user.username} readonly size="full" /></Form.Item>
@@ -281,8 +324,43 @@ function UserDetailModal({ user, onClose }: { user: PublicUser; onClose: () => v
           <Form.Item label={t('users.column.type')}><Input value={user.user_type} readonly size="full" /></Form.Item>
           <Form.Item label={t('users.column.createdAt')}><Input value={formatTime(user.created_at)} readonly size="full" /></Form.Item>
         </Form>
+        <div style={{ marginTop: 16 }}>
+          <H3>{t('users.dependencies.title')}</H3>
+          <Text theme="weak" parent="div" style={{ marginTop: 4 }}>
+            {t('users.dependencies.counts', dependencies.counts)}
+          </Text>
+          {dependencies.counts.total > 0 && (
+            <Alert type="warning" style={{ marginTop: 12 }}>
+              {t('users.dependencies.blockedWorkflow')}
+            </Alert>
+          )}
+          <UserDependencyList items={dependencies.items} />
+        </div>
       </Modal.Body>
       <Modal.Footer><Button type="primary" onClick={onClose}>{t('header.profile.close')}</Button></Modal.Footer>
     </Modal>
+  );
+}
+
+function UserDependencyList({ items }: { items: OwnedResourceDependency[] }) {
+  const { t } = useTranslation();
+  if (items.length === 0) return <Alert type="success">{t('users.dependencies.empty')}</Alert>;
+  return (
+    <div style={{ marginTop: 12, maxHeight: 360, overflow: 'auto' }}>
+      {items.map((item) => (
+        <div key={`${item.resource_type}:${item.resource_id}`} style={{ padding: '9px 0', borderBottom: '1px solid var(--tea-color-border-secondary)' }}>
+          <div>
+            <Tag size="sm">{item.resource_type}</Tag>{' '}
+            <strong>{item.name || item.resource_id}</strong>{' '}
+            <Tag size="sm" theme={item.membership_status === 'absent' ? 'error' : 'default'}>
+              {item.membership_status === 'absent' ? t('users.dependencies.orphan') : item.membership_status}
+            </Tag>
+          </div>
+          <div style={{ marginTop: 4, color: 'var(--tea-color-text-secondary)' }}>
+            <code>{item.resource_id}</code> · {item.team_name || item.team_id} · {item.status}
+          </div>
+        </div>
+      ))}
+    </div>
   );
 }

@@ -36,6 +36,7 @@ import {
   resolveCallerUserId,
   str,
 } from './knowledge/common.js';
+import { provisionDefaultAgentForCaller } from './meta/proxy.js';
 
 /** skill/list 一页 100 条 —— 与 knowledge fetchAllMetaListItems 分页步长对齐。 */
 const SKILL_LIST_PAGE = 100;
@@ -88,6 +89,33 @@ async function listAgentSkills(
 
 export function registerAgentLifecycleRoutes(api: Hono, deps: PanelDeps): void {
   const mw = validatePanelMetaHeaders(deps);
+
+  api.post('/agent/create-default', mw, async (c) => {
+    const ctx = buildCtx(c);
+    const body = await readJson(c);
+    const teamId = str(body, 'team_id');
+    if (!teamId) return respondControlError(c, 400, 'MISSING_TEAM_ID');
+    const callerId = await resolveCallerUserId(deps, ctx);
+    if (!callerId) return respondControlError(c, 401, 'INVALID_USER_KEY');
+    const memberEnv = await deps.metaKernel.invoke(
+      'team-member/get',
+      { team_id: teamId, user_id: callerId },
+      ctx,
+    );
+    if (memberEnv.code !== 0) return respondEnvelope(c, memberEnv);
+    try {
+      const result = await provisionDefaultAgentForCaller(callerId, teamId, ctx, deps);
+      return respondEnvelope(c, okEnvelope(c, result));
+    } catch (err) {
+      deps.logger.warn('explicit default agent provisioning failed', {
+        instanceId: ctx.instanceId,
+        teamId,
+        userId: callerId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return respondControlError(c, 502, err instanceof Error ? err.message : 'DEFAULT_AGENT_CREATE_FAILED');
+    }
+  });
 
   api.post('/agent/delete-cascade', mw, async (c) => {
     const ctx = buildCtx(c);

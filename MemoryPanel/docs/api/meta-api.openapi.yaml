@@ -73,7 +73,7 @@ paths:
       tags: ["Meta · User"]
       operationId: meta_user_create
       summary: user/create
-      description: "透明代理；须 Header `X-Tdai-User-Key` 为唯一 bootstrap system_admin。账号类型固定创建为 normal，明文 default_user_key 仅本次响应返回。"
+      description: "透明代理；须 Header `X-Tdai-User-Key` 为 system_admin。非 admin → 内核 403。"
       security: []
       parameters:
         - $ref: '#/components/parameters/TdaiServiceId'
@@ -101,9 +101,9 @@ paths:
   /api/v1/meta/user/create-with-key:
     post:
       tags: ["Meta · User"]
-      operationId: meta_user_create_with_key
+      operationId: meta_user_create-with-key
       summary: user/create-with-key
-      description: "透明代理；仅唯一 bootstrap system_admin。显式指定初始 user_key，账号类型固定创建为 normal；明文 Key 仅本次响应返回。"
+      description: "透明代理至内核；字段见 08-metadata-v3-api-reference.md。须 Header 双凭证。"
       security: []
       parameters:
         - $ref: '#/components/parameters/TdaiServiceId'
@@ -114,10 +114,7 @@ paths:
           application/json:
             schema:
               type: object
-              required: [username, user_key]
-              properties:
-                username: { type: string }
-                user_key: { type: string }
+              additionalProperties: true
       responses:
         '200':
           description: 内核风格信封（业务成败优先看 body.code）
@@ -131,7 +128,6 @@ paths:
           $ref: "#/components/responses/KernelUnavailable"
         '504':
           $ref: "#/components/responses/KernelTimeout"
-
   /api/v1/meta/user/get:
     post:
       tags: ["Meta · User"]
@@ -167,7 +163,7 @@ paths:
       tags: ["Meta · User"]
       operationId: meta_user_delete
       summary: user/delete
-      description: "透明代理；仅 system_admin。请求体固定为 user_ids 数组；任一目标仍拥有 Team/Agent/Task/Asset 时返回 409 user_has_owned_resources，整批不删除。最后一个 system_admin 受保护。"
+      description: "透明代理；须 Header `X-Tdai-User-Key` 为 system_admin。非 admin → 内核 403。"
       security: []
       parameters:
         - $ref: '#/components/parameters/TdaiServiceId'
@@ -178,12 +174,37 @@ paths:
           application/json:
             schema:
               type: object
-              required: [user_ids]
-              properties:
-                user_ids:
-                  type: array
-                  minItems: 1
-                  items: { type: string }
+              additionalProperties: true
+      responses:
+        '200':
+          description: 内核风格信封（业务成败优先看 body.code）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponse'
+        '400':
+          $ref: "#/components/responses/ControlBadRequest"
+        '502':
+          $ref: "#/components/responses/KernelUnavailable"
+        '504':
+          $ref: "#/components/responses/KernelTimeout"
+  /api/v1/meta/user/dependencies:
+    post:
+      tags: ["Meta · User"]
+      operationId: meta_user_dependencies
+      summary: user/dependencies
+      description: "ownership 依赖预览。本人可查自己全部依赖；Team owner/admin 查他人时必须传当前 team_id；system_admin 可跨 Team 只读。counts 始终统计过滤范围内所有状态，items 可按 resource_type/status 分页筛选，且不返回 prompt、内容、描述、metadata 或凭证。"
+      security: []
+      parameters:
+        - $ref: '#/components/parameters/TdaiServiceId'
+        - $ref: '#/components/parameters/TdaiUserKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
       responses:
         '200':
           description: 内核风格信封（业务成败优先看 body.code）
@@ -232,7 +253,7 @@ paths:
       tags: ["Meta · User Key"]
       operationId: meta_user-key_create
       summary: user-key/create
-      description: "透明代理；普通用户只能为自己创建 Key，system_admin 可为任意账号创建 Key。明文 user_key 仅本次响应返回。"
+      description: "透明代理至内核；字段见 08-metadata-v3-api-reference.md。须 Header 双凭证。"
       security: []
       parameters:
         - $ref: '#/components/parameters/TdaiServiceId'
@@ -382,7 +403,7 @@ paths:
       tags: ["Meta · Team"]
       operationId: meta_team_create
       summary: team/create
-      description: "任意已认证用户可创建自己拥有的 Team；owner_user_id 必须等于 caller，创建后自动成为 owner/admin。"
+      description: "透明代理至内核；字段见 08-metadata-v3-api-reference.md。须 Header 双凭证。"
       security: []
       parameters:
         - $ref: '#/components/parameters/TdaiServiceId'
@@ -412,7 +433,7 @@ paths:
       tags: ["Meta · Team"]
       operationId: meta_team_get
       summary: team/get
-      description: "按 team_id 读取；caller 必须是该 Team 的 active member，system_admin 无全局业务读取例外。"
+      description: "透明代理至内核；字段见 08-metadata-v3-api-reference.md。须 Header 双凭证。"
       security: []
       parameters:
         - $ref: '#/components/parameters/TdaiServiceId'
@@ -502,7 +523,7 @@ paths:
       tags: ["Meta · Team"]
       operationId: meta_team_list
       summary: team/list
-      description: "按 user_id/user_key 列出所属 Team。普通账号只能查 caller 自己；system_admin 可跨用户只读查询人员-Team关系。"
+      description: "分页 list；body 可选 limit（默认 20，最大 100）、offset（默认 0）。默认 created_at DESC（v3.1.2+；team-member 为 joined_at DESC）。须 Header 双凭证。"
       security: []
       parameters:
         - $ref: '#/components/parameters/TdaiServiceId'
@@ -532,7 +553,7 @@ paths:
       tags: ["Meta · Team Member"]
       operationId: meta_team-member_add
       summary: team-member/add
-      description: "透明代理；仅真实 Team owner/admin。按 user_id 添加已有账号或更新其 admin/member/reviewer 角色；禁改自己、禁 demote owner。"
+      description: "透明代理；团队 admin。禁对自己 add、禁 demote owner。响应 TeamMemberEntity **不含** username（v3.2.2+）；添加后请 team-member/list 获取展示名。v3.2.3+：active 同 role 重复 add → 409 member_already_exists。"
       security: []
       parameters:
         - $ref: '#/components/parameters/TdaiServiceId'
@@ -562,7 +583,7 @@ paths:
       tags: ["Meta · Team Member"]
       operationId: meta_team-member_remove
       summary: team-member/remove
-      description: "透明代理；仅真实 Team owner/admin。禁移除 owner 或操作者本人；物理删除成员行。"
+      description: "透明代理；团队 admin。禁移除 team owner/自己。目标仍拥有该 Team 的任意状态 Agent、Task 或 Asset 时返回结构化 409 member_has_owned_resources 且 membership 不变；否则物理删除成员行。"
       security: []
       parameters:
         - $ref: '#/components/parameters/TdaiServiceId'
@@ -592,7 +613,7 @@ paths:
       tags: ["Meta · Team Member"]
       operationId: meta_team-member_list
       summary: team-member/list
-      description: "body 须 team_id。active Team member 可读；system_admin 为展示组织关系保留跨 Team 只读例外。响应含 JOIN username。"
+      description: "分页 list；body 须 team_id。响应 items 为 TeamMemberEntity（含读时 JOIN 的 username，v3.2.2+）；仅 active 团队成员可调用。默认 joined_at DESC。须 Header 双凭证。"
       security: []
       parameters:
         - $ref: '#/components/parameters/TdaiServiceId'
@@ -622,7 +643,7 @@ paths:
       tags: ["Meta · Team Member"]
       operationId: meta_team-member_get
       summary: team-member/get
-      description: "响应含 JOIN username。active Team member 可读；system_admin 为展示组织关系保留跨 Team 只读例外。"
+      description: "透明代理；响应 TeamMemberEntity 含 username（v3.2.2+，读时 JOIN）。须为 team active 成员。须 Header 双凭证。"
       security: []
       parameters:
         - $ref: '#/components/parameters/TdaiServiceId'
@@ -682,7 +703,7 @@ paths:
       tags: ["Meta · Agent"]
       operationId: meta_agent_get
       summary: agent/get
-      description: "按 agent_id 读取；caller 必须是 Agent 所属 Team 的 active member。"
+      description: "透明代理至内核；字段见 08-metadata-v3-api-reference.md。须 Header 双凭证。"
       security: []
       parameters:
         - $ref: '#/components/parameters/TdaiServiceId'
@@ -772,7 +793,7 @@ paths:
       tags: ["Meta · Agent"]
       operationId: meta_agent_list
       summary: agent/list
-      description: "按 team_id 列表要求 active membership；仅 owner 参数分支只允许查询 caller 自己，不能跨用户枚举。"
+      description: "分页 list；body 可选 limit（默认 20，最大 100）、offset（默认 0）。默认 created_at DESC（v3.1.2+；team-member 为 joined_at DESC）。须 Header 双凭证。"
       security: []
       parameters:
         - $ref: '#/components/parameters/TdaiServiceId'
@@ -802,6 +823,66 @@ paths:
       tags: ["Meta · Agent"]
       operationId: meta_agent_archive
       summary: agent/archive
+      description: "透明代理至内核；字段见 08-metadata-v3-api-reference.md。须 Header 双凭证。"
+      security: []
+      parameters:
+        - $ref: '#/components/parameters/TdaiServiceId'
+        - $ref: '#/components/parameters/TdaiUserKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
+      responses:
+        '200':
+          description: 内核风格信封（业务成败优先看 body.code）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponse'
+        '400':
+          $ref: "#/components/responses/ControlBadRequest"
+        '502':
+          $ref: "#/components/responses/KernelUnavailable"
+        '504':
+          $ref: "#/components/responses/KernelTimeout"
+  /api/v1/meta/agent/set-default-template:
+    post:
+      tags: ["Meta · Agent"]
+      operationId: meta_agent_set-default-template
+      summary: agent/set-default-template
+      description: "透明代理至内核；字段见 08-metadata-v3-api-reference.md。须 Header 双凭证。"
+      security: []
+      parameters:
+        - $ref: '#/components/parameters/TdaiServiceId'
+        - $ref: '#/components/parameters/TdaiUserKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
+      responses:
+        '200':
+          description: 内核风格信封（业务成败优先看 body.code）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponse'
+        '400':
+          $ref: "#/components/responses/ControlBadRequest"
+        '502':
+          $ref: "#/components/responses/KernelUnavailable"
+        '504':
+          $ref: "#/components/responses/KernelTimeout"
+  /api/v1/meta/agent/get-default-template:
+    post:
+      tags: ["Meta · Agent"]
+      operationId: meta_agent_get-default-template
+      summary: agent/get-default-template
       description: "透明代理至内核；字段见 08-metadata-v3-api-reference.md。须 Header 双凭证。"
       security: []
       parameters:
@@ -862,7 +943,7 @@ paths:
       tags: ["Meta · Task"]
       operationId: meta_task_get
       summary: task/get
-      description: "按 task_id 读取；caller 必须是 Task 所属 Team 的 active member。"
+      description: "透明代理至内核；字段见 08-metadata-v3-api-reference.md。须 Header 双凭证。"
       security: []
       parameters:
         - $ref: '#/components/parameters/TdaiServiceId'
@@ -952,7 +1033,7 @@ paths:
       tags: ["Meta · Task"]
       operationId: meta_task_list
       summary: task/list
-      description: "按 team_id 列表要求 active membership；仅 creator 参数分支只允许查询 caller 自己。"
+      description: "分页 list；body 可选 limit（默认 20，最大 100）、offset（默认 0）。默认 created_at DESC（v3.1.2+；team-member 为 joined_at DESC）。须 Header 双凭证。"
       security: []
       parameters:
         - $ref: '#/components/parameters/TdaiServiceId'
@@ -1072,7 +1153,7 @@ paths:
       tags: ["Meta · Task Agent"]
       operationId: meta_task-agent_list
       summary: task-agent/list
-      description: "列出 Task-Agent 关系；caller 必须是 Task 所属 Team 的 active member。"
+      description: "分页 list；body 可选 limit（默认 20，最大 100）、offset（默认 0）。默认 created_at DESC（v3.1.2+；team-member 为 joined_at DESC）。须 Header 双凭证。"
       security: []
       parameters:
         - $ref: '#/components/parameters/TdaiServiceId'
@@ -1192,7 +1273,7 @@ paths:
       tags: ["Meta · Asset"]
       operationId: meta_asset_get
       summary: asset/get
-      description: "按 asset_id 读取；caller 必须是 Asset 所属 Team 的 active member。"
+      description: "透明代理至内核；字段见 08-metadata-v3-api-reference.md。须 Header 双凭证。"
       security: []
       parameters:
         - $ref: '#/components/parameters/TdaiServiceId'
@@ -1282,7 +1363,7 @@ paths:
       tags: ["Meta · Asset"]
       operationId: meta_asset_list
       summary: asset/list
-      description: "按 team_id 列表；caller 必须是该 Team 的 active member。"
+      description: "分页 list；body 可选 limit（默认 20，最大 100）、offset（默认 0）。默认 created_at DESC（v3.1.2+；team-member 为 joined_at DESC）。须 Header 双凭证。"
       security: []
       parameters:
         - $ref: '#/components/parameters/TdaiServiceId'
@@ -1312,7 +1393,7 @@ paths:
       tags: ["Meta · Asset"]
       operationId: meta_asset_list-accessible
       summary: asset/list-accessible
-      description: "按 visibility/ACL 列出可访问资产；body 的 user_id/user_key 必须解析为 caller，显式 team_id 时还要求 active membership。"
+      description: "分页 list；body 可选 limit（默认 20，最大 100）、offset（默认 0）。默认 created_at DESC（v3.1.2+；team-member 为 joined_at DESC）。须 Header 双凭证。"
       security: []
       parameters:
         - $ref: '#/components/parameters/TdaiServiceId'
@@ -1590,7 +1671,7 @@ paths:
       tags: ["Meta · ACL"]
       operationId: meta_acl_check
       summary: acl/check
-      description: "被检查的 user_id/user_key 必须解析为 caller，且 caller 必须是 Asset 所属 Team 的 active member。"
+      description: "透明代理至内核；字段见 08-metadata-v3-api-reference.md。须 Header 双凭证。"
       security: []
       parameters:
         - $ref: '#/components/parameters/TdaiServiceId'
@@ -1767,7 +1848,7 @@ components:
             request_id: req-example
             data: null
     NotInScope:
-      description: 新面板禁用的 action 域（agent-fixed-asset/*）
+      description: 新面板一期禁用的 action 域（asset / agent-fixed-asset）
       content:
         application/json:
           schema:

@@ -34,6 +34,9 @@ function createApp(role: 'admin' | 'member' | 'reviewer' | null) {
         data: { team_id: 'team-1', user_id: 'caller', role, status: 'active' },
       };
     }
+    if (action === 'team-member/add') {
+      return { code: 0, message: 'ok', request_id: 'r', data: { ok: true } };
+    }
     throw new Error(`unexpected meta action: ${action}`);
   });
   const deps = {
@@ -61,6 +64,18 @@ function call(app: Hono, action: string, body: Record<string, unknown>) {
 }
 
 describe('default Agent template Team-role authorization', () => {
+  it('adding a member only forwards membership and creates no Agent or Skill', async () => {
+    const { app, invoke } = createApp('admin');
+    const response = await call(app, 'team-member/add', {
+      team_id: 'team-1',
+      user_id: 'new-member',
+      role: 'member',
+    });
+
+    expect(response.status).toBe(200);
+    expect(invoke.mock.calls.map(([action]) => action)).toEqual(['team-member/add']);
+  });
+
   it('does not let a system_admin Team member write the template', async () => {
     const { app } = createApp('member');
     const response = await call(app, 'agent/set-default-template', {

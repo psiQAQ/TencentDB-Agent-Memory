@@ -1,8 +1,9 @@
 /**
  * api/users.ts — User + UserKey + UserConfig（meta/user/* + meta/user-key/* + meta/config/user/*）。
  */
-import { metaPost, metaListAll, getCurrentUser, dedupeInFlight } from './base';
-import type { PublicUser } from './types';
+import { getPanelSession } from '../panelSession';
+import { ApiError, metaPost, metaListAll, getCurrentUser, dedupeInFlight, request } from './base';
+import type { MetaEnvelope, PublicUser } from './types';
 
 /** 内核 user/create 响应（CreateUserResult） — 不含 username，含一次性密钥 */
 export interface CreateUserResult {
@@ -13,12 +14,100 @@ export interface CreateUserResult {
   default_user_key: string;
 }
 
+export type OwnedResourceType = 'team' | 'agent' | 'task' | 'asset';
+
+export interface OwnedResourceDependency {
+  resource_type: OwnedResourceType;
+  resource_id: string;
+  team_id: string;
+  team_name: string;
+  name: string;
+  status: string;
+  asset_type?: 'skill' | 'llm_wiki' | 'code_graph' | 'chat_memory' | null;
+  created_at: string;
+  membership_role?: 'admin' | 'member' | 'reviewer' | null;
+  membership_status: 'active' | 'removed' | 'absent';
+}
+
+export interface UserDependencies {
+  items: OwnedResourceDependency[];
+  total: number;
+  limit: number;
+  offset: number;
+  counts: { teams: number; agents: number; tasks: number; assets: number; total: number };
+}
+
+export interface OwnedResourceRef {
+  resource_type: 'agent' | 'task' | 'asset';
+  resource_id: string;
+}
+
+export interface OwnedResourcePurgeResult {
+  deleted: Array<OwnedResourceRef & { deleted_children?: string[] }>;
+  failed: Array<OwnedResourceRef & { reason: string }>;
+  remaining: UserDependencies['counts'] | null;
+}
+
+export const ownedResourcesApi = {
+  purge: async (teamId: string, resources: OwnedResourceRef[]) => {
+    const session = getPanelSession();
+    if (!session) throw new ApiError(401, 'Unauthorized', 'no active panel session');
+    const envelope = await request<MetaEnvelope<OwnedResourcePurgeResult>>(
+      'POST',
+      '/api/v1/account/owned-resources/purge',
+      { team_id: teamId, resources, confirmation: 'PERMANENT_DELETE' },
+      {
+        'X-Tdai-Service-Id': session.instanceId,
+        'X-Tdai-User-Key': session.userKey,
+      },
+    );
+    if (envelope.code !== 0 || !envelope.data) {
+      throw new ApiError(envelope.code, envelope.message, '', {
+        code: envelope.code,
+        requestId: envelope.request_id,
+        rawMessage: envelope.message,
+        data: envelope.data,
+      });
+    }
+    return envelope.data;
+  },
+};
+
 export const usersApi = {
   /** 分页列出用户；可传入 { username } 精确匹配或 { user_ids } 过滤 */
   list: (params?: { username?: string; user_ids?: string[] }) => metaListAll<PublicUser>('user/list', { ...params }),
 
   /** 用户详情 */
   get: (userId: string) => metaPost<PublicUser>('user/get', { user_id: userId }),
+
+  dependencies: (
+    userId: string,
+    params: { team_id?: string; resource_type?: OwnedResourceType; status?: string; limit?: number; offset?: number } = {},
+  ) => metaPost<UserDependencies>('user/dependencies', { user_id: userId, limit: 100, offset: 0, ...params }),
+
+  dependenciesAll: async (
+    userId: string,
+    params: { team_id?: string; resource_type?: OwnedResourceType; status?: string } = {},
+  ): Promise<UserDependencies> => {
+    const items: OwnedResourceDependency[] = [];
+    let offset = 0;
+    let latest: UserDependencies | null = null;
+    for (;;) {
+      const page = await metaPost<UserDependencies>('user/dependencies', {
+        user_id: userId,
+        ...params,
+        limit: 100,
+        offset,
+      });
+      latest = page;
+      items.push(...page.items);
+      if (items.length >= page.total || page.items.length === 0) break;
+      offset += 100;
+    }
+    return latest
+      ? { ...latest, items, total: items.length, limit: items.length, offset: 0 }
+      : { items: [], total: 0, limit: 0, offset: 0, counts: { teams: 0, agents: 0, tasks: 0, assets: 0, total: 0 } };
+  },
 
   /**
    * 新建用户（透明代理至后端 user/create）。

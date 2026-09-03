@@ -44,6 +44,33 @@ export interface UserPublic {
   created_at: string;
 }
 
+export type UserOwnedResourceType = "team" | "agent" | "task" | "asset";
+
+export interface UserOwnedResourceCounts {
+  teams: number;
+  agents: number;
+  tasks: number;
+  assets: number;
+  total: number;
+}
+
+export interface UserOwnedResourceDependency {
+  resource_type: UserOwnedResourceType;
+  resource_id: string;
+  team_id: string;
+  team_name: string;
+  name: string;
+  status: string;
+  asset_type?: AssetType | null;
+  created_at: string;
+  membership_role?: TeamRole | null;
+  membership_status: MemberStatus | "absent";
+}
+
+export interface UserDependenciesResult extends PaginatedResult<UserOwnedResourceDependency> {
+  counts: UserOwnedResourceCounts;
+}
+
 /** user/create 响应：不含 username。 */
 export interface CreateUserResult {
   user_id: string;
@@ -305,6 +332,12 @@ export interface ListUsersRequest extends PaginationInput {
   user_ids?: string[];
   /** 精确匹配 username（大小写敏感；用于查重等）。 */
   username?: string;
+}
+export interface ListUserDependenciesRequest extends PaginationInput {
+  user_id: string;
+  team_id?: string;
+  resource_type?: UserOwnedResourceType;
+  status?: string;
 }
 export interface CreateTeamRequest {
   name: string;

@@ -514,6 +514,38 @@ export interface UserOwnedResourceCounts {
   assets: number;
 }
 
+export type UserOwnedResourceType = "team" | "agent" | "task" | "asset";
+export type UserDependencyMembershipStatus = MemberStatus | "absent";
+
+/**
+ * 账号删除/成员离组前使用的最小资源依赖视图。
+ *
+ * 只暴露定位治理责任所需的名称和状态，不返回 prompt、description、content_ref
+ * 或 metadata_json 等业务内容。
+ */
+export interface UserOwnedResourceDependency {
+  resource_type: UserOwnedResourceType;
+  resource_id: string;
+  team_id: string;
+  team_name: string;
+  name: string;
+  status: string;
+  asset_type?: AssetType | null;
+  created_at: string;
+  membership_role?: TeamRole | null;
+  membership_status: UserDependencyMembershipStatus;
+}
+
+export interface UserOwnedResourceFilter {
+  team_id?: string;
+  resource_type?: UserOwnedResourceType;
+  status?: string;
+}
+
+export interface UserDependenciesResult extends PaginatedResult<UserOwnedResourceDependency> {
+  counts: UserOwnedResourceCounts & { total: number };
+}
+
 // ============================
 // ConfigParam 类型
 // ============================

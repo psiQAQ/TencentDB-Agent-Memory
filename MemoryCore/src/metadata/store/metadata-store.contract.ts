@@ -95,6 +95,53 @@ export function runMetadataStoreContract(
         expect(await store.getUserById(u.user_id)).toBeNull();
       });
 
+      it("listUserOwnedResources 返回跨状态依赖和 membership 状态", async () => {
+        const owner = await store.createUser(uniqueUserInput({ username: "dependency-owner" }));
+        const team = await store.createTeam(teamInput(owner.user_id, { name: "Dependency Team" }));
+        const agent = await store.createAgent({
+          team_id: team.team_id,
+          owner_user_id: owner.user_id,
+          name: "Inactive Agent",
+          status: "inactive",
+        });
+        const task = await store.createTask({
+          team_id: team.team_id,
+          creator_user_id: owner.user_id,
+          title: "Completed Task",
+          status: "completed",
+        });
+        const asset = await store.createAsset({
+          asset_id: newAssetId("skill"),
+          team_id: team.team_id,
+          asset_type: "skill",
+          name: "Archived Skill",
+          owner_user_id: owner.user_id,
+          source_type: "manual",
+          status: "archived",
+        });
+
+        expect(await store.getUserOwnedResourceCounts(owner.user_id, team.team_id)).toEqual({
+          teams: 1,
+          agents: 1,
+          tasks: 1,
+          assets: 1,
+        });
+        const page = await store.listUserOwnedResources(owner.user_id, P, { team_id: team.team_id });
+        expect(page.total).toBe(4);
+        expect(page.items).toEqual(expect.arrayContaining([
+          expect.objectContaining({ resource_id: team.team_id, team_name: "Dependency Team", membership_status: "active" }),
+          expect.objectContaining({ resource_id: agent.agent_id, status: "inactive" }),
+          expect.objectContaining({ resource_id: task.task_id, status: "completed" }),
+          expect.objectContaining({ resource_id: asset.asset_id, asset_type: "skill", status: "archived" }),
+        ]));
+
+        await store.removeTeamMember(team.team_id, owner.user_id);
+        const orphaned = await store.listUserOwnedResources(owner.user_id, P, { resource_type: "agent" });
+        expect(orphaned.items).toEqual([
+          expect.objectContaining({ resource_id: agent.agent_id, membership_status: "absent" }),
+        ]);
+      });
+
       it("createUser 指定 default_key_value：以该值写库并可按 key 反查", async () => {
         const key = `sk-mem-explicit-${Math.random().toString(36).slice(2)}`;
         const u = await store.createUser(uniqueUserInput({ default_key_value: key }));

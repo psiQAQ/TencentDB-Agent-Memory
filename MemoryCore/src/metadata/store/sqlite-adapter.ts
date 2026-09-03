@@ -49,6 +49,8 @@ import type {
   AssetFilter,
   BatchDeleteResult,
   UserOwnedResourceCounts,
+  UserOwnedResourceDependency,
+  UserOwnedResourceFilter,
   ListPage,
   PaginationParams,
   InstanceUserListFilter,
@@ -637,14 +639,89 @@ export class SqliteMetadataStore implements IMetadataStore {
     return row?.c ?? 0;
   }
 
-  getUserOwnedResourceCounts(userId: string): UserOwnedResourceCounts {
-    const count = (sql: string): number => this.get<{ c: number }>(sql, userId)?.c ?? 0;
-    return {
-      teams: count("SELECT COUNT(*) AS c FROM meta_teams WHERE owner_user_id = ?"),
-      agents: count("SELECT COUNT(*) AS c FROM meta_agents WHERE owner_user_id = ?"),
-      tasks: count("SELECT COUNT(*) AS c FROM meta_tasks WHERE creator_user_id = ?"),
-      assets: count("SELECT COUNT(*) AS c FROM meta_assets WHERE owner_user_id = ?"),
+  getUserOwnedResourceCounts(userId: string, teamId?: string): UserOwnedResourceCounts {
+    const count = (table: string, ownerColumn: string): number => {
+      const teamFilter = teamId ? " AND team_id = ?" : "";
+      const params: SQLInputValue[] = teamId ? [userId, teamId] : [userId];
+      return this.get<{ c: number }>(
+        `SELECT COUNT(*) AS c FROM ${table} WHERE ${ownerColumn} = ?${teamFilter}`,
+        ...params,
+      )?.c ?? 0;
     };
+    return {
+      teams: count("meta_teams", "owner_user_id"),
+      agents: count("meta_agents", "owner_user_id"),
+      tasks: count("meta_tasks", "creator_user_id"),
+      assets: count("meta_assets", "owner_user_id"),
+    };
+  }
+
+  listUserOwnedResources(
+    userId: string,
+    pagination?: PaginationParams | null,
+    filter?: UserOwnedResourceFilter,
+  ): ListPage<UserOwnedResourceDependency> {
+    const cte = `WITH deps AS (
+      SELECT 'team' AS resource_type, team_id AS resource_id, team_id, name, status,
+             NULL AS asset_type, created_at
+        FROM meta_teams WHERE owner_user_id = ?
+      UNION ALL
+      SELECT 'agent', agent_id, team_id, name, status, NULL, created_at
+        FROM meta_agents WHERE owner_user_id = ?
+      UNION ALL
+      SELECT 'task', task_id, team_id, title, status, NULL, created_at
+        FROM meta_tasks WHERE creator_user_id = ?
+      UNION ALL
+      SELECT 'asset', asset_id, team_id, name, status, asset_type, created_at
+        FROM meta_assets WHERE owner_user_id = ?
+    )`;
+    let where = "WHERE 1=1";
+    const filterParams: SQLInputValue[] = [];
+    if (filter?.team_id) {
+      where += " AND d.team_id = ?";
+      filterParams.push(filter.team_id);
+    }
+    if (filter?.resource_type) {
+      where += " AND d.resource_type = ?";
+      filterParams.push(filter.resource_type);
+    }
+    if (filter?.status) {
+      where += " AND d.status = ?";
+      filterParams.push(filter.status);
+    }
+    const baseParams: SQLInputValue[] = [userId, userId, userId, userId, userId];
+    const params = [...baseParams, ...filterParams];
+    const from = `FROM deps d
+      JOIN meta_teams t ON t.team_id = d.team_id
+      LEFT JOIN meta_team_members m ON m.team_id = d.team_id AND m.user_id = ?
+      ${where}`;
+    return this.selectList(
+      `${cte} SELECT COUNT(*) AS c ${from}`,
+      params,
+      `${cte}
+       SELECT d.resource_type, d.resource_id, d.team_id, t.name AS team_name,
+              d.name, d.status, d.asset_type, d.created_at,
+              m.role AS membership_role,
+              COALESCE(m.status, 'absent') AS membership_status
+         ${from}
+        ORDER BY d.created_at DESC, d.resource_type ASC, d.resource_id ASC`,
+      params,
+      pagination,
+      (r) => ({
+        resource_type: String(r.resource_type) as UserOwnedResourceDependency["resource_type"],
+        resource_id: String(r.resource_id),
+        team_id: String(r.team_id),
+        team_name: String(r.team_name),
+        name: String(r.name),
+        status: String(r.status),
+        asset_type: r.asset_type == null ? null : String(r.asset_type) as AssetType,
+        created_at: String(r.created_at),
+        membership_role: r.membership_role == null
+          ? null
+          : String(r.membership_role) as UserOwnedResourceDependency["membership_role"],
+        membership_status: String(r.membership_status) as UserOwnedResourceDependency["membership_status"],
+      }),
+    );
   }
 
   // ============================================================

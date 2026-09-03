@@ -25,6 +25,7 @@ export type PageId =
   | 'chat_memory'
   | 'team_members'
   | 'team_agents'
+  | 'owned_resources'
   | 'user_management'
   | 'api_keys';
 
@@ -59,8 +60,9 @@ export function usePageMeta(): Record<PageId, PageMeta> {
     chat_memory:     { id: 'chat_memory',     label: t('menu.chat_memory'), desc: t('menu.desc.chat_memory'), group: t('menu.group.assets'), order: 5 },
     team_members:    { id: 'team_members',    label: t('menu.team_members'), desc: t('menu.desc.team_members'), group: t('menu.group.organization'), order: 0 },
     team_agents:     { id: 'team_agents',     label: t('menu.team_agents'), desc: t('menu.desc.team_agents'), group: t('menu.group.organization'), order: 1 },
-    user_management: { id: 'user_management', label: t('menu.user_management'), desc: t('menu.desc.user_management'), group: t('menu.group.organization'), order: 2 },
-    api_keys:        { id: 'api_keys',        label: t('menu.api_keys'), desc: t('menu.desc.api_keys'), group: t('menu.group.organization'), order: 3 },
+    owned_resources: { id: 'owned_resources', label: t('menu.owned_resources'), desc: t('menu.desc.owned_resources'), group: t('menu.group.organization'), order: 2 },
+    user_management: { id: 'user_management', label: t('menu.user_management'), desc: t('menu.desc.user_management'), group: t('menu.group.organization'), order: 3 },
+    api_keys:        { id: 'api_keys',        label: t('menu.api_keys'), desc: t('menu.desc.api_keys'), group: t('menu.group.organization'), order: 4 },
   };
 }
 
@@ -92,6 +94,7 @@ export const ITEM_ICON: Record<PageId, JSX.Element> = {
   ),
   team_members: <UserIcon size={16} />,
   team_agents: <UsergroupIcon size={16} />,
+  owned_resources: <ToolsIcon size={16} />,
   user_management: <UserIcon size={16} />,
   api_keys: <LockOnIcon size={16} />,
   wiki: <BooksIcon size={16} />,

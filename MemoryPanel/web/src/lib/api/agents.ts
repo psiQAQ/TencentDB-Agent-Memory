@@ -34,6 +34,32 @@ export interface AgentTemplateConfig {
 }
 
 export const agentsApi = {
+  /** 当前登录用户显式确认后，为自己创建 Team 默认 Agent。 */
+  createDefault: async (teamId: string) => {
+    const session = getPanelSession();
+    if (!session) throw new ApiError(401, 'Unauthorized', 'no active panel session');
+    const envelope = await request<MetaEnvelope<{
+      agent_id: string;
+      agent_name: string;
+      agent_created: boolean;
+      failed_assets: string[];
+    }>>('POST', '/api/v1/agent/create-default', {
+      team_id: teamId,
+    }, {
+      'X-Tdai-Service-Id': session.instanceId,
+      'X-Tdai-User-Key': session.userKey,
+    });
+    const result = envelope.data;
+    if (envelope.code !== 0 || !result) {
+      throw new ApiError(envelope.code, envelope.message, '', {
+        code: envelope.code,
+        requestId: envelope.request_id,
+        rawMessage: envelope.message,
+      });
+    }
+    return result;
+  },
+
   /**
    * 列出 team 下的 agents。
    *

@@ -42,6 +42,8 @@ import type {
   AssetFilter,
   BatchDeleteResult,
   UserOwnedResourceCounts,
+  UserOwnedResourceDependency,
+  UserOwnedResourceFilter,
   ListPage,
   PaginationParams,
   InstanceUserListFilter,
@@ -92,7 +94,12 @@ export interface IMetadataStore {
   countUsers(): MaybePromise<number>;
   countSystemAdmins(): MaybePromise<number>;
   countTeams(): MaybePromise<number>;
-  getUserOwnedResourceCounts(userId: string): MaybePromise<UserOwnedResourceCounts>;
+  getUserOwnedResourceCounts(userId: string, teamId?: string): MaybePromise<UserOwnedResourceCounts>;
+  listUserOwnedResources(
+    userId: string,
+    pagination?: PaginationParams | null,
+    filter?: UserOwnedResourceFilter,
+  ): MaybePromise<ListPage<UserOwnedResourceDependency>>;
 
   // ── UserKey（多 API 密钥）──
   createUserKey(input: CreateUserKeyInput): MaybePromise<UserKeyEntity>;

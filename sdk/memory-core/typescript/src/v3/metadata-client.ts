@@ -10,6 +10,8 @@ import { V3HttpTransport } from "./http.js";
 import type { Transport } from "../client.js";
 import type {
   UserPublic,
+  UserDependenciesResult,
+  ListUserDependenciesRequest,
   CreateUserResult,
   UserKeyPublic,
   UserKeyCreated,
@@ -139,6 +141,9 @@ export class MetadataClient {
     return this.http.post(`${V3}/user/get`, body(payload));
   }
   deleteUsers(userIds: string[]): Promise<BatchDeleteResult> { return this.http.post(`${V3}/user/delete`, { user_ids: userIds }); }
+  listUserDependencies(p: ListUserDependenciesRequest): Promise<UserDependenciesResult> {
+    return this.http.post(`${V3}/user/dependencies`, body(p));
+  }
   listUsers(teamId: string, pagination?: PaginationInput): Promise<PaginatedResult<UserPublic>>;
   listUsers(request: ListUsersRequest): Promise<PaginatedResult<UserPublic>>;
   listUsers(

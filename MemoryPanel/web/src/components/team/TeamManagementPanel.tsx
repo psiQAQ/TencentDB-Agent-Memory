@@ -190,6 +190,45 @@ export default function TeamManagementPanel({
     }
   }
 
+  async function handleCreateDefaultAgent() {
+    if (!activeTeamId) return;
+    let description = t('agentGrid.defaultCreate.descFallback');
+    try {
+      const template = await agentsApi.getDefaultTemplate(activeTeamId);
+      if (template?.name) {
+        description = t('agentGrid.defaultCreate.descTemplate', {
+          name: template.name,
+          skills: template.asset_ids?.skills?.length ?? 0,
+          codeGraphs: template.asset_ids?.code_graphs?.length ?? 0,
+          wikis: template.asset_ids?.wikis?.length ?? 0,
+        });
+      }
+    } catch (err) {
+      tea.notify.error(errMsg(err));
+      return;
+    }
+    const ok = await tea.confirm({
+      message: t('agentGrid.defaultCreate.confirm'),
+      description,
+      okText: t('agentGrid.defaultCreate.action'),
+    });
+    if (!ok) return;
+    setBusy(true);
+    try {
+      const result = await agentsApi.createDefault(activeTeamId);
+      invalidateBackendCache();
+      if (result.failed_assets.length > 0) {
+        tea.notify.warning(t('agentGrid.defaultCreate.partial', { count: result.failed_assets.length }));
+      } else {
+        tea.notify.success(t('agentGrid.defaultCreate.success', { name: result.agent_name }));
+      }
+    } catch (err) {
+      tea.notify.error(errMsg(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function handleCreateTeam(input: { name: string; description: string }) {
     setBusy(true);
     try {
@@ -295,6 +334,11 @@ export default function TeamManagementPanel({
               currentUser={currentUser}
               canSeeAllAgents={canSeeAllAgents}
               onCreateAgent={() => setShowCreateAgent(true)}
+              onCreateDefaultAgent={
+                !allAgents.some((agent) => agent.owner_user_id === currentUser)
+                  ? handleCreateDefaultAgent
+                  : undefined
+              }
               onEditAgent={setEditingAgent}
               onDeleteAgent={handleDeleteAgent}
             />

@@ -5,7 +5,7 @@
 
 import { useCallback, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Button, Justify, SearchBox, Segment, Select, Table } from 'tea-component';
+import { Alert, Button, Justify, SearchBox, Segment, Select, Table } from 'tea-component';
 import {
   AddIcon,
   ChevronRightIcon,
@@ -52,6 +52,7 @@ export default function AgentGrid({
   currentUser,
   canSeeAllAgents,
   onCreateAgent,
+  onCreateDefaultAgent,
   onEditAgent,
   onDeleteAgent,
 }: {
@@ -65,6 +66,7 @@ export default function AgentGrid({
   /** 是否有权限看到 team 内全部 agent（Team owner/admin）。普通成员只看到自己的。 */
   canSeeAllAgents: boolean;
   onCreateAgent: () => void;
+  onCreateDefaultAgent?: () => void;
   onEditAgent: (agent: StoreAgent) => void;
   onDeleteAgent: (agent: StoreAgent) => void;
 }) {
@@ -209,6 +211,15 @@ export default function AgentGrid({
           }
         />
       </Table.ActionPanel>
+
+      {onCreateDefaultAgent && !agentsLoading && (
+        <Alert type="info">
+          <Justify
+            left={t('agentGrid.defaultCreate.hint')}
+            right={<Button onClick={onCreateDefaultAgent}>{t('agentGrid.defaultCreate.action')}</Button>}
+          />
+        </Alert>
+      )}
 
       {/* 加载编排两段式：
           1) 首屏 agents 还没回来 → 4 个骨架卡占位（不知道实际数量，按视觉预设 4 张）
