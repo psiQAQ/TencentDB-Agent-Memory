@@ -178,7 +178,11 @@ export function registerAdminOrphanRoutes(api: Hono, deps: PanelDeps): void {
       }
     }
     if (coreItems.length) {
-      const coreEnv = await deps.metaKernel.invoke('integrity/purge', { findings: coreItems }, ctx);
+      const coreEnv = await deps.metaKernel.invoke('integrity/purge', {
+        findings: coreItems,
+        reason: governanceReason,
+        confirmation: 'PURGE_ZOMBIES',
+      }, ctx);
       if (coreEnv.code !== 0) return respondEnvelope(c, coreEnv);
       const coreResult = coreEnv.data as { deleted?: string[]; failed?: Array<{ finding_id: string; reason: string }> } | null;
       deleted.push(...(coreResult?.deleted ?? []));
