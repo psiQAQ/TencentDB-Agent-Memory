@@ -108,8 +108,9 @@ Knowledge Service Swagger（可选，看接口调试用）：
 4. 创建成功后立即复制并安全保存 User_Key。**完整明文只展示这一次**。
 5. 退出登录，用新 Key 登录。顶栏应显示 `normal / 未加入 Team`。
 
-Teamless 用户也会出现在 `system_admin` 的“API Key”清单中；Team 只作为组织关系
-上下文，不决定 `system_admin` 是否能管理该用户的凭证。
+Teamless 用户也会出现在 `system_admin` 的“用户管理”清单中。该页把所属 Team 作为
+组织关系列，并可逐行展开管理该用户的 API Key；Team 不决定 `system_admin` 是否能管理
+该用户的凭证。独立“API Key”页对所有账号采用相同语义，只管理当前登录账号自己的 Key。
 
 ### 第 2 步：用 normal 用户在面板里建 Team / Agent / Task
 

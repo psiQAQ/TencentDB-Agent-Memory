@@ -165,9 +165,7 @@ export function getKeyRevokeBlockReason(
   ).length;
   const systemAdminManagingAnotherUser =
     context.callerIsSystemAdmin && context.callerUserId !== key.ownerUserId;
-  return ownerActiveKeyCount <= 1 && !systemAdminManagingAnotherUser
-    ? 'last_active_key'
-    : null;
+  return ownerActiveKeyCount <= 1 && !systemAdminManagingAnotherUser ? 'last_active_key' : null;
 }
 
 export function getPrivilegedMemberships(key: ManagedUserKey): ApiKeyTeamMembership[] {
@@ -176,15 +174,15 @@ export function getPrivilegedMemberships(key: ManagedUserKey): ApiKeyTeamMembers
   );
 }
 
-export async function loadSystemAdminApiKeyInventory(
+export async function loadSystemAdminApiKeyInventory<TUser extends ApiKeyInventoryUser>(
   currentUserId: string,
   api: {
-    listUsers: () => Promise<ApiKeyInventoryUser[]>;
+    listUsers: () => Promise<TUser[]>;
     listTeamsForUser: (userId: string) => Promise<ApiKeyInventoryTeam[]>;
     listMembersForTeam: (teamId: string) => Promise<ApiKeyInventoryMember[]>;
     listKeysForUser: (userId: string) => Promise<UserKey[]>;
   },
-): Promise<{ subjects: ApiKeySubject[]; keys: ManagedUserKey[] }> {
+): Promise<{ users: TUser[]; subjects: ApiKeySubject[]; keys: ManagedUserKey[] }> {
   const users = await api.listUsers();
   const teamEntries = await mapWithConcurrency(
     users,
@@ -213,6 +211,7 @@ export async function loadSystemAdminApiKeyInventory(
     async (subject) => [subject.userId, await api.listKeysForUser(subject.userId)] as const,
   );
   return {
+    users,
     subjects,
     keys: buildManagedUserKeys(subjects, new Map(keyEntries)),
   };

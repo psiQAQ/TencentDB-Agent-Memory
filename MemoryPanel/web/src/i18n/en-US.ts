@@ -133,11 +133,12 @@ export const enUS = {
   // ===== User Management (system_admin only) =====
   'users.title': 'User Management',
   'users.desc':
-    'Manage instance accounts. Team membership and roles remain autonomous to each Team owner/admin.',
+    'Manage instance accounts and their API Keys. Team membership and roles remain autonomous to each Team owner/admin.',
   'users.create': 'Create User',
   'users.total': '{{count}} accounts',
   'users.search': 'Search username, user_id, or account type',
   'users.column.username': 'Username',
+  'users.column.teams': 'Teams',
   'users.column.type': 'Account type',
   'users.column.createdAt': 'Created at',
   'users.column.actions': 'Actions',
@@ -165,6 +166,13 @@ export const enUS = {
   'users.dependencies.empty':
     'This user has no ownership dependencies and can proceed to account deletion.',
   'users.dependencies.orphan': 'Resource exists, but the user is no longer in the Team',
+  'users.keys.total': '{{username}} has {{count}} active Keys',
+  'users.keys.empty': 'This user has no active Key. Create one here.',
+  'users.keys.createCaption': 'Create a User_Key for {{username}}',
+  'users.keys.createdCaption': 'User_Key Created',
+  'users.keys.createdSuccess': 'Created a new User_Key for {{username}} ({{userId}}).',
+  'users.keys.missingSecret':
+    'Core did not return the one-time Key secret. Refresh and verify the Key state.',
 
   // ===== My resource dependencies =====
   'resources.title': 'My Resource Dependencies',
@@ -1289,7 +1297,7 @@ export const enUS = {
   'apiKey.desc':
     'Manage your User Keys for external client access (e.g. CodeBuddy / ClaudeCode CLI).',
   'apiKey.desc.admin':
-    'Manage User Keys for every account, including Teamless users. Existing keys expose only their masked prefixes.',
+    "Manage only the current account's User Keys. Manage other users from User Management.",
   'apiKey.create': 'New Key',
   'apiKey.fresh.desc':
     'Here is the full Key for {{keyId}} (shown only once. Please copy and save it securely immediately. You will not be able to view it again after closing):',

@@ -132,11 +132,12 @@ export const zhCN = {
 
   // ===== 用户管理（仅 system_admin）=====
   'users.title': '用户管理',
-  'users.desc': '管理实例内全局账号。Team 成员与角色仍由各 Team owner/admin 自治。',
+  'users.desc': '管理实例内全局账号及其 API Key。Team 成员与角色仍由各 Team owner/admin 自治。',
   'users.create': '新建用户',
   'users.total': '共 {{count}} 个账号',
   'users.search': '搜索用户名、user_id 或账号类型',
   'users.column.username': '用户名',
+  'users.column.teams': '所属团队',
   'users.column.type': '账号类型',
   'users.column.createdAt': '创建时间',
   'users.column.actions': '操作',
@@ -161,6 +162,12 @@ export const zhCN = {
     '该账号仍有 ownership，不能删除。处理顺序：Team admin 恢复 membership → 用户本人永久清理 → Team admin 移除 membership → system_admin 删除账号。归档不解除 ownership。',
   'users.dependencies.empty': '该用户没有 ownership 依赖，可以进入账号删除确认。',
   'users.dependencies.orphan': '资源存在，但用户已不在 Team',
+  'users.keys.total': '{{username}} 当前有 {{count}} 把有效 Key',
+  'users.keys.empty': '该用户暂无有效 Key，可在此创建。',
+  'users.keys.createCaption': '为 {{username}} 新建 User_Key',
+  'users.keys.createdCaption': 'User_Key 创建成功',
+  'users.keys.createdSuccess': '已为 {{username}}（{{userId}}）创建新的 User_Key。',
+  'users.keys.missingSecret': 'Core 未返回一次性 Key 明文，请刷新后核对 Key 状态。',
 
   // ===== 我的资源依赖 =====
   'resources.title': '我的资源依赖',
@@ -1253,8 +1260,7 @@ export const zhCN = {
   // ===== ApiKeyPanel =====
   'apiKey.title': 'User_Key 管理',
   'apiKey.desc': '管理你的 User Key，用于外部客户端接入（如 CodeBuddy / ClaudeCode CLI）。',
-  'apiKey.desc.admin':
-    '管理实例内全部用户（含未加入 Team 的用户）的 User Key；既有 Key 只显示脱敏前缀。',
+  'apiKey.desc.admin': '管理当前账号自己的 User Key。其他用户的 Key 请前往“用户管理”。',
   'apiKey.create': '新建 Key',
   'apiKey.fresh.desc':
     '以下是 {{keyId}} 的完整 Key（仅展示这一次，请立即复制并安全保存；关闭后将无法再次查看明文）：',

@@ -148,9 +148,9 @@ describe("API Key system-admin inventory", () => {
     };
     const secondKey = { ...onlyKey, key_id: "second" };
 
-    expect(getKeyRevokeBlockReason(bootstrapKey, [bootstrapKey, systemKey])).toBe(
-      "bootstrap_admin_key",
-    );
+    expect(
+      getKeyRevokeBlockReason(bootstrapKey, [bootstrapKey, systemKey]),
+    ).toBe("bootstrap_admin_key");
     expect(
       getKeyRevokeBlockReason(systemKey, [bootstrapKey, systemKey], {
         callerUserId: "admin",
@@ -196,6 +196,11 @@ describe("API Key system-admin inventory", () => {
     expect(teamCalls.sort()).toEqual(["admin", "alice", "orphan"]);
     expect(memberCalls).toEqual(["team-a"]);
     expect(keyCalls.sort()).toEqual(["admin", "alice", "orphan"]);
+    expect(inventory.users.map((user) => user.user_id)).toEqual([
+      "admin",
+      "alice",
+      "orphan",
+    ]);
     expect(inventory.keys.map((key) => key.key_id).sort()).toEqual([
       "key-admin",
       "key-alice",

@@ -48,26 +48,6 @@
   user-select: all;
 }
 
-/* system_admin 管理范围：Team 与成员信息是两个相互独立的水平筛选条件。 */
-._memory-apikey-scope-filters {
-  display: grid;
-  grid-template-columns: minmax(220px, 2fr) minmax(280px, 3fr);
-  gap: 16px;
-  align-items: end;
-}
-
-._memory-apikey-scope-field {
-  display: flex;
-  min-width: 0;
-  flex-direction: column;
-  gap: 6px;
-}
-
-._memory-apikey-scope-field > .tea-form--search,
-._memory-apikey-scope-field > .tea-search {
-  width: 100%;
-}
-
 /* 表格按内容长度分配稳定比例；容器继续变窄时转为横向滚动，避免按单字符断行。 */
 ._memory-apikey-table-scroll {
   width: 100%;
@@ -117,12 +97,6 @@
 ._memory-apikey-action {
   display: inline-block;
   white-space: nowrap;
-}
-
-@media (max-width: 720px) {
-  ._memory-apikey-scope-filters {
-    grid-template-columns: 1fr 1fr;
-  }
 }
 
 /* 完整客户端配置较长：宽屏双列，窄容器自动单列，代码区独立滚动。 */
