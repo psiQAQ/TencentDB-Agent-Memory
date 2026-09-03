@@ -219,7 +219,6 @@ export class SqliteMetadataStore implements IMetadataStore {
         metadata_json TEXT NOT NULL DEFAULT '{}'
       );
       CREATE INDEX IF NOT EXISTS idx_meta_tasks_team_status ON meta_tasks(team_id, status, created_at DESC);
-      CREATE INDEX IF NOT EXISTS idx_meta_tasks_owner_status_created ON meta_tasks(owner_user_id, status, created_at DESC);
       CREATE TABLE IF NOT EXISTS meta_task_agents (
         id TEXT PRIMARY KEY,
         task_id TEXT NOT NULL,
