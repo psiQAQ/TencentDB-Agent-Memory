@@ -175,6 +175,11 @@ export const enUS = {
     'The recipient does not confirm. An Agent keeps every fixed binding and transfers all bound Skill, Wiki, Code Graph, and Chat Memory assets owned by the old Agent owner. Shared assets owned by others remain bound. Teams require an active admin.',
   'resources.transfer.partial': '{{failed}} transfers failed. Refresh and retry failed items only.',
   'resources.transfer.success': 'Transferred {{count}} resources.',
+  'resources.transfer.targetUser': 'Recipient',
+  'resources.transfer.targetAgent': 'Recipient Agent for Skills',
+  'resources.transfer.targetAgentHint':
+    'The Skill backing owner_agent_id and fixed binding move to this Agent together.',
+  'resources.transfer.noTargetAgent': 'This user has no active Agent that can receive the Skill.',
   'resources.desc':
     'Inspect resources you own in every Team. Permanent purge is available only for your resources while membership is active.',
   'resources.membership': 'membership',
@@ -196,7 +201,10 @@ export const enUS = {
   'resources.filter.allTeams': 'All Teams',
   'resources.filter.allTypes': 'All Types',
   'resources.filter.allStatuses': 'All Statuses',
-  'resources.type.team': 'Team',
+  'resources.summary': 'Resource dependency totals',
+  'resources.borrowed': 'Shared with me',
+  'resources.owner': 'Owner: {{owner}}',
+  'resources.type.team': 'Team Owner',
   'resources.type.agent': 'Agent',
   'resources.type.task': 'Task',
   'resources.type.skill': 'Skill',
@@ -204,6 +212,7 @@ export const enUS = {
   'resources.type.code_graph': 'Code Graph',
   'resources.type.chat_memory': 'Chat Memory',
   'resources.type.other': 'Other Asset',
+  'resources.type.total': 'Total',
 
   // ===== GlobalHeader =====
   'header.guide': 'Guide',

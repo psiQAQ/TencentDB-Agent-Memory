@@ -120,4 +120,6 @@ export interface ISkillStore {
    *   - `teamId` 省略 → 跨 team 删除（供管控台 / 后台补偿任务使用，业务路径不应调用）
    */
   deleteAllVersions(skillId: string, teamId?: string): Promise<number>;
+  /** Move every version to a new owning Agent without rewriting audit user_id/created_by fields. */
+  transferOwnerAgent(skillId: string, teamId: string, fromAgentId: string, toAgentId: string): Promise<number>;
 }

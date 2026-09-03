@@ -38,17 +38,24 @@ export const agentsApi = {
   createDefault: async (teamId: string) => {
     const session = getPanelSession();
     if (!session) throw new ApiError(401, 'Unauthorized', 'no active panel session');
-    const envelope = await request<MetaEnvelope<{
-      agent_id: string;
-      agent_name: string;
-      agent_created: boolean;
-      failed_assets: string[];
-    }>>('POST', '/api/v1/agent/create-default', {
-      team_id: teamId,
-    }, {
-      'X-Tdai-Service-Id': session.instanceId,
-      'X-Tdai-User-Key': session.userKey,
-    });
+    const envelope = await request<
+      MetaEnvelope<{
+        agent_id: string;
+        agent_name: string;
+        agent_created: boolean;
+        failed_assets: string[];
+      }>
+    >(
+      'POST',
+      '/api/v1/agent/create-default',
+      {
+        team_id: teamId,
+      },
+      {
+        'X-Tdai-Service-Id': session.instanceId,
+        'X-Tdai-User-Key': session.userKey,
+      },
+    );
     const result = envelope.data;
     if (envelope.code !== 0 || !result) {
       throw new ApiError(envelope.code, envelope.message, '', {
@@ -81,7 +88,7 @@ export const agentsApi = {
   /** 创建 agent */
   create: async (
     teamId: string,
-    data: { name: string; description?: string; prompt?: string; visibility?: string }
+    data: { name: string; description?: string; prompt?: string; visibility?: string },
   ) => {
     const me = await getCurrentUser();
     return metaPost<Agent>('agent/create', {
@@ -109,7 +116,7 @@ export const agentsApi = {
       visibility?: string;
       status?: string;
       metadata_json?: string;
-    }
+    },
   ) => metaPost<Agent>('agent/update', { agent_id: agentId, ...data }),
 
   /**
@@ -125,15 +132,22 @@ export const agentsApi = {
     if (!session) {
       throw new ApiError(401, 'Unauthorized', 'no active panel session');
     }
-    const envelope = await request<MetaEnvelope<{
-      archived: boolean;
-      agent_id: string;
-      deleted_skill_count: number;
-      deleted_skill_ids: string[];
-    }>>('POST', '/api/v1/agent/delete-cascade', { agent_id: agentId }, {
-      'X-Tdai-Service-Id': session.instanceId,
-      'X-Tdai-User-Key': session.userKey,
-    });
+    const envelope = await request<
+      MetaEnvelope<{
+        archived: boolean;
+        agent_id: string;
+        deleted_skill_count: number;
+        deleted_skill_ids: string[];
+      }>
+    >(
+      'POST',
+      '/api/v1/agent/delete-cascade',
+      { agent_id: agentId },
+      {
+        'X-Tdai-Service-Id': session.instanceId,
+        'X-Tdai-User-Key': session.userKey,
+      },
+    );
     if (envelope.code !== 0) {
       throw new ApiError(200, envelope.message, '', {
         code: envelope.code,
@@ -152,6 +166,7 @@ export const agentsApi = {
   getAssets: async (agentId: string, applyVisibilityFilter = true) => {
     const items = await metaListAll<{
       asset_id: string;
+      owner_user_id: string;
       asset_type: AssetType;
       name: string;
       description?: string;
@@ -167,6 +182,7 @@ export const agentsApi = {
     });
     return items.map((item) => ({
       asset_id: item.asset_id,
+      owner_user_id: item.owner_user_id,
       asset_type: item.asset_type,
       name: item.name,
       description: item.description,

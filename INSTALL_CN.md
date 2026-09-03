@@ -152,13 +152,16 @@ ownership 不随 membership 自动转移或删除。移除成员或删除账号�
 2. 如果页面标记 `membership=absent`，由该 Team owner/admin 在“成员管理”按
    `user_id` 恢复 membership。恢复不会自动生成默认资源。
 3. 用户本人在 active membership 下逐项或批量选择处理方式：
-   - “转移 ownership”：Agent、Task、Wiki、Code Graph 可直接转给同 Team 任意 active
-     member；Team ownership 只能转给 active `admin`。接收者无需确认。
+   - “转移 ownership”：Agent、Task、Wiki、Code Graph、Chat Memory 可直接转给同 Team
+     任意 active member；Skill 单独转移时还必须选择接收用户拥有的 active Agent，并同时
+     迁移 Skill 的 backing `owner_agent_id`、Core metadata owner 和固定绑定。Team ownership
+     只能转给 active `admin`。接收者无需确认。
    - Agent 是聚合根：转移 Agent 时保留它的全部固定绑定；四类绑定资产（Skill、Wiki、
      Code Graph、Chat Memory）中，owner 与原 Agent owner 相同的资产及相应 backing
      ownership 一并转移，其他成员拥有的共享资产保留原 owner 和绑定。历史
      `user_id`/`creator_user_id` 不改写。即使同时勾选 Agent 和其子资产，Panel 也会归一化
-     为一次 Agent 聚合转移，不会把 Chat Memory/Skill 当作独立转移提交。
+     为一次 Agent 聚合转移，不会把四类子资产重复提交。未勾选 Agent 时，四类子资产仍可
+     各自转移或永久清理；借入可见但非本人 owner 的资产只展示，不能勾选。
    - “永久清理”：先清 backing data，再清 metadata 和关系。普通 Agent“归档”不等于
      解除 ownership。
 4. ownership 和活动授权归零后，成员可点击“退出当前 Team”，Team owner/admin 也可再次

@@ -291,12 +291,22 @@ function MemberCard({
           ]}
         />
         {canRemove && (
-          <Button type="link" disabled={removing} onClick={onRemove}>
+          <Button
+            className="_memory-member-offboard-action"
+            type="link"
+            disabled={removing}
+            onClick={onRemove}
+          >
             {t('member.remove.action')}
           </Button>
         )}
         {canLeave && (
-          <Button type="link" disabled={removing || isOwner} onClick={onLeave}>
+          <Button
+            className="_memory-member-offboard-action"
+            type="link"
+            disabled={removing || isOwner}
+            onClick={onLeave}
+          >
             {isOwner ? t('member.leave.transferFirst') : t('member.leave.action')}
           </Button>
         )}

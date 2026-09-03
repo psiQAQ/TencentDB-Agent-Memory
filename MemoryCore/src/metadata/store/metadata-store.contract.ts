@@ -697,6 +697,29 @@ export function runMetadataStoreContract(
         }
         expect(await store.getAssetById(shared.asset_id)).toMatchObject({ owner_user_id: sharedOwner.user_id });
       });
+
+      it("moves standalone Skill metadata and its binding to the recipient Agent atomically", async () => {
+        const owner = await store.createUser(uniqueUserInput());
+        const recipient = await store.createUser(uniqueUserInput());
+        const team = await store.createTeam(teamInput(owner.user_id));
+        await store.addTeamMember({ team_id: team.team_id, user_id: recipient.user_id, role: "member" });
+        const sourceAgent = await store.createAgent({ team_id: team.team_id, owner_user_id: owner.user_id, name: "source" });
+        const targetAgent = await store.createAgent({ team_id: team.team_id, owner_user_id: recipient.user_id, name: "target" });
+        const skill = await store.createAsset({ asset_id: newAssetId("skill"), team_id: team.team_id, asset_type: "skill", name: "S", owner_user_id: owner.user_id, source_type: "manual" });
+        await store.addAgentFixedAsset(sourceAgent.agent_id, { asset_id: skill.asset_id, asset_type: "skill", created_by: owner.user_id });
+
+        const result = await store.transferSkillOwnership({
+          team_id: team.team_id, resource_type: "asset", resource_id: skill.asset_id,
+          from_user_id: owner.user_id, to_user_id: recipient.user_id,
+          from_agent_id: sourceAgent.agent_id, to_agent_id: targetAgent.agent_id,
+          idempotency_key: `skill-transfer-${Math.random()}`,
+        });
+
+        expect(result.transferred).toBe(true);
+        expect(await store.getAssetById(skill.asset_id)).toMatchObject({ owner_user_id: recipient.user_id });
+        expect(await store.getAgentFixedAsset(sourceAgent.agent_id, skill.asset_id)).toBeNull();
+        expect(await store.getAgentFixedAsset(targetAgent.agent_id, skill.asset_id)).not.toBeNull();
+      });
     });
 
     // ── Delete Cascade (N1) ──

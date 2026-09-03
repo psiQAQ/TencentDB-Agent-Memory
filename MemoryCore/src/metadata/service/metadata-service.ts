@@ -193,6 +193,7 @@ export interface AgentBasicData {
 
 export interface AgentAssetView {
   asset_id: string;
+  owner_user_id: string;
   asset_type: AssetType;
   name: string;
   description: string | null;
@@ -1548,6 +1549,7 @@ export class MetadataService {
 
       items.push({
         asset_id: asset.asset_id,
+        owner_user_id: asset.owner_user_id,
         asset_type: asset.asset_type,
         name: asset.name,
         description: asset.description ?? null,
@@ -2188,7 +2190,7 @@ export class MetadataService {
         const asset = await this.getAssetById(transfer.resource_id);
         if (!asset || asset.team_id !== input.team_id) throw new MetadataError("asset_not_found", "asset not found");
         this.assertCallerIsResourceOwner(ctx, asset.owner_user_id);
-        if (["skill", "chat_memory", "llm_wiki", "code_graph"].includes(asset.asset_type)) {
+        if (["skill", "llm_wiki", "code_graph"].includes(asset.asset_type)) {
           throw new MetadataError(
             "managed_resource_requires_lifecycle",
             `${asset.asset_type} ownership requires the coordinated lifecycle endpoint`,
@@ -2206,6 +2208,52 @@ export class MetadataService {
           from_user_id: callerId,
           idempotency_key: input.idempotency_key,
         };
+        if (transfer.resource_type === "asset") {
+          const asset = await this.getAssetById(transfer.resource_id);
+          if (asset?.asset_type === "chat_memory") {
+            if (!this._chatMemoryOwnerTransfer) {
+              throw new MetadataError("lifecycle_coordinator_unavailable", "Chat Memory ownership transfer requires its lifecycle coordinator");
+            }
+            const teamAgentIds: string[] = [];
+            for (let offset = 0; ; offset += 100) {
+              const page = await this.store.listAgentsByTeam(input.team_id, { limit: 100, offset });
+              teamAgentIds.push(...page.items.map((item) => item.agent_id));
+              if (page.items.length === 0 || offset + page.items.length >= page.total) break;
+            }
+            const memoryAgentId = resolveChatMemoryAgentId(asset.asset_id, input.team_id, teamAgentIds);
+            if (!memoryAgentId) throw new MetadataError("chat_memory_scope_not_found", "Chat Memory Agent scope cannot be resolved");
+            const prepared = await this.store.prepareOwnershipTransfer(operationInput);
+            if (prepared.status === "succeeded") {
+              items.push(await this.store.transferOwnership(operationInput));
+              continue;
+            }
+            try {
+              await this._chatMemoryOwnerTransfer({
+                teamId: input.team_id, agentId: memoryAgentId,
+                fromOwnerUserId: callerId, toOwnerUserId: transfer.to_user_id,
+              });
+              const result = await this.store.transferOwnership(operationInput);
+              if (!result.transferred) throw new Error(result.reason ?? "metadata_transfer_failed");
+              items.push(result);
+            } catch (error) {
+              let compensationFailed = false;
+              try {
+                await this._chatMemoryOwnerTransfer({
+                  teamId: input.team_id, agentId: memoryAgentId,
+                  fromOwnerUserId: transfer.to_user_id, toOwnerUserId: callerId,
+                });
+              } catch { compensationFailed = true; }
+              await this.store.resolveOwnershipTransfer({
+                team_id: input.team_id, resource_type: "asset", resource_id: transfer.resource_id,
+                idempotency_key: input.idempotency_key,
+                status: compensationFailed ? "inconsistent_retryable" : "failed",
+                error_code: compensationFailed ? "memory_owner_compensation_failed" : "memory_owner_transfer_failed",
+              });
+              throw error;
+            }
+            continue;
+          }
+        }
         if (transfer.resource_type !== "agent") {
           items.push(await this.store.transferOwnership(operationInput));
           continue;
@@ -2564,8 +2612,8 @@ export class MetadataService {
   }): Promise<{ operation_id: string; status: string }> {
     const asset = await this.getAssetById(input.asset_id);
     if (!asset || asset.team_id !== input.team_id) throw new MetadataError("asset_not_found", "asset not found");
-    if (asset.asset_type !== "llm_wiki" && asset.asset_type !== "code_graph") {
-      throw new MetadataError("managed_resource_requires_lifecycle", "prepare is limited to knowledge assets");
+    if (!["skill", "llm_wiki", "code_graph"].includes(asset.asset_type)) {
+      throw new MetadataError("managed_resource_requires_lifecycle", "prepare is limited to coordinated assets");
     }
     if (asset.owner_user_id !== input.from_owner_user_id && asset.owner_user_id !== input.to_owner_user_id) {
       throw new MetadataError("stale_lifecycle_operation", "asset owner changed before prepare");
@@ -2650,6 +2698,40 @@ export class MetadataService {
         to_user_id: input.to_owner_user_id,
         idempotency_key: input.idempotency_key,
       });
+    } catch (err) {
+      if (err instanceof LifecycleTransactionsRequiredError) {
+        throw new MetadataError("lifecycle_transactions_required", err.message);
+      }
+      throw err;
+    }
+  }
+
+  async finalizeSkillTransferInternal(input: {
+    team_id: string;
+    asset_id: string;
+    from_owner_user_id: string;
+    to_owner_user_id: string;
+    from_agent_id: string;
+    to_agent_id: string;
+    idempotency_key: string;
+  }): Promise<OwnershipTransferResult> {
+    const asset = await this.getAssetById(input.asset_id);
+    if (!asset || asset.team_id !== input.team_id || asset.asset_type !== "skill") {
+      throw new MetadataError("asset_not_found", "Skill asset not found");
+    }
+    try {
+      const result = await this.store.transferSkillOwnership({
+        team_id: input.team_id,
+        resource_type: "asset",
+        resource_id: input.asset_id,
+        from_user_id: input.from_owner_user_id,
+        to_user_id: input.to_owner_user_id,
+        from_agent_id: input.from_agent_id,
+        to_agent_id: input.to_agent_id,
+        idempotency_key: input.idempotency_key,
+      });
+      if (!result.transferred) throw new MetadataError(result.reason ?? "skill_transfer_failed", result.reason ?? "Skill transfer failed");
+      return result;
     } catch (err) {
       if (err instanceof LifecycleTransactionsRequiredError) {
         throw new MetadataError("lifecycle_transactions_required", err.message);

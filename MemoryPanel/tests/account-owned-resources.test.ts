@@ -7,7 +7,7 @@ function buildApp(options: {
   owner?: string;
   resourceCode?: number;
   clearCode?: number;
-  assetType?: 'chat_memory' | 'llm_wiki' | 'code_graph';
+  assetType?: 'skill' | 'chat_memory' | 'llm_wiki' | 'code_graph';
   boundAssets?: Array<{ asset_id: string; asset_type: 'skill' | 'chat_memory' | 'llm_wiki' | 'code_graph'; owner_user_id?: string }>;
 } = {}) {
   const invoke = vi.fn(async (action: string, body: Record<string, unknown>) => {
@@ -30,6 +30,10 @@ function buildApp(options: {
     if (action === 'task/get') {
       if (options.resourceCode === 404) return { code: 404, message: 'not found', data: null };
       return { code: 0, message: 'ok', data: { task_id: body.task_id, team_id: 'team-1', owner_user_id: options.owner ?? 'caller', creator_user_id: 'original-creator' } };
+    }
+    if (action === 'agent/get') {
+      const target = body.agent_id === 'target-agent';
+      return { code: 0, message: 'ok', data: { agent_id: body.agent_id, team_id: 'team-1', owner_user_id: target ? 'target' : 'caller', status: 'active' } };
     }
     if (action === 'asset/get') {
       const bound = options.boundAssets?.find((item) => item.asset_id === body.asset_id);
@@ -62,6 +66,7 @@ function buildApp(options: {
   const deps = {
     instanceRegistry: { resolve: () => ({ instance_id: 'local', gateway_endpoint: 'http://core', api_key: 'gateway' }) },
     metaKernel: { invoke },
+    skillKernel: { invoke: vi.fn(async () => ({ code: 0, message: 'ok', data: { items: [{ skill_id: 'skill-1', version: 3, owner_agent_id: 'source-agent' }], total: 1 } })) },
     kernelHttp: { postEnvelope: kernelPost },
     knowledgeClientFactory: () => ({ transferOwnership }),
     config: { metadataRemoteTimeoutMs: 10_000 },
@@ -209,5 +214,26 @@ describe('ownership transfer lifecycle', () => {
       from_owner_user_id: 'caller',
       to_owner_user_id: 'target',
     }));
+  });
+
+  it('requires a recipient Agent and coordinates Skill backing before atomic metadata/binding finalize', async () => {
+    const fixture = buildApp({ assetType: 'skill' });
+    const request = (toAgentId?: string) => fixture.app.request('/account/ownership/transfer', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'X-Tdai-Service-Id': 'local', 'X-Tdai-User-Key': 'key' },
+      body: JSON.stringify({
+        team_id: 'team-1',
+        transfers: [{ resource_type: 'asset', resource_id: 'skill-1', to_user_id: 'target', ...(toAgentId ? { to_agent_id: toAgentId } : {}) }],
+        idempotency_key: toAgentId ? '66666666-6666-4666-8666-666666666666' : '55555555-5555-4555-8555-555555555555',
+        confirmation: 'TRANSFER_OWNERSHIP',
+      }),
+    });
+    expect((await request()).status).toBe(400);
+    expect((await request('target-agent')).status).toBe(200);
+    expect(fixture.kernelPost.mock.calls.map(([path]) => path)).toEqual(expect.arrayContaining([
+      '/v3/internal/meta/asset/prepare-transfer',
+      '/v3/internal/meta/skill/transfer-owner',
+      '/v3/internal/meta/skill/finalize-transfer',
+    ]));
   });
 });

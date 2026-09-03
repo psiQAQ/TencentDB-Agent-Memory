@@ -1,0 +1,57 @@
+.owned-resources-summary {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(100px, 1fr));
+  gap: 10px;
+  margin-top: 16px;
+}
+.owned-resources-summary__metric {
+  min-height: 72px;
+  padding: 12px 14px;
+  border: 1px solid var(--tea-color-border-secondary);
+  border-radius: 4px;
+  background: var(--tea-color-bg-default);
+}
+.owned-resources-summary__metric strong {
+  display: block;
+  font-size: 24px;
+  line-height: 30px;
+}
+.owned-resources-summary__metric span {
+  color: var(--tea-color-text-secondary);
+}
+.owned-resources-filters {
+  display: flex;
+  gap: 12px;
+  margin-top: 16px;
+  flex-wrap: wrap;
+}
+.owned-resources-groups {
+  display: grid;
+  gap: 16px;
+  margin-top: 16px;
+}
+.owned-resources-list {
+  margin-top: 8px;
+}
+.owned-resource-row {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  padding: 9px 0;
+  border-bottom: 1px solid var(--tea-color-border-secondary);
+}
+.owned-resource-row--child {
+  margin-left: 32px;
+  padding-left: 14px;
+  border-left: 2px solid var(--tea-color-border-secondary);
+}
+.owned-resource-row__meta {
+  margin-top: 3px;
+  color: var(--tea-color-text-secondary);
+}
+.owned-resource-row__borrowed {
+  margin-left: 8px;
+}
+.owned-resources-transfer-field {
+  margin-top: 12px;
+}

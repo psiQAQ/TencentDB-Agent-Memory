@@ -432,6 +432,16 @@ export const internalAssetFinalizeTransferSchema = z.object({
 });
 
 export const internalAssetPrepareTransferSchema = internalAssetFinalizeTransferSchema;
+export const internalSkillTransferOwnerSchema = z.object({
+  skill_id: nonEmpty,
+  team_id: nonEmpty,
+  from_agent_id: nonEmpty,
+  to_agent_id: nonEmpty,
+});
+export const internalSkillFinalizeTransferSchema = internalAssetFinalizeTransferSchema.extend({
+  from_agent_id: nonEmpty,
+  to_agent_id: nonEmpty,
+});
 export const internalAssetResolveTransferSchema = z.object({
   team_id: nonEmpty,
   asset_id: nonEmpty,

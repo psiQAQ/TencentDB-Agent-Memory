@@ -907,6 +907,10 @@ export class TdaiGateway {
           req, res, pathname, method, parseJsonBody, sendJson,
           {
             getMetadataService: (instanceId) => this.ensureMetadataService(instanceId),
+            getSkillCore: async (instanceId) => {
+              if (this.configProvider && this.storePool) return this.resolveSkillCoreForInstance(instanceId);
+              return this.core.getSkillCore();
+            },
             logger: this.logger,
           },
         );

@@ -171,6 +171,12 @@ export const zhCN = {
     '接收者无需确认。Agent 是聚合根：所有固定绑定保持附着；其中与原 Agent owner 相同 owner 的 Skill、Wiki、Code Graph、Chat Memory 会一并转移，其他 owner 的共享资产只保留绑定。Team 只能转给 active admin。',
   'resources.transfer.partial': '{{failed}} 项转移失败，请刷新后仅重试失败项。',
   'resources.transfer.success': '已转移 {{count}} 项资源。',
+  'resources.transfer.targetUser': '接收用户',
+  'resources.transfer.targetAgent': '接收 Skill 的 Agent',
+  'resources.transfer.targetAgentHint':
+    'Skill 的 backing owner_agent_id 和固定绑定会一并迁移到该 Agent。',
+  'resources.transfer.noTargetAgent':
+    '该用户没有可接收 Skill 的 active Agent，请先由其创建 Agent。',
   'resources.desc':
     '查看自己在所有 Team 中拥有的资源；永久清理仅对本人拥有且 membership=active 的资源开放。',
   'resources.membership': 'membership',
@@ -192,7 +198,10 @@ export const zhCN = {
   'resources.filter.allTeams': '全部 Team',
   'resources.filter.allTypes': '全部类型',
   'resources.filter.allStatuses': '全部状态',
-  'resources.type.team': 'Team',
+  'resources.summary': '资源依赖统计',
+  'resources.borrowed': '借入可见',
+  'resources.owner': 'Owner: {{owner}}',
+  'resources.type.team': 'Team Owner',
   'resources.type.agent': 'Agent',
   'resources.type.task': 'Task',
   'resources.type.skill': 'Skill',
@@ -200,6 +209,7 @@ export const zhCN = {
   'resources.type.code_graph': 'Code Graph',
   'resources.type.chat_memory': 'Chat Memory',
   'resources.type.other': '其他 Asset',
+  'resources.type.total': '总计',
 
   // ===== GlobalHeader =====
   'header.guide': '使用说明',

@@ -397,6 +397,34 @@ export class SkillCore {
     return { skill_id: input.skill_id, archived: deleted > 0 };
   }
 
+  /** Internal lifecycle operation: move Skill ownership between Agents in one Team. */
+  async transferOwnership(input: {
+    skill_id: string;
+    team_id: string;
+    from_agent_id: string;
+    to_agent_id: string;
+  }): Promise<{ skill_id: string; team_id: string; from_agent_id: string; to_agent_id: string; moved_versions: number }> {
+    const head = await this.store.getHeadIncludingArchived(input.skill_id, input.team_id);
+    if (!head) throw new SkillCoreError("SKILL_NOT_FOUND");
+    if (head.owner_agent_id === input.to_agent_id) {
+      return { ...input, moved_versions: 0 };
+    }
+    if (head.owner_agent_id !== input.from_agent_id) {
+      throw new SkillCoreError("SKILL_NOT_OWNER", `owner Agent is ${head.owner_agent_id}`);
+    }
+    try {
+      const movedVersions = await this.store.transferOwnerAgent(
+        input.skill_id,
+        input.team_id,
+        input.from_agent_id,
+        input.to_agent_id,
+      );
+      return { ...input, moved_versions: movedVersions };
+    } catch (error) {
+      toCoreError(error);
+    }
+  }
+
   async writeFiles(input: WriteFilesInput): Promise<Skill> {
     const head = await this.requireHead(input.skill_id, input.team_id);
     if (input.agent_id) assertOwnerWrap(head, input.agent_id, input.team_id);

@@ -139,6 +139,69 @@ async function transferKnowledgeWithJournal(
   throw new Error(coreEnv.message || 'CORE_FINALIZE_FAILED');
 }
 
+async function transferSkillWithJournal(
+  deps: PanelDeps,
+  ctx: MetaCallContext,
+  input: {
+    team_id: string;
+    asset_id: string;
+    from_owner_user_id: string;
+    to_owner_user_id: string;
+    from_agent_id: string;
+    to_agent_id: string;
+    idempotency_key: string;
+  },
+): Promise<Record<string, unknown>> {
+  const operationBody = {
+    team_id: input.team_id,
+    asset_id: input.asset_id,
+    from_owner_user_id: input.from_owner_user_id,
+    to_owner_user_id: input.to_owner_user_id,
+    idempotency_key: input.idempotency_key,
+  };
+  const prepare = await deps.kernelHttp.postEnvelope(
+    '/v3/internal/meta/asset/prepare-transfer',
+    operationBody,
+    toKernelCredentials(ctx, { timeoutMs: deps.config.metadataRemoteTimeoutMs }, { omitUserKey: true }),
+  );
+  if (prepare.code !== 0) throw new Error(prepare.message || 'CORE_PREPARE_FAILED');
+  const backingBody = {
+    skill_id: input.asset_id,
+    team_id: input.team_id,
+    from_agent_id: input.from_agent_id,
+    to_agent_id: input.to_agent_id,
+  };
+  const backing = await deps.kernelHttp.postEnvelope(
+    '/v3/internal/meta/skill/transfer-owner',
+    backingBody,
+    toKernelCredentials(ctx, { timeoutMs: deps.config.metadataRemoteTimeoutMs }, { omitUserKey: true }),
+  );
+  if (backing.code !== 0) {
+    await resolveKnowledgeTransfer(deps, ctx, operationBody, 'failed', 'SKILL_BACKING_TRANSFER_FAILED').catch(() => {});
+    throw new Error(backing.message || 'SKILL_BACKING_TRANSFER_FAILED');
+  }
+  const finalized = await deps.kernelHttp.postEnvelope<Record<string, unknown>>(
+    '/v3/internal/meta/skill/finalize-transfer',
+    { ...operationBody, from_agent_id: input.from_agent_id, to_agent_id: input.to_agent_id },
+    toKernelCredentials(ctx, { timeoutMs: deps.config.metadataRemoteTimeoutMs }, { omitUserKey: true }),
+  );
+  if (finalized.code === 0) return finalized.data ?? { resource_type: 'asset', resource_id: input.asset_id, transferred: true };
+  const compensated = await deps.kernelHttp.postEnvelope(
+    '/v3/internal/meta/skill/transfer-owner',
+    { ...backingBody, from_agent_id: input.to_agent_id, to_agent_id: input.from_agent_id },
+    toKernelCredentials(ctx, { timeoutMs: deps.config.metadataRemoteTimeoutMs }, { omitUserKey: true }),
+  );
+  await resolveKnowledgeTransfer(
+    deps,
+    ctx,
+    operationBody,
+    compensated.code === 0 ? 'failed' : 'inconsistent_retryable',
+    compensated.code === 0 ? 'CORE_FINALIZE_FAILED' : 'SKILL_COMPENSATION_FAILED',
+  ).catch(() => {});
+  if (compensated.code !== 0) throw new Error('INCONSISTENT_RETRYABLE');
+  throw new Error(finalized.message || 'CORE_FINALIZE_FAILED');
+}
+
 function assertDeletedOrAbsent(result: DeleteResult, id: string, label: string): void {
   const failure = result.failed?.find((item) => item.id === id);
   if (failure && !/not[_ -]?found/i.test(failure.reason)) {
@@ -345,7 +408,7 @@ export function registerAccountOwnedResourceRoutes(api: Hono, deps: PanelDeps): 
     }
     const callerId = await resolveCallerUserId(deps, ctx);
     if (!callerId) return respondControlError(c, 401, 'INVALID_USER_KEY');
-    type Transfer = { resource_type: 'team' | 'agent' | 'task' | 'asset'; resource_id: string; to_user_id: string };
+    type Transfer = { resource_type: 'team' | 'agent' | 'task' | 'asset'; resource_id: string; to_user_id: string; to_agent_id?: string };
     const requested: Transfer[] = [];
     const assetById = new Map<string, BoundAsset>();
 
@@ -356,10 +419,11 @@ export function registerAccountOwnedResourceRoutes(api: Hono, deps: PanelDeps): 
       const resourceType = item.resource_type;
       const resourceId = typeof item.resource_id === 'string' ? item.resource_id.trim() : '';
       const toUserId = typeof item.to_user_id === 'string' ? item.to_user_id.trim() : '';
+      const toAgentId = typeof item.to_agent_id === 'string' ? item.to_agent_id.trim() : undefined;
       if (!['team', 'agent', 'task', 'asset'].includes(String(resourceType)) || !resourceId || !toUserId) {
         return respondControlError(c, 400, 'INVALID_TRANSFERS');
       }
-      const transfer = { resource_type: resourceType, resource_id: resourceId, to_user_id: toUserId } as Transfer;
+      const transfer = { resource_type: resourceType, resource_id: resourceId, to_user_id: toUserId, to_agent_id: toAgentId } as Transfer;
       const targetEnv = await deps.metaKernel.invoke(
         'team-member/get',
         { team_id: teamId, user_id: toUserId },
@@ -375,6 +439,15 @@ export function registerAccountOwnedResourceRoutes(api: Hono, deps: PanelDeps): 
         const asset = assetEnv.data as BoundAsset | null;
         if (!asset || asset.team_id !== teamId) return respondControlError(c, 400, 'RESOURCE_TEAM_MISMATCH');
         if (asset.owner_user_id !== callerId) return respondControlError(c, 403, 'NOT_RESOURCE_OWNER');
+        if (asset.asset_type === 'skill') {
+          if (!toAgentId) return respondControlError(c, 400, 'TARGET_AGENT_REQUIRED');
+          const targetAgentEnv = await deps.metaKernel.invoke('agent/get', { agent_id: toAgentId }, ctx);
+          if (targetAgentEnv.code !== 0) return respondEnvelope(c, targetAgentEnv);
+          const targetAgent = targetAgentEnv.data as { team_id?: string; owner_user_id?: string; status?: string } | null;
+          if (!targetAgent || targetAgent.team_id !== teamId || targetAgent.owner_user_id !== toUserId || targetAgent.status !== 'active') {
+            return respondControlError(c, 409, 'TARGET_AGENT_NOT_ACTIVE');
+          }
+        }
         assetById.set(asset.asset_id, asset);
       }
       requested.push(transfer);
@@ -422,6 +495,7 @@ export function registerAccountOwnedResourceRoutes(api: Hono, deps: PanelDeps): 
 
     const regular: Transfer[] = [];
     const knowledge: Array<Transfer & { asset_type: 'llm_wiki' | 'code_graph' }> = [];
+    const skills: Array<Transfer & { from_agent_id: string; to_agent_id: string }> = [];
     for (const transfer of requested) {
       if (transfer.resource_type !== 'asset') {
         regular.push(transfer);
@@ -429,6 +503,19 @@ export function registerAccountOwnedResourceRoutes(api: Hono, deps: PanelDeps): 
       }
       if (aggregateChildren.has(transfer.resource_id)) continue;
       const asset = assetById.get(transfer.resource_id);
+      if (asset?.asset_type === 'skill') {
+        const rows = await listAgentSkills(deps, ctx, callerId, teamId);
+        const backing = rows.find((row) => row.skill_id === transfer.resource_id);
+        if (!backing?.owner_agent_id || !transfer.to_agent_id) {
+          return respondControlError(c, 409, 'SKILL_BACKING_OWNER_NOT_FOUND');
+        }
+        const sourceAgentEnv = await deps.metaKernel.invoke('agent/get', { agent_id: backing.owner_agent_id }, ctx);
+        const sourceAgent = sourceAgentEnv.data as { team_id?: string; owner_user_id?: string } | null;
+        if (sourceAgentEnv.code !== 0 || !sourceAgent || sourceAgent.team_id !== teamId || sourceAgent.owner_user_id !== callerId) {
+          return respondControlError(c, 409, 'SKILL_BACKING_OWNER_MISMATCH');
+        }
+        skills.push({ ...transfer, from_agent_id: backing.owner_agent_id, to_agent_id: transfer.to_agent_id });
+      } else
       if (asset?.asset_type === 'llm_wiki' || asset?.asset_type === 'code_graph') {
         knowledge.push({ ...transfer, asset_type: asset.asset_type });
       } else {
@@ -536,6 +623,21 @@ export function registerAccountOwnedResourceRoutes(api: Hono, deps: PanelDeps): 
           transferred: false,
           reason: err instanceof Error ? err.message : String(err),
         });
+      }
+    }
+    for (const transfer of skills) {
+      try {
+        items.push(await transferSkillWithJournal(deps, ctx, {
+          team_id: teamId,
+          asset_id: transfer.resource_id,
+          from_owner_user_id: callerId,
+          to_owner_user_id: transfer.to_user_id,
+          from_agent_id: transfer.from_agent_id,
+          to_agent_id: transfer.to_agent_id,
+          idempotency_key: idempotencyKey,
+        }));
+      } catch (err) {
+        items.push({ ...transfer, transferred: false, reason: err instanceof Error ? err.message : String(err) });
       }
     }
     return respondEnvelope(c, okEnvelope(c, { items }));

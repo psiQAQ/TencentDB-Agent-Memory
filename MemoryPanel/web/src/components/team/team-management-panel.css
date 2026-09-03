@@ -351,13 +351,14 @@
 }
 
 ._memory-member-card {
+  position: relative;
   display: flex;
   align-items: flex-start;
   gap: 8px;
   border: 1px solid var(--tea-color-border-primary-default);
   border-radius: 4px;
   background: var(--tea-color-bg-primary-default);
-  padding: 8px 12px;
+  padding: 8px 12px 36px;
   transition:
     background-color 0.15s,
     border-color 0.15s;
@@ -430,6 +431,12 @@
   display: flex;
   align-items: flex-start;
   gap: 4px;
+}
+
+._memory-member-offboard-action {
+  position: absolute;
+  right: 8px;
+  bottom: 7px;
 }
 
 ._memory-member-edit-btn,
@@ -1314,8 +1321,12 @@
 }
 
 @keyframes _memory-agents-skeleton-shimmer {
-  0%   { background-position: 200% 0; }
-  100% { background-position: -200% 0; }
+  0% {
+    background-position: 200% 0;
+  }
+  100% {
+    background-position: -200% 0;
+  }
 }
 
 /* ============================================================

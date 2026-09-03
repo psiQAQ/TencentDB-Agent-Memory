@@ -12,6 +12,7 @@ import {
 } from "../../gateway/v2-router.js";
 import { formatZodError, type ApiResponseEnvelope } from "../../gateway/v2-schemas.js";
 import type { Logger } from "../../core/types.js";
+import { SkillCoreError, type SkillCore } from "../../core/skill/skill-core.js";
 import { MetadataService, MetadataError } from "../service/metadata-service.js";
 import { extractInstanceId, normalizeInstanceIdForRoute } from "./instance.js";
 import { resolvePagination } from "./pagination.js";
@@ -21,6 +22,8 @@ import {
   internalAssetGetSchema,
   internalAssetPrepareTransferSchema,
   internalAssetResolveTransferSchema,
+  internalSkillFinalizeTransferSchema,
+  internalSkillTransferOwnerSchema,
   internalListUsersByInstanceSchema,
   initAdminSchema,
 } from "./v3-meta-schemas.js";
@@ -42,6 +45,7 @@ const TAG = "[META-V3-INTERNAL]";
 
 export interface InternalMetaRouterDeps {
   getMetadataService: (instanceId: string) => MetadataService | undefined | Promise<MetadataService | undefined>;
+  getSkillCore: (instanceId: string) => SkillCore | undefined | Promise<SkillCore | undefined>;
   logger: Logger;
 }
 
@@ -50,16 +54,17 @@ type InternalHandler = (
   svc: MetadataService,
   instanceId: string,
   requestId: string,
+  deps: InternalMetaRouterDeps,
 ) => Promise<ApiResponseEnvelope>;
 
 function bind<S extends ZodType>(
   schema: S,
-  fn: (data: S["_output"], svc: MetadataService, instanceId: string) => Promise<unknown>,
+  fn: (data: S["_output"], svc: MetadataService, instanceId: string, deps: InternalMetaRouterDeps) => Promise<unknown>,
 ): InternalHandler {
-  return async (body, svc, instanceId, requestId) => {
+  return async (body, svc, instanceId, requestId, deps) => {
     const parsed = schema.safeParse(body);
     if (!parsed.success) return errorEnvelope(400, formatZodError(parsed.error), requestId);
-    const data = await fn(parsed.data as S["_output"], svc, instanceId);
+    const data = await fn(parsed.data as S["_output"], svc, instanceId, deps);
     return successEnvelope(data, requestId);
   };
 }
@@ -96,6 +101,23 @@ const routeTable: Record<string, InternalHandler> = {
   [`${V3_INTERNAL_PREFIX}/asset/prepare-transfer`]: bind(
     internalAssetPrepareTransferSchema,
     (d, svc) => svc.prepareAssetTransferInternal(d),
+  ),
+  [`${V3_INTERNAL_PREFIX}/skill/transfer-owner`]: bind(
+    internalSkillTransferOwnerSchema,
+    async (d, _svc, instanceId, deps) => {
+      const core = await deps.getSkillCore(instanceId);
+      if (!core) throw new MetadataError("lifecycle_coordinator_unavailable", "Skill lifecycle coordinator unavailable");
+      try {
+        return await core.transferOwnership(d);
+      } catch (error) {
+        if (error instanceof SkillCoreError) throw new MetadataError(error.code.toLowerCase(), error.message);
+        throw error;
+      }
+    },
+  ),
+  [`${V3_INTERNAL_PREFIX}/skill/finalize-transfer`]: bind(
+    internalSkillFinalizeTransferSchema,
+    (d, svc) => svc.finalizeSkillTransferInternal(d),
   ),
   [`${V3_INTERNAL_PREFIX}/asset/resolve-transfer`]: bind(
     internalAssetResolveTransferSchema,
@@ -198,7 +220,7 @@ export async function handleInternalMetaRoute(
       async () => {
         logMetaApiEntry(traceCtx, body);
         deps.logger.debug?.(`${TAG} ${pathname} instance=${instanceId}`);
-        const envelope = await handler(body, svc, instanceId, requestId);
+      const envelope = await handler(body, svc, instanceId, requestId, deps);
         const httpStatus = envelope.code === 0 ? 200 : envelope.code >= 400 && envelope.code < 600 ? envelope.code : 200;
         logMetaApiResponse(traceCtx, envelope, httpStatus);
         sendJson(res, httpStatus, envelope);

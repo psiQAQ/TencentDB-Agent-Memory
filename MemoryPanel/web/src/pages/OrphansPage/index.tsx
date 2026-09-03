@@ -136,8 +136,6 @@ export function OrphansPage() {
           <H3>
             {t('orphans.pending')} ({pending.length})
           </H3>
-          {pending.map((item) => renderFinding(item, item.allowed_actions.includes('purge')))}
-          {!loading && !pending.length && <Alert type="success">{t('orphans.empty')}</Alert>}
           <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
             <Button
               disabled={!purgeableIds.length}
@@ -155,6 +153,8 @@ export function OrphansPage() {
               {t('orphans.purge.action')} ({selected.size})
             </Button>
           </div>
+          {pending.map((item) => renderFinding(item, item.allowed_actions.includes('purge')))}
+          {!loading && !pending.length && <Alert type="success">{t('orphans.empty')}</Alert>}
         </Card.Body>
       </Card>
       <Card style={{ marginTop: 16 }}>

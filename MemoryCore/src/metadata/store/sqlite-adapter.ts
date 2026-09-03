@@ -55,6 +55,7 @@ import type {
   SafeUserDeleteResult,
   TeamDeletePreview,
   OwnershipTransferInput,
+  SkillOwnershipTransferInput,
   OwnershipTransferResult,
   IntegrityFinding,
   UserOwnedResourceDependency,
@@ -1211,6 +1212,59 @@ export class SqliteMetadataStore implements IMetadataStore {
         generateRelationId(), input.idempotency_key, input.from_user_id, input.team_id,
         input.resource_type, input.resource_id, input.from_user_id, input.to_user_id,
         "succeeded", JSON.stringify(result), nowIso(), nowIso(),
+      );
+      return result;
+    });
+  }
+
+  transferSkillOwnership(input: SkillOwnershipTransferInput): OwnershipTransferResult {
+    return this.txImmediate(() => {
+      const fail = (reason: string): OwnershipTransferResult => ({
+        resource_type: "asset", resource_id: input.resource_id, transferred: false,
+        implicit_asset_ids: [], removed_binding_ids: [], reason,
+      });
+      const operation = this.get<Row>(
+        `SELECT operation_id, status, result_json FROM meta_lifecycle_operations
+          WHERE idempotency_key=? AND resource_type='asset' AND resource_id=?`,
+        input.idempotency_key, input.resource_id,
+      );
+      if (operation?.status === "succeeded" && operation.result_json) {
+        return JSON.parse(String(operation.result_json)) as OwnershipTransferResult;
+      }
+      const asset = this.get<Row>("SELECT team_id, owner_user_id, asset_type FROM meta_assets WHERE asset_id=?", input.resource_id);
+      const sourceAgent = this.get<Row>("SELECT team_id, owner_user_id FROM meta_agents WHERE agent_id=?", input.from_agent_id);
+      const targetAgent = this.get<Row>("SELECT team_id, owner_user_id, status FROM meta_agents WHERE agent_id=?", input.to_agent_id);
+      const target = this.get<Row>(
+        `SELECT m.status, u.status AS user_status FROM meta_team_members m
+          JOIN meta_users u ON u.user_id=m.user_id WHERE m.team_id=? AND m.user_id=?`,
+        input.team_id, input.to_user_id,
+      );
+      if (!target || target.status !== "active" || target.user_status !== "active") return fail("target_not_active_member");
+      if (!asset || asset.team_id !== input.team_id || asset.asset_type !== "skill") return fail("resource_not_found");
+      if (asset.owner_user_id !== input.from_user_id) return fail("not_resource_owner");
+      if (!sourceAgent || sourceAgent.team_id !== input.team_id || sourceAgent.owner_user_id !== input.from_user_id) return fail("source_agent_not_owned");
+      if (!targetAgent || targetAgent.team_id !== input.team_id || targetAgent.owner_user_id !== input.to_user_id || targetAgent.status !== "active") return fail("target_agent_not_active");
+      const binding = this.get<Row>("SELECT * FROM meta_agent_fixed_assets WHERE agent_id=? AND asset_id=?", input.from_agent_id, input.resource_id);
+      if (!binding) return fail("source_skill_binding_not_found");
+      const targetBinding = this.get<Row>("SELECT id FROM meta_agent_fixed_assets WHERE agent_id=? AND asset_id=?", input.to_agent_id, input.resource_id);
+      if (targetBinding) this.run("DELETE FROM meta_agent_fixed_assets WHERE agent_id=? AND asset_id=?", input.from_agent_id, input.resource_id);
+      else this.run("UPDATE meta_agent_fixed_assets SET agent_id=? WHERE agent_id=? AND asset_id=?", input.to_agent_id, input.from_agent_id, input.resource_id);
+      this.run("UPDATE meta_assets SET owner_user_id=?, updated_at=? WHERE asset_id=?", input.to_user_id, nowIso(), input.resource_id);
+      const result: OwnershipTransferResult = {
+        resource_type: "asset", resource_id: input.resource_id, transferred: true,
+        implicit_asset_ids: [], removed_binding_ids: [],
+      };
+      if (operation) this.run(
+        "UPDATE meta_lifecycle_operations SET status='succeeded', result_json=?, error_code=NULL, updated_at=? WHERE operation_id=?",
+        JSON.stringify(result), nowIso(), operation.operation_id,
+      );
+      else this.run(
+        `INSERT INTO meta_lifecycle_operations
+          (operation_id,idempotency_key,actor_user_id,team_id,resource_type,resource_id,
+           from_owner_user_id,to_owner_user_id,status,result_json,created_at,updated_at)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
+        generateRelationId(), input.idempotency_key, input.from_user_id, input.team_id, "asset", input.resource_id,
+        input.from_user_id, input.to_user_id, "succeeded", JSON.stringify(result), nowIso(), nowIso(),
       );
       return result;
     });

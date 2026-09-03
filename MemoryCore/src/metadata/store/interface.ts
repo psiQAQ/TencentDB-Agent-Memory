@@ -136,6 +136,8 @@ export interface IMetadataStore {
   getTeamDeletePreview(teamId: string): MaybePromise<TeamDeletePreview | null>;
   deleteEmptyTeam(teamId: string, ownerUserId: string, revision: string): MaybePromise<boolean>;
   transferOwnership(input: OwnershipTransferInput): MaybePromise<OwnershipTransferResult>;
+  /** Atomically move Skill metadata ownership and its fixed binding to the recipient Agent. */
+  transferSkillOwnership(input: import("../types.js").SkillOwnershipTransferInput): MaybePromise<OwnershipTransferResult>;
   prepareOwnershipTransfer(input: OwnershipTransferInput): MaybePromise<{
     operation_id: string;
     status: string;

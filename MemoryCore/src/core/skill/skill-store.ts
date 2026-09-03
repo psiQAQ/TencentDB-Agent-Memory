@@ -35,7 +35,8 @@ import type {
 
 export type SkillErrorCode =
   | "SKILL_NAME_DUPLICATE"
-  | "SKILL_NOT_FOUND";
+  | "SKILL_NOT_FOUND"
+  | "SKILL_NOT_OWNER";
 
 export class SkillStoreError extends Error {
   constructor(public readonly code: SkillErrorCode, message?: string) {
@@ -488,6 +489,36 @@ export class SqliteSkillStore implements ISkillStore {
       .prepare("SELECT * FROM skills WHERE skill_id=? ORDER BY version DESC LIMIT ? OFFSET ?")
       .all(skillId, limit, offset) as SkillRowRaw[];
     return rows.map(toSkill);
+  }
+
+  async transferOwnerAgent(
+    skillId: string,
+    teamId: string,
+    fromAgentId: string,
+    toAgentId: string,
+  ): Promise<number> {
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const head = this.db.prepare(
+        "SELECT owner_agent_id FROM skills WHERE skill_id=? AND team_id=? AND is_head=1 LIMIT 1",
+      ).get(skillId, teamId) as { owner_agent_id: string } | undefined;
+      if (!head) throw new SkillStoreError("SKILL_NOT_FOUND");
+      if (head.owner_agent_id === toAgentId) {
+        this.db.exec("COMMIT");
+        return 0;
+      }
+      if (head.owner_agent_id !== fromAgentId) throw new SkillStoreError("SKILL_NOT_OWNER", "owner Agent changed");
+      const result = this.db.prepare(
+        "UPDATE skills SET owner_agent_id=?, updated_at_ms=? WHERE skill_id=? AND team_id=? AND owner_agent_id=?",
+      ).run(toAgentId, this.now(), skillId, teamId, fromAgentId);
+      this.db.prepare("UPDATE skill_fts SET owner_agent_id=? WHERE skill_id=? AND team_id=?")
+        .run(toAgentId, skillId, teamId);
+      this.db.exec("COMMIT");
+      return Number(result.changes ?? 0);
+    } catch (error) {
+      try { this.db.exec("ROLLBACK"); } catch { /* ignore */ }
+      throw error;
+    }
   }
 
   /** 该 skill_id 下的版本总数（team_id 可选过滤）。 */

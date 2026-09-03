@@ -353,6 +353,13 @@ describe("MetadataService caller-scoped personnel and Team authorization", () =>
       { asset_id: selfMemoryId, asset_type: "chat_memory", created_by: owner.user_id },
       { asset_id: borrowedMemoryId, asset_type: "chat_memory", created_by: owner.user_id },
     ]);
+    const visibleBindings = await service.listAgentFixedAssetsWithDetailForCaller(
+      { agent_id: agent.agent_id, apply_visibility_filter: true },
+      ctx(owner.user_id),
+    );
+    expect(visibleBindings.items).toEqual(expect.arrayContaining([
+      expect.objectContaining({ asset_id: selfMemoryId, owner_user_id: owner.user_id }),
+    ]));
     const calls: Array<{ fromOwnerUserId: string; toOwnerUserId: string }> = [];
     service.setChatMemoryOwnerTransfer(async (input) => {
       calls.push(input);
@@ -375,6 +382,28 @@ describe("MetadataService caller-scoped personnel and Team authorization", () =>
     expect(await service.getAgentById(agent.agent_id)).toMatchObject({ owner_user_id: recipient.user_id });
     expect(await service.getAssetById(selfMemoryId)).toMatchObject({ owner_user_id: recipient.user_id });
     expect(await service.getAssetById(borrowedMemoryId)).toMatchObject({ owner_user_id: recipient.user_id });
+  });
+
+  it("allows standalone Chat Memory transfer without changing its Agent owner", async () => {
+    const owner = await user("memory-owner");
+    const recipient = await user("memory-recipient");
+    const team = await service.createTeam({ name: "memory-handoff", owner_user_id: owner.user_id });
+    await service.addTeamMember({ team_id: team.team_id, user_id: recipient.user_id, role: "member" });
+    const agent = await service.createAgent({ team_id: team.team_id, owner_user_id: owner.user_id, name: "agent" });
+    const memoryId = `chat_memory-${team.team_id}-${agent.agent_id}`;
+    const calls: Array<{ teamId: string; agentId: string; fromOwnerUserId: string; toOwnerUserId: string }> = [];
+    service.setChatMemoryOwnerTransfer(async (input) => { calls.push(input); return { l0Updated: 1, l1Updated: 0 }; });
+
+    const result = await service.transferOwnershipForCaller({
+      team_id: team.team_id,
+      transfers: [{ resource_type: "asset", resource_id: memoryId, to_user_id: recipient.user_id }],
+      idempotency_key: "77777777-7777-4777-8777-777777777777",
+    }, ctx(owner.user_id));
+
+    expect(result.items[0]).toMatchObject({ transferred: true, resource_id: memoryId });
+    expect(calls).toEqual([{ teamId: team.team_id, agentId: agent.agent_id, fromOwnerUserId: owner.user_id, toOwnerUserId: recipient.user_id }]);
+    expect(await service.getAgentById(agent.agent_id)).toMatchObject({ owner_user_id: owner.user_id });
+    expect(await service.getAssetById(memoryId)).toMatchObject({ owner_user_id: recipient.user_id });
   });
 
   it("refuses a direct Agent metadata commit while owned Knowledge backing is uncoordinated", async () => {

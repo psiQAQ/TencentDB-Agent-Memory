@@ -444,6 +444,34 @@ export class TcvdbSkillStore implements ISkillStore {
     }
   }
 
+  async transferOwnerAgent(
+    skillId: string,
+    teamId: string,
+    fromAgentId: string,
+    toAgentId: string,
+  ): Promise<number> {
+    const head = await this.getHeadIncludingArchived(skillId, teamId);
+    if (!head) throw Object.assign(new Error("SKILL_NOT_FOUND"), { code: "SKILL_NOT_FOUND" });
+    if (head.owner_agent_id === toAgentId) return 0;
+    if (head.owner_agent_id !== fromAgentId) throw Object.assign(new Error("SKILL_NOT_OWNER"), { code: "SKILL_NOT_OWNER" });
+    const total = await this.countVersions(skillId, teamId);
+    const rows = await this.listVersions(skillId, teamId, { limit: Math.max(total, 1), offset: 0 });
+    const moved: Skill[] = [];
+    try {
+      for (const row of rows) {
+        if (row.owner_agent_id !== fromAgentId) throw Object.assign(new Error("SKILL_NOT_OWNER"), { code: "SKILL_NOT_OWNER" });
+        await this._updateDocAsync(row.row_id, { owner_agent_id: toAgentId });
+        moved.push(row);
+      }
+      return moved.length;
+    } catch (error) {
+      for (const row of moved.reverse()) {
+        await this._updateDocAsync(row.row_id, { owner_agent_id: fromAgentId }).catch(() => {});
+      }
+      throw error;
+    }
+  }
+
   // ── ISkillStore: TTL Cleanup ─────────────────────────────────────────
 
   async findExpiredVersions(cutoffMs: number): Promise<ExpiredVersionMeta[]> {

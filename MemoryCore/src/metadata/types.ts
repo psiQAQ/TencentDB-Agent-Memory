@@ -606,6 +606,12 @@ export interface OwnershipTransferResult {
   reason?: string;
 }
 
+export interface SkillOwnershipTransferInput extends OwnershipTransferInput {
+  resource_type: "asset";
+  from_agent_id: string;
+  to_agent_id: string;
+}
+
 export type IntegrityFindingCategory =
   | "recoverable_dependency"
   | "operational_orphan"

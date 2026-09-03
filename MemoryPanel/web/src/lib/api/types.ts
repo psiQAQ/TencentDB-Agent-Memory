@@ -105,6 +105,7 @@ export interface Asset {
 
 export interface AgentAssetView {
   asset_id: string;
+  owner_user_id: string;
   asset_type: AssetType;
   name: string;
   description?: string;

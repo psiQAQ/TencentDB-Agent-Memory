@@ -59,6 +59,7 @@ import type {
   SafeUserDeleteResult,
   TeamDeletePreview,
   OwnershipTransferInput,
+  SkillOwnershipTransferInput,
   OwnershipTransferResult,
   IntegrityFinding,
   UserOwnedResourceDependency,
@@ -1076,6 +1077,61 @@ export class MongoMetadataStore implements IMetadataStore {
           created_at: nowIso(), updated_at: nowIso(),
         }, { session });
       }
+      return result;
+    });
+  }
+
+  async transferSkillOwnership(input: SkillOwnershipTransferInput): Promise<OwnershipTransferResult> {
+    if (!this.useTransactions) throw new LifecycleTransactionsRequiredError();
+    return this.withTx(async (session) => {
+      const fail = (reason: string): OwnershipTransferResult => ({
+        resource_type: "asset", resource_id: input.resource_id, transferred: false,
+        implicit_asset_ids: [], removed_binding_ids: [], reason,
+      });
+      const operation = await this.col("meta_lifecycle_operations").findOne({
+        idempotency_key: input.idempotency_key, resource_type: "asset", resource_id: input.resource_id,
+      }, { session });
+      if (operation?.status === "succeeded" && operation.result_json) {
+        return JSON.parse(String(operation.result_json)) as OwnershipTransferResult;
+      }
+      const [asset, sourceAgent, targetAgent, target, targetUser, binding, targetBinding] = await Promise.all([
+        this.col<AssetEntity>("meta_assets").findOne({ asset_id: input.resource_id } as Document, { ...PROJECT_NO_ID, session }),
+        this.col<AgentEntity>("meta_agents").findOne({ agent_id: input.from_agent_id } as Document, { ...PROJECT_NO_ID, session }),
+        this.col<AgentEntity>("meta_agents").findOne({ agent_id: input.to_agent_id } as Document, { ...PROJECT_NO_ID, session }),
+        this.col<TeamMemberEntity>("meta_team_members").findOne({ team_id: input.team_id, user_id: input.to_user_id, status: "active" } as Document, { ...PROJECT_NO_ID, session }),
+        this.col<UserEntity>("meta_users").findOne({ user_id: input.to_user_id, status: "active" } as Document, { ...PROJECT_NO_ID, session }),
+        this.col<FixedAssetBindingEntity>("meta_agent_fixed_assets").findOne({ agent_id: input.from_agent_id, asset_id: input.resource_id } as Document, { ...PROJECT_NO_ID, session }),
+        this.col<FixedAssetBindingEntity>("meta_agent_fixed_assets").findOne({ agent_id: input.to_agent_id, asset_id: input.resource_id } as Document, { ...PROJECT_NO_ID, session }),
+      ]);
+      if (!target || !targetUser) return fail("target_not_active_member");
+      if (!asset || asset.team_id !== input.team_id || asset.asset_type !== "skill") return fail("resource_not_found");
+      if (asset.owner_user_id !== input.from_user_id) return fail("not_resource_owner");
+      if (!sourceAgent || sourceAgent.team_id !== input.team_id || sourceAgent.owner_user_id !== input.from_user_id) return fail("source_agent_not_owned");
+      if (!targetAgent || targetAgent.team_id !== input.team_id || targetAgent.owner_user_id !== input.to_user_id || targetAgent.status !== "active") return fail("target_agent_not_active");
+      if (!binding) return fail("source_skill_binding_not_found");
+      if (targetBinding) await this.col("meta_agent_fixed_assets").deleteOne({ agent_id: input.from_agent_id, asset_id: input.resource_id }, { session });
+      else await this.col("meta_agent_fixed_assets").updateOne(
+        { agent_id: input.from_agent_id, asset_id: input.resource_id }, { $set: { agent_id: input.to_agent_id } }, { session },
+      );
+      await this.col("meta_assets").updateOne(
+        { asset_id: input.resource_id, owner_user_id: input.from_user_id },
+        { $set: { owner_user_id: input.to_user_id, updated_at: nowIso() } }, { session },
+      );
+      const result: OwnershipTransferResult = {
+        resource_type: "asset", resource_id: input.resource_id, transferred: true,
+        implicit_asset_ids: [], removed_binding_ids: [],
+      };
+      if (operation) await this.col("meta_lifecycle_operations").updateOne(
+        { operation_id: operation.operation_id },
+        { $set: { status: "succeeded", result_json: JSON.stringify(result), error_code: null, updated_at: nowIso() } }, { session },
+      );
+      else await this.col("meta_lifecycle_operations").insertOne({
+        operation_id: generateRelationId(), idempotency_key: input.idempotency_key,
+        actor_user_id: input.from_user_id, team_id: input.team_id, resource_type: "asset", resource_id: input.resource_id,
+        from_owner_user_id: input.from_user_id, to_owner_user_id: input.to_user_id,
+        status: "succeeded", result_json: JSON.stringify(result), error_code: null,
+        created_at: nowIso(), updated_at: nowIso(),
+      }, { session });
       return result;
     });
   }
