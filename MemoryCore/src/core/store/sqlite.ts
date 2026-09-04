@@ -101,6 +101,8 @@ export interface VectorSearchResult {
   team_id: string;
   task_id: string;
   user_id: string;
+  /** Current mutable owner; user_id remains the immutable historical source. */
+  owner_user_id: string;
   agent_id: string;
   /** Raw metadata JSON string (e.g., contains activity_start_time / activity_end_time for episodic) */
   metadata_json: string;
@@ -114,6 +116,7 @@ export interface L0VectorSearchResult {
   team_id: string;
   task_id: string;
   user_id: string;
+  owner_user_id: string;
   agent_id: string;
   role: string;
   message_text: string;
@@ -341,6 +344,7 @@ export interface FtsSearchResult {
   team_id: string;
   task_id: string;
   user_id: string;
+  owner_user_id: string;
   agent_id: string;
   metadata_json: string;
 }
@@ -353,6 +357,7 @@ export interface L0FtsSearchResult {
   team_id: string;
   task_id: string;
   user_id: string;
+  owner_user_id: string;
   agent_id: string;
   role: string;
   message_text: string;
@@ -1547,6 +1552,7 @@ export class VectorStore implements IMemoryStore {
               team_id: string;
               task_id: string;
               user_id: string;
+              owner_user_id: string;
               agent_id: string;
               version: number;
               timestamp_str: string;
@@ -1586,6 +1592,7 @@ export class VectorStore implements IMemoryStore {
           team_id: meta.team_id ?? "",
           task_id: meta.task_id ?? "",
           user_id: meta.user_id ?? "",
+          owner_user_id: meta.owner_user_id || meta.user_id || DEFAULT_ISOLATION_ID,
           agent_id: meta.agent_id ?? "",
           metadata_json: meta.metadata_json,
         });
@@ -2085,6 +2092,7 @@ export class VectorStore implements IMemoryStore {
               team_id: string;
               task_id: string;
               user_id: string;
+              owner_user_id: string;
               agent_id: string;
               role: string;
               message_text: string;
@@ -2114,6 +2122,7 @@ export class VectorStore implements IMemoryStore {
           team_id: meta.team_id ?? "",
           task_id: meta.task_id ?? "",
           user_id: meta.user_id ?? "",
+          owner_user_id: meta.owner_user_id || meta.user_id || DEFAULT_ISOLATION_ID,
           agent_id: meta.agent_id ?? "",
           role: meta.role,
           message_text: meta.message_text,
@@ -2455,6 +2464,7 @@ export class VectorStore implements IMemoryStore {
         team_id: (r.team_id as string) || "",
         task_id: (r.task_id as string) || "",
         user_id: (r.user_id as string) || "",
+        owner_user_id: (r.owner_user_id as string) || (r.user_id as string) || DEFAULT_ISOLATION_ID,
         agent_id: (r.agent_id as string) || "",
         role: r.role as string,
         message_text: r.message_text as string,
@@ -3336,6 +3346,7 @@ export class VectorStore implements IMemoryStore {
         team_id: string;
         task_id: string;
         user_id: string;
+        owner_user_id: string;
         agent_id: string;
         version: number;
         timestamp_str: string;
@@ -3364,6 +3375,7 @@ export class VectorStore implements IMemoryStore {
           team_id: r.team_id ?? "",
           task_id: r.task_id ?? "",
           user_id: r.user_id ?? "",
+          owner_user_id: r.owner_user_id || r.user_id || DEFAULT_ISOLATION_ID,
           agent_id: r.agent_id ?? "",
           metadata_json: r.metadata_json,
         }));
@@ -3396,6 +3408,7 @@ export class VectorStore implements IMemoryStore {
         team_id: string;
         task_id: string;
         user_id: string;
+        owner_user_id: string;
         agent_id: string;
         role: string;
         recorded_at: string;
@@ -3413,6 +3426,7 @@ export class VectorStore implements IMemoryStore {
           team_id: r.team_id ?? "",
           task_id: r.task_id ?? "",
           user_id: r.user_id ?? "",
+          owner_user_id: r.owner_user_id || r.user_id || DEFAULT_ISOLATION_ID,
           agent_id: r.agent_id ?? "",
           role: r.role,
           message_text: r.message_text,

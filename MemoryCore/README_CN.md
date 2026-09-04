@@ -314,7 +314,6 @@ MemoryCore/
 
 ```bash
 npm run read-local-memory
-npm run seed-v2
 ```
 
 ## 安全建议
