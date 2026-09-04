@@ -846,8 +846,7 @@ active member，并且必须是请求中每项资源的 owner/creator；先校�
 
 ### POST /account/ownership/transfer
 
-owner 本人在当前 Team 内直接转移最多 100 项 ownership；每项可选择不同接收者，接收者
-无需确认。Team 仅可转给 active admin；Agent、Task、Wiki、Code Graph 可转给同 Team
+owner 本人在当前 Team 内直接转移最多 100 项 ownership；接收者无需确认。Team 仅可转给 active admin；Agent、Task 可转给同 Team
 任意 active member。Agent 是聚合根：所有固定绑定保持附着；绑定的 Skill、Wiki、
 Code Graph、Chat Memory 中，owner 与原 Agent owner 相同的资产随 Agent 一并迁移
 ownership，其他 owner 的共享资产保留 owner 和绑定。Agent 子资产不能脱离聚合根单独
@@ -865,6 +864,12 @@ ownership，其他 owner 的共享资产保留 owner 和绑定。Agent 子资产
   "confirmation": "TRANSFER_OWNERSHIP"
 }
 ```
+
+Skill、Wiki、Code Graph、Chat Memory 作为独立 Asset 转移时，请求项还必须携带
+`from_agent_id` 和 `to_agent_id`。同一批独立 Asset 必须使用同一接收用户和目标 Agent；
+Panel 在接收人没有 Agent 时按 Team 模板创建接收 Agent。Core 在同一事务中迁移 metadata
+owner 和 fixed binding；Chat Memory 目标 Agent 已达到 2 条外部记忆上限时返回
+`IMPORT_LIMIT_EXCEEDED`，ownership 与绑定均保持不变。
 
 Wiki/Code Graph 使用 operation journal 或 Agent 聚合补偿协调 Knowledge backing 与 Core
 metadata；Agent 同时迁移它所拥有的绑定 Chat Memory 的 L0/L1 当前 owner。失败时优先

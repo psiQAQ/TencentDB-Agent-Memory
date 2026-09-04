@@ -720,6 +720,33 @@ export function runMetadataStoreContract(
         expect(await store.getAgentFixedAsset(sourceAgent.agent_id, skill.asset_id)).toBeNull();
         expect(await store.getAgentFixedAsset(targetAgent.agent_id, skill.asset_id)).not.toBeNull();
       });
+
+      it("moves standalone Chat Memory binding and rejects a recipient Agent at its import limit", async () => {
+        const owner = await store.createUser(uniqueUserInput());
+        const recipient = await store.createUser(uniqueUserInput());
+        const team = await store.createTeam(teamInput(owner.user_id));
+        await store.addTeamMember({ team_id: team.team_id, user_id: recipient.user_id, role: "member" });
+        const sourceAgent = await store.createAgent({ team_id: team.team_id, owner_user_id: owner.user_id, name: "source" });
+        const targetAgent = await store.createAgent({ team_id: team.team_id, owner_user_id: recipient.user_id, name: "target" });
+        const memory = await store.createAsset({ asset_id: newAssetId("chat_memory"), team_id: team.team_id, asset_type: "chat_memory", name: "M", owner_user_id: owner.user_id, source_type: "manual" });
+        await store.addAgentFixedAsset(sourceAgent.agent_id, { asset_id: memory.asset_id, asset_type: "chat_memory", created_by: owner.user_id });
+
+        for (let i = 0; i < 2; i += 1) {
+          const borrowed = await store.createAsset({ asset_id: newAssetId("chat_memory"), team_id: team.team_id, asset_type: "chat_memory", name: `B${i}`, owner_user_id: owner.user_id, source_type: "manual" });
+          await store.addAgentFixedAsset(targetAgent.agent_id, { asset_id: borrowed.asset_id, asset_type: "chat_memory", created_by: recipient.user_id });
+        }
+
+        const blocked = await store.transferSkillOwnership({
+          team_id: team.team_id, resource_type: "asset", resource_id: memory.asset_id,
+          from_user_id: owner.user_id, to_user_id: recipient.user_id,
+          from_agent_id: sourceAgent.agent_id, to_agent_id: targetAgent.agent_id,
+          idempotency_key: `memory-limit-${Math.random()}`,
+        });
+        expect(blocked).toMatchObject({ transferred: false, reason: "IMPORT_LIMIT_EXCEEDED" });
+        expect(await store.getAssetById(memory.asset_id)).toMatchObject({ owner_user_id: owner.user_id });
+        expect(await store.getAgentFixedAsset(sourceAgent.agent_id, memory.asset_id)).not.toBeNull();
+        expect(await store.getAgentFixedAsset(targetAgent.agent_id, memory.asset_id)).toBeNull();
+      });
     });
 
     // ── Delete Cascade (N1) ──

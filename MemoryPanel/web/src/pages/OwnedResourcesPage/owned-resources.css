@@ -1,23 +1,29 @@
 .owned-resources-summary {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 12px;
+}
+.owned-resources-summary__row {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(100px, 1fr));
-  gap: 10px;
-  margin-top: 16px;
+  grid-template-columns: repeat(auto-fit, minmax(92px, 1fr));
+  gap: 8px;
 }
 .owned-resources-summary__metric {
-  min-height: 72px;
-  padding: 12px 14px;
+  min-height: 50px;
+  padding: 7px 12px;
   border: 1px solid var(--tea-color-border-secondary);
   border-radius: 4px;
   background: var(--tea-color-bg-default);
 }
 .owned-resources-summary__metric strong {
   display: block;
-  font-size: 24px;
-  line-height: 30px;
+  font-size: 20px;
+  line-height: 24px;
 }
 .owned-resources-summary__metric span {
   color: var(--tea-color-text-secondary);
+  line-height: 18px;
 }
 .owned-resources-filters {
   display: flex;

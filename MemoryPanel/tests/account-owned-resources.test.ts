@@ -8,6 +8,7 @@ function buildApp(options: {
   resourceCode?: number;
   clearCode?: number;
   assetType?: 'skill' | 'chat_memory' | 'llm_wiki' | 'code_graph';
+  targetHasAgent?: boolean;
   boundAssets?: Array<{ asset_id: string; asset_type: 'skill' | 'chat_memory' | 'llm_wiki' | 'code_graph'; owner_user_id?: string }>;
 } = {}) {
   const invoke = vi.fn(async (action: string, body: Record<string, unknown>) => {
@@ -16,6 +17,9 @@ function buildApp(options: {
     }
     if (action === 'team-member/get') {
       return { code: 0, message: 'ok', data: { user_id: 'caller', role: 'member', status: options.membership ?? 'active' } };
+    }
+    if (action === 'user/get') {
+      return { code: 0, message: 'ok', data: { user_id: body.user_id, username: 'target' } };
     }
     if (action === 'agent-fixed-asset/list') {
       return {
@@ -27,12 +31,16 @@ function buildApp(options: {
         },
       };
     }
+    if (action === 'agent/list') {
+      const items = options.targetHasAgent === false ? [] : [{ agent_id: 'target-agent', name: 'target' }];
+      return { code: 0, message: 'ok', data: { items, total: items.length } };
+    }
     if (action === 'task/get') {
       if (options.resourceCode === 404) return { code: 404, message: 'not found', data: null };
       return { code: 0, message: 'ok', data: { task_id: body.task_id, team_id: 'team-1', owner_user_id: options.owner ?? 'caller', creator_user_id: 'original-creator' } };
     }
     if (action === 'agent/get') {
-      const target = body.agent_id === 'target-agent';
+      const target = body.agent_id === 'target-agent' || body.agent_id === 'handoff-agent';
       return { code: 0, message: 'ok', data: { agent_id: body.agent_id, team_id: 'team-1', owner_user_id: target ? 'target' : 'caller', status: 'active' } };
     }
     if (action === 'asset/get') {
@@ -53,8 +61,13 @@ function buildApp(options: {
     throw new Error(`unexpected meta action: ${action}`);
   });
   const kernelPost = vi.fn(async (path: string) => {
+    if (path.endsWith('/agent/create-for-handoff')) {
+      return { code: 0, message: 'ok', data: { agent_id: 'handoff-agent', name: 'default-agent-target' } };
+    }
     if (path.endsWith('/prepare-transfer')) return { code: 0, message: 'ok', data: { operation_id: 'op-1', status: 'pending' } };
-    if (path.endsWith('/finalize-transfer')) return { code: 0, message: 'ok', data: { resource_type: 'asset', resource_id: 'wiki-1', transferred: true } };
+    if (path.endsWith('/finalize-transfer') || path.endsWith('/finalize-bound-transfer')) {
+      return { code: 0, message: 'ok', data: { resource_type: 'asset', resource_id: 'wiki-1', transferred: true } };
+    }
     if (path.endsWith('/finalize-delete')) return { code: 0, message: 'ok', data: { deleted_ids: ['memory-1'], failed: [] } };
     return {
       code: options.clearCode ?? 0,
@@ -69,7 +82,7 @@ function buildApp(options: {
     skillKernel: { invoke: vi.fn(async () => ({ code: 0, message: 'ok', data: { items: [{ skill_id: 'skill-1', version: 3, owner_agent_id: 'source-agent' }], total: 1 } })) },
     kernelHttp: { postEnvelope: kernelPost },
     knowledgeClientFactory: () => ({ transferOwnership }),
-    config: { metadataRemoteTimeoutMs: 10_000 },
+    config: { metadataRemoteTimeoutMs: 10_000, agentTemplateDir: '/tmp/memory-panel-missing-template' },
   } as never;
   const app = new Hono();
   registerAccountOwnedResourceRoutes(app, deps);
@@ -138,7 +151,10 @@ describe('ownership transfer lifecycle', () => {
         team_id: 'team-1',
         transfers: [
           { resource_type: 'agent', resource_id: 'agent-1', to_user_id: 'target' },
-          { resource_type: 'asset', resource_id: 'memory-1', to_user_id: 'target' },
+          {
+            resource_type: 'asset', resource_id: 'memory-1', to_user_id: 'target',
+            from_agent_id: 'agent-1', to_agent_id: 'target-agent',
+          },
         ],
         idempotency_key: '22222222-2222-4222-8222-222222222222',
         confirmation: 'TRANSFER_OWNERSHIP',
@@ -189,7 +205,10 @@ describe('ownership transfer lifecycle', () => {
   });
 
   it('prepares Core, CAS-transfers knowledge backing, then finalizes Core metadata', async () => {
-    const fixture = buildApp({ assetType: 'llm_wiki' });
+    const fixture = buildApp({
+      assetType: 'llm_wiki',
+      boundAssets: [{ asset_id: 'wiki-1', asset_type: 'llm_wiki' }],
+    });
     const response = await fixture.app.request('/account/ownership/transfer', {
       method: 'POST',
       headers: {
@@ -199,7 +218,10 @@ describe('ownership transfer lifecycle', () => {
       },
       body: JSON.stringify({
         team_id: 'team-1',
-        transfers: [{ resource_type: 'asset', resource_id: 'wiki-1', to_user_id: 'target' }],
+        transfers: [{
+          resource_type: 'asset', resource_id: 'wiki-1', to_user_id: 'target',
+          from_agent_id: 'source-agent', to_agent_id: 'target-agent',
+        }],
         idempotency_key: '33333333-3333-4333-8333-333333333333',
         confirmation: 'TRANSFER_OWNERSHIP',
       }),
@@ -207,7 +229,7 @@ describe('ownership transfer lifecycle', () => {
     expect(response.status).toBe(200);
     expect(fixture.kernelPost.mock.calls.map(([path]) => path)).toEqual([
       '/v3/internal/meta/asset/prepare-transfer',
-      '/v3/internal/meta/asset/finalize-transfer',
+      '/v3/internal/meta/asset/finalize-bound-transfer',
     ]);
     expect(fixture.transferOwnership).toHaveBeenCalledWith(expect.objectContaining({
       resource_type: 'llm_wiki',
@@ -217,13 +239,19 @@ describe('ownership transfer lifecycle', () => {
   });
 
   it('requires a recipient Agent and coordinates Skill backing before atomic metadata/binding finalize', async () => {
-    const fixture = buildApp({ assetType: 'skill' });
+    const fixture = buildApp({
+      assetType: 'skill',
+      boundAssets: [{ asset_id: 'skill-1', asset_type: 'skill' }],
+    });
     const request = (toAgentId?: string) => fixture.app.request('/account/ownership/transfer', {
       method: 'POST',
       headers: { 'content-type': 'application/json', 'X-Tdai-Service-Id': 'local', 'X-Tdai-User-Key': 'key' },
       body: JSON.stringify({
         team_id: 'team-1',
-        transfers: [{ resource_type: 'asset', resource_id: 'skill-1', to_user_id: 'target', ...(toAgentId ? { to_agent_id: toAgentId } : {}) }],
+        transfers: [{
+          resource_type: 'asset', resource_id: 'skill-1', to_user_id: 'target',
+          from_agent_id: 'source-agent', ...(toAgentId ? { to_agent_id: toAgentId } : {}),
+        }],
         idempotency_key: toAgentId ? '66666666-6666-4666-8666-666666666666' : '55555555-5555-4555-8555-555555555555',
         confirmation: 'TRANSFER_OWNERSHIP',
       }),
@@ -235,5 +263,37 @@ describe('ownership transfer lifecycle', () => {
       '/v3/internal/meta/skill/transfer-owner',
       '/v3/internal/meta/skill/finalize-transfer',
     ]));
+  });
+
+  it('creates a default recipient Agent when none exists and keeps standalone Chat Memory attached', async () => {
+    const fixture = buildApp({
+      assetType: 'chat_memory',
+      targetHasAgent: false,
+      boundAssets: [{ asset_id: 'memory-1', asset_type: 'chat_memory' }],
+    });
+    const response = await fixture.app.request('/account/ownership/transfer', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'X-Tdai-Service-Id': 'local', 'X-Tdai-User-Key': 'key' },
+      body: JSON.stringify({
+        team_id: 'team-1',
+        transfers: [{
+          resource_type: 'asset', resource_id: 'memory-1', to_user_id: 'target',
+          from_agent_id: 'source-agent',
+        }],
+        idempotency_key: '88888888-8888-4888-8888-888888888888',
+        confirmation: 'TRANSFER_OWNERSHIP',
+      }),
+    });
+    expect(response.status).toBe(200);
+    expect(fixture.kernelPost.mock.calls.map(([path]) => path)).toContain(
+      '/v3/internal/meta/agent/create-for-handoff',
+    );
+    const transfer = fixture.invoke.mock.calls.find(([action]) => action === 'ownership/transfer');
+    expect(transfer?.[1]).toMatchObject({
+      transfers: [{
+        resource_type: 'asset', resource_id: 'memory-1', to_user_id: 'target',
+        from_agent_id: 'source-agent', to_agent_id: 'handoff-agent',
+      }],
+    });
   });
 });

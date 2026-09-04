@@ -102,7 +102,7 @@ Knowledge Service Swagger（可选，看接口调试用）：
 
 ### 第 1.5 步：在“用户管理”创建业务用户
 
-1. 用 bootstrap `system_admin` 登录后，打开左侧“组织与权限 → 用户管理”。
+1. 用 bootstrap `system_admin` 登录后，打开左侧“系统管理 → 用户管理”。
 2. 点击“新建用户”。页面明确显示账号类型固定为 `normal`。
 3. 填写用户名；初始 User_Key 可由 Core 自动生成，也可开启开关后自定义。
 4. 创建成功后立即复制并安全保存 User_Key。**完整明文只展示这一次**。
@@ -134,10 +134,10 @@ Coding agent 用记忆必须落到具体 `team / agent / task` 三元组上：
 ### 第 2.5 步：Team admin 添加已有账号并设置角色
 
 1. 让待加入用户从“我的资料”复制自己的 `user_id`。
-2. Team owner/admin 打开“成员管理”→“添加成员”，输入该 `user_id`。
+2. Team owner/admin 打开“团队管理”→“添加成员”，输入该 `user_id`。
 3. 添加时选择 `admin`、`member` 或 `reviewer`；以后可在成员卡片中调整。
 
-“成员管理”不会创建全局账号。owner 的角色以及操作者自己的角色被锁定；owner
+“团队管理”不会创建全局账号。owner 的角色以及操作者自己的角色被锁定；owner
 不可移除。全局 `system_admin` 也只有在当前 Team 确实为 owner/admin 时才会看到
 编辑/删除 Team、增删成员和修改角色等入口。
 
@@ -150,13 +150,15 @@ ownership 不随 membership 自动转移或删除。移除成员或删除账号�
 
 1. 用户在左侧“我的资源依赖”查看自己拥有的 Team、Agent、Task、Skill、Wiki、
    Code Graph、Chat Memory 和其他 Asset；inactive、archived 状态也会显示并计入 blocker。
-2. 如果页面标记 `membership=absent`，由该 Team owner/admin 在“成员管理”按
+2. 如果页面标记 `membership=absent`，由该 Team owner/admin 在“团队管理”按
    `user_id` 恢复 membership。恢复不会自动生成默认资源。
 3. 用户本人在 active membership 下逐项或批量选择处理方式：
-   - “转移 ownership”：Agent、Task、Wiki、Code Graph、Chat Memory 可直接转给同 Team
-     任意 active member；Skill 单独转移时还必须选择接收用户拥有的 active Agent，并同时
-     迁移 Skill 的 backing `owner_agent_id`、Core metadata owner 和固定绑定。Team ownership
-     只能转给 active `admin`。接收者无需确认。
+   - “转移 ownership”：Agent、Task 直接转给同 Team 任意 active member。四类 Asset
+     （Skill、Wiki、Code Graph、Chat Memory）单独转移时，必须为本批选择同一接收用户和
+     该用户的同一个 active Agent，并同步迁移 backing owner、Core metadata owner 和固定
+     绑定；需要不同接收人或 Agent 时应分批操作。接收用户没有 Agent 时，系统按 Team
+     默认模板创建一个接收 Agent。目标 Agent 已借入 2 条其他 Chat Memory 时拒绝继续转入。
+     Team ownership 只能转给 active `admin`。接收者无需确认。
    - Agent 是聚合根：转移 Agent 时保留它的全部固定绑定；四类绑定资产（Skill、Wiki、
      Code Graph、Chat Memory）中，owner 与原 Agent owner 相同的资产及相应 backing
      ownership 一并转移，其他成员拥有的共享资产保留原 owner 和绑定。历史
@@ -185,8 +187,9 @@ ownership 不随 membership 自动转移或删除。移除成员或删除账号�
 - 解散前必须只剩 owner 一名 active member，并且 Agent、Task、全部 Asset subtype、
   活动关系、未完成 operation 和 operational integrity finding 全部归零。输入完整 Team
   名称并使用最新 preview revision 后才会删除空 Team；Team admin 调用返回 403。
-- `system_admin` 左侧菜单顺序为“用户管理 → 孤立资源治理 → 成员管理 → Agents 管理 →
-  我的资源依赖 → API Key”。“孤立资源治理”先扫描再人工处置；可全选允许处置的条目并
+- “组织与权限”对 `system_admin` 与 `normal` 使用同一套 Team 权限，依次为“团队管理 →
+  Agents 管理 → 我的资源依赖 → API Key”。资产管理之后另设仅 `system_admin` 可见的
+  “系统管理”，其中包含“用户管理 → 孤立资源治理”。治理页先扫描再人工处置；可全选允许处置的条目并
   批量彻底清理，但服务端会逐项重新验证，只清理仍为 `operational_orphan` 或
   `cache_residue` 的条目。
 - Alice 这类 Team 和 owner 仍存在、只是 membership 缺失的资源属于

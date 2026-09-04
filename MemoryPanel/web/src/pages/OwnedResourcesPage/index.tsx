@@ -54,7 +54,7 @@ export function OwnedResourcesPage() {
   const [statusFilter, setStatusFilter] = useState('all');
   const [transfer, setTransfer] = useState<{
     teamId: string;
-    items: OwnedResourceDependency[];
+    items: DisplayItem[];
     target: string;
     targetAgent: string;
     targetAgents: Array<{ agent_id: string; name: string }>;
@@ -214,14 +214,14 @@ export function OwnedResourcesPage() {
       return next;
     });
   }
-  function uniqueOwned(items: DisplayItem[]): OwnedResourceDependency[] {
+  function uniqueOwned(items: DisplayItem[]): DisplayItem[] {
     return [
       ...new Map(
         items.filter((item) => !item.borrowed).map((item) => [resourceKey(item), item]),
       ).values(),
     ];
   }
-  function operationItems(items: DisplayItem[], purge: boolean): OwnedResourceDependency[] {
+  function operationItems(items: DisplayItem[], purge: boolean): DisplayItem[] {
     const owned = uniqueOwned(items).filter(
       (item) => item.membership_status === 'active' && (!purge || item.resource_type !== 'team'),
     );
@@ -306,9 +306,7 @@ export function OwnedResourcesPage() {
   }
   async function chooseTarget(value: string) {
     if (!transfer) return;
-    const needsAgent = transfer.items.some(
-      (item) => item.resource_type === 'asset' && item.asset_type === 'skill',
-    );
+    const needsAgent = transfer.items.some((item) => item.resource_type === 'asset');
     const targetAgents = needsAgent
       ? await agentsApi.list(transfer.teamId, { owner_user_id: value })
       : [];
@@ -316,10 +314,8 @@ export function OwnedResourcesPage() {
   }
   async function submitTransfer() {
     if (!transfer?.target) return;
-    const needsAgent = transfer.items.some(
-      (item) => item.resource_type === 'asset' && item.asset_type === 'skill',
-    );
-    if (needsAgent && !transfer.targetAgent) return;
+    const needsAgent = transfer.items.some((item) => item.resource_type === 'asset');
+    if (needsAgent && transfer.targetAgents.length > 0 && !transfer.targetAgent) return;
     const targetName =
       transfer.members.find((member) => member.user_id === transfer.target)?.username ??
       transfer.target;
@@ -339,8 +335,11 @@ export function OwnedResourcesPage() {
           resource_type: item.resource_type,
           resource_id: item.resource_id,
           to_user_id: transfer.target,
-          ...(item.resource_type === 'asset' && item.asset_type === 'skill'
-            ? { to_agent_id: transfer.targetAgent }
+          ...(item.resource_type === 'asset'
+            ? {
+                ...(item.parent_agent_id ? { from_agent_id: item.parent_agent_id } : {}),
+                ...(transfer.targetAgent ? { to_agent_id: transfer.targetAgent } : {}),
+              }
             : {}),
         })),
       );
@@ -362,17 +361,22 @@ export function OwnedResourcesPage() {
   const ownerName = (item: DisplayItem) =>
     membersByTeam.get(item.team_id)?.find((member) => member.user_id === item.owner_user_id)
       ?.username ?? item.owner_user_id;
-  const metrics = dependencies
+  const primaryMetrics = dependencies
     ? ([
         ['team', dependencies.counts.teams],
         ['agent', dependencies.counts.agents],
         ['task', dependencies.counts.tasks],
+      ] as const)
+    : [];
+  const assetMetrics = dependencies
+    ? ([
         ['skill', dependencies.asset_counts.skill],
         ['llm_wiki', dependencies.asset_counts.llm_wiki],
         ['code_graph', dependencies.asset_counts.code_graph],
         ['chat_memory', dependencies.asset_counts.chat_memory],
-        ['other', dependencies.asset_counts.other],
-        ['total', dependencies.counts.total],
+        ...(dependencies.asset_counts.other > 0
+          ? ([['other', dependencies.asset_counts.other]] as const)
+          : []),
       ] as const)
     : [];
 
@@ -395,10 +399,14 @@ export function OwnedResourcesPage() {
       />
       {dependencies && (
         <div className="owned-resources-summary" aria-label={t('resources.summary')}>
-          {metrics.map(([kind, value]) => (
-            <div className="owned-resources-summary__metric" key={kind}>
-              <strong>{value}</strong>
-              <span>{t(`resources.type.${kind}`)}</span>
+          {[primaryMetrics, assetMetrics].map((metrics, row) => (
+            <div className="owned-resources-summary__row" key={row}>
+              {metrics.map(([kind, value]) => (
+                <div className="owned-resources-summary__metric" key={kind}>
+                  <strong>{value}</strong>
+                  <span>{t(`resources.type.${kind}`)}</span>
+                </div>
+              ))}
             </div>
           ))}
         </div>
@@ -565,9 +573,7 @@ export function OwnedResourcesPage() {
                   }))}
               />
             </div>
-            {transfer.items.some(
-              (item) => item.resource_type === 'asset' && item.asset_type === 'skill',
-            ) && (
+            {transfer.items.some((item) => item.resource_type === 'asset') && (
               <div className="owned-resources-transfer-field">
                 <Text parent="div">{t('resources.transfer.targetAgent')}</Text>
                 <Select
@@ -592,9 +598,8 @@ export function OwnedResourcesPage() {
               type="primary"
               disabled={
                 !transfer.target ||
-                (transfer.items.some(
-                  (item) => item.resource_type === 'asset' && item.asset_type === 'skill',
-                ) &&
+                (transfer.items.some((item) => item.resource_type === 'asset') &&
+                  transfer.targetAgents.length > 0 &&
                   !transfer.targetAgent)
               }
               onClick={() => void submitTransfer()}

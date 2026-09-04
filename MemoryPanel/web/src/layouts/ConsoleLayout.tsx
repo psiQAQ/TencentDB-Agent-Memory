@@ -139,7 +139,7 @@ export function ConsoleLayout() {
   );
 
   // ===== 账号类型与 Team role 分离的菜单过滤 =====
-  // “用户管理”仅 system_admin 可见；“成员管理”对 reviewer 隐藏。
+  // “系统管理”中的用户/孤立资源治理仅 system_admin 可见；“团队管理”对 reviewer 隐藏。
   const menuGroups = useMemo(() => {
     const byGroup = new Map<string, (typeof PAGE_META)[PageId][]>();
 

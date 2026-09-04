@@ -63,6 +63,7 @@ export const ownedResourcesApi = {
       resource_type: 'team' | 'agent' | 'task' | 'asset';
       resource_id: string;
       to_user_id: string;
+      from_agent_id?: string;
       to_agent_id?: string;
     }>,
   ) => {

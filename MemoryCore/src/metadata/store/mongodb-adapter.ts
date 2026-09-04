@@ -1104,11 +1104,23 @@ export class MongoMetadataStore implements IMetadataStore {
         this.col<FixedAssetBindingEntity>("meta_agent_fixed_assets").findOne({ agent_id: input.to_agent_id, asset_id: input.resource_id } as Document, { ...PROJECT_NO_ID, session }),
       ]);
       if (!target || !targetUser) return fail("target_not_active_member");
-      if (!asset || asset.team_id !== input.team_id || asset.asset_type !== "skill") return fail("resource_not_found");
+      if (!asset || asset.team_id !== input.team_id ||
+        !["skill", "llm_wiki", "code_graph", "chat_memory"].includes(asset.asset_type)) {
+        return fail("resource_not_found");
+      }
       if (asset.owner_user_id !== input.from_user_id) return fail("not_resource_owner");
       if (!sourceAgent || sourceAgent.team_id !== input.team_id || sourceAgent.owner_user_id !== input.from_user_id) return fail("source_agent_not_owned");
       if (!targetAgent || targetAgent.team_id !== input.team_id || targetAgent.owner_user_id !== input.to_user_id || targetAgent.status !== "active") return fail("target_agent_not_active");
-      if (!binding) return fail("source_skill_binding_not_found");
+      if (!binding) return fail("source_asset_binding_not_found");
+      if (asset.asset_type === "chat_memory" && !targetBinding) {
+        const selfMemoryId = `chat_memory-${input.team_id}-${input.to_agent_id}`;
+        const imported = await this.col<FixedAssetBindingEntity>("meta_agent_fixed_assets").countDocuments({
+          agent_id: input.to_agent_id,
+          asset_type: "chat_memory",
+          asset_id: { $ne: selfMemoryId },
+        } as Document, { session });
+        if (imported >= 2) return fail("IMPORT_LIMIT_EXCEEDED");
+      }
       if (targetBinding) await this.col("meta_agent_fixed_assets").deleteOne({ agent_id: input.from_agent_id, asset_id: input.resource_id }, { session });
       else await this.col("meta_agent_fixed_assets").updateOne(
         { agent_id: input.from_agent_id, asset_id: input.resource_id }, { $set: { agent_id: input.to_agent_id } }, { session },

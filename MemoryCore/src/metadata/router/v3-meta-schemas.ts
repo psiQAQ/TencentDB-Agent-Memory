@@ -139,6 +139,8 @@ export const ownershipTransferSchema = z.object({
     resource_type: z.enum(["team", "agent", "task", "asset"]),
     resource_id: nonEmpty,
     to_user_id: nonEmpty,
+    from_agent_id: nonEmpty.optional(),
+    to_agent_id: nonEmpty.optional(),
   })).min(1).max(100),
   idempotency_key: z.string().uuid(),
   confirmation: z.literal("TRANSFER_OWNERSHIP"),
@@ -441,6 +443,16 @@ export const internalSkillTransferOwnerSchema = z.object({
 export const internalSkillFinalizeTransferSchema = internalAssetFinalizeTransferSchema.extend({
   from_agent_id: nonEmpty,
   to_agent_id: nonEmpty,
+});
+export const internalBoundAssetFinalizeTransferSchema = internalSkillFinalizeTransferSchema;
+export const internalAgentCreateForHandoffSchema = z.object({
+  team_id: nonEmpty,
+  owner_user_id: nonEmpty,
+  name: nonEmpty,
+  description: z.string().nullable().optional(),
+  prompt: z.string().nullable().optional(),
+  visibility: visibility.optional(),
+  metadata_json: z.string().optional(),
 });
 export const internalAssetResolveTransferSchema = z.object({
   team_id: nonEmpty,

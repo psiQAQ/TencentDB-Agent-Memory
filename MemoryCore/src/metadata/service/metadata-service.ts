@@ -2137,7 +2137,13 @@ export class MetadataService {
   async transferOwnershipForCaller(
     input: {
       team_id: string;
-      transfers: Array<{ resource_type: "team" | "agent" | "task" | "asset"; resource_id: string; to_user_id: string }>;
+      transfers: Array<{
+        resource_type: "team" | "agent" | "task" | "asset";
+        resource_id: string;
+        to_user_id: string;
+        from_agent_id?: string;
+        to_agent_id?: string;
+      }>;
       idempotency_key: string;
     },
     ctx: V3AuthContext,
@@ -2196,6 +2202,9 @@ export class MetadataService {
             `${asset.asset_type} ownership requires the coordinated lifecycle endpoint`,
           );
         }
+        if (asset.asset_type === "chat_memory" && (!transfer.from_agent_id || !transfer.to_agent_id)) {
+          throw new MetadataError("target_agent_required", "standalone Chat Memory transfer requires source and target Agents");
+        }
       }
     }
 
@@ -2232,8 +2241,15 @@ export class MetadataService {
                 teamId: input.team_id, agentId: memoryAgentId,
                 fromOwnerUserId: callerId, toOwnerUserId: transfer.to_user_id,
               });
-              const result = await this.store.transferOwnership(operationInput);
-              if (!result.transferred) throw new Error(result.reason ?? "metadata_transfer_failed");
+              const result = await this.store.transferSkillOwnership({
+                ...operationInput,
+                resource_type: "asset",
+                from_agent_id: transfer.from_agent_id!,
+                to_agent_id: transfer.to_agent_id!,
+              });
+              if (!result.transferred) {
+                throw new MetadataError(result.reason ?? "metadata_transfer_failed", result.reason ?? "metadata transfer failed");
+              }
               items.push(result);
             } catch (error) {
               let compensationFailed = false;
@@ -2612,7 +2628,7 @@ export class MetadataService {
   }): Promise<{ operation_id: string; status: string }> {
     const asset = await this.getAssetById(input.asset_id);
     if (!asset || asset.team_id !== input.team_id) throw new MetadataError("asset_not_found", "asset not found");
-    if (!["skill", "llm_wiki", "code_graph"].includes(asset.asset_type)) {
+    if (!["skill", "llm_wiki", "code_graph", "chat_memory"].includes(asset.asset_type)) {
       throw new MetadataError("managed_resource_requires_lifecycle", "prepare is limited to coordinated assets");
     }
     if (asset.owner_user_id !== input.from_owner_user_id && asset.owner_user_id !== input.to_owner_user_id) {
@@ -2738,6 +2754,63 @@ export class MetadataService {
       }
       throw err;
     }
+  }
+
+  /** Bearer-only finalize for a standalone managed Asset after its backing owner has moved. */
+  async finalizeBoundAssetTransferInternal(input: {
+    team_id: string;
+    asset_id: string;
+    from_owner_user_id: string;
+    to_owner_user_id: string;
+    from_agent_id: string;
+    to_agent_id: string;
+    idempotency_key: string;
+  }): Promise<OwnershipTransferResult> {
+    const asset = await this.getAssetById(input.asset_id);
+    if (!asset || asset.team_id !== input.team_id ||
+      !["skill", "llm_wiki", "code_graph", "chat_memory"].includes(asset.asset_type)) {
+      throw new MetadataError("asset_not_found", "managed Asset not found");
+    }
+    try {
+      const result = await this.store.transferSkillOwnership({
+        team_id: input.team_id,
+        resource_type: "asset",
+        resource_id: input.asset_id,
+        from_user_id: input.from_owner_user_id,
+        to_user_id: input.to_owner_user_id,
+        from_agent_id: input.from_agent_id,
+        to_agent_id: input.to_agent_id,
+        idempotency_key: input.idempotency_key,
+      });
+      if (!result.transferred) {
+        throw new MetadataError(result.reason ?? "asset_transfer_failed", result.reason ?? "Asset transfer failed");
+      }
+      return result;
+    } catch (err) {
+      if (err instanceof LifecycleTransactionsRequiredError) {
+        throw new MetadataError("lifecycle_transactions_required", err.message);
+      }
+      throw err;
+    }
+  }
+
+  /** Trusted lifecycle helper used only when a transfer recipient has no Agent. */
+  async createAgentForHandoffInternal(input: CreateAgentInput): Promise<AgentEntity> {
+    await this.assertTeamExists(input.team_id);
+    const [member, user] = await Promise.all([
+      this.store.getTeamMember(input.team_id, input.owner_user_id),
+      this.getUserById(input.owner_user_id),
+    ]);
+    if (!member || member.status !== "active" || !user || user.status !== "active") {
+      throw new MetadataError("target_not_active_member", "handoff Agent owner must be an active user and Team member");
+    }
+    const existing = await this.store.listAgentsByTeam(
+      input.team_id,
+      { limit: 1, offset: 0 },
+      { owner_user_id: input.owner_user_id, name: input.name, status: "active" },
+    );
+    if (existing.items[0]) return existing.items[0];
+    return this.createAgent({ ...input, status: "active" });
   }
 
   async touchAssetUsageForCaller(assetId: string, ctx: V3AuthContext): Promise<void> {

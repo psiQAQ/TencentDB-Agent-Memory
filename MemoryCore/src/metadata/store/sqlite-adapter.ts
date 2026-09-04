@@ -1240,13 +1240,24 @@ export class SqliteMetadataStore implements IMetadataStore {
         input.team_id, input.to_user_id,
       );
       if (!target || target.status !== "active" || target.user_status !== "active") return fail("target_not_active_member");
-      if (!asset || asset.team_id !== input.team_id || asset.asset_type !== "skill") return fail("resource_not_found");
+      if (!asset || asset.team_id !== input.team_id ||
+        !["skill", "llm_wiki", "code_graph", "chat_memory"].includes(String(asset.asset_type))) {
+        return fail("resource_not_found");
+      }
       if (asset.owner_user_id !== input.from_user_id) return fail("not_resource_owner");
       if (!sourceAgent || sourceAgent.team_id !== input.team_id || sourceAgent.owner_user_id !== input.from_user_id) return fail("source_agent_not_owned");
       if (!targetAgent || targetAgent.team_id !== input.team_id || targetAgent.owner_user_id !== input.to_user_id || targetAgent.status !== "active") return fail("target_agent_not_active");
       const binding = this.get<Row>("SELECT * FROM meta_agent_fixed_assets WHERE agent_id=? AND asset_id=?", input.from_agent_id, input.resource_id);
-      if (!binding) return fail("source_skill_binding_not_found");
+      if (!binding) return fail("source_asset_binding_not_found");
       const targetBinding = this.get<Row>("SELECT id FROM meta_agent_fixed_assets WHERE agent_id=? AND asset_id=?", input.to_agent_id, input.resource_id);
+      if (asset.asset_type === "chat_memory" && !targetBinding) {
+        const selfMemoryId = `chat_memory-${input.team_id}-${input.to_agent_id}`;
+        const imported = Number(this.get<Row>(
+          "SELECT COUNT(*) AS count FROM meta_agent_fixed_assets WHERE agent_id=? AND asset_type='chat_memory' AND asset_id<>?",
+          input.to_agent_id, selfMemoryId,
+        )?.count ?? 0);
+        if (imported >= 2) return fail("IMPORT_LIMIT_EXCEEDED");
+      }
       if (targetBinding) this.run("DELETE FROM meta_agent_fixed_assets WHERE agent_id=? AND asset_id=?", input.from_agent_id, input.resource_id);
       else this.run("UPDATE meta_agent_fixed_assets SET agent_id=? WHERE agent_id=? AND asset_id=?", input.to_agent_id, input.from_agent_id, input.resource_id);
       this.run("UPDATE meta_assets SET owner_user_id=?, updated_at=? WHERE asset_id=?", input.to_user_id, nowIso(), input.resource_id);

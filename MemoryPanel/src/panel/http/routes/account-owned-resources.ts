@@ -5,6 +5,7 @@ import type { PanelDeps } from '../../panel-deps.js';
 import { toKernelCredentials, type MetaCallContext } from '../../kernel/types.js';
 import { validatePanelMetaHeaders } from '../middleware/validate-panel-headers.js';
 import { respondControlError, respondEnvelope } from '../envelope.js';
+import { getAgentTemplate } from '../../state/agent-template-store.js';
 import {
   buildCtx,
   extractListItems,
@@ -84,6 +85,8 @@ async function transferKnowledgeWithJournal(
     asset_type: 'llm_wiki' | 'code_graph';
     from_owner_user_id: string;
     to_owner_user_id: string;
+    from_agent_id?: string;
+    to_agent_id?: string;
     idempotency_key: string;
   },
 ): Promise<Record<string, unknown>> {
@@ -113,8 +116,15 @@ async function transferKnowledgeWithJournal(
     throw err;
   }
   const coreEnv = await deps.kernelHttp.postEnvelope<Record<string, unknown>>(
-    '/v3/internal/meta/asset/finalize-transfer',
-    operationBody,
+    input.from_agent_id && input.to_agent_id
+      ? '/v3/internal/meta/asset/finalize-bound-transfer'
+      : '/v3/internal/meta/asset/finalize-transfer',
+    {
+      ...operationBody,
+      ...(input.from_agent_id && input.to_agent_id
+        ? { from_agent_id: input.from_agent_id, to_agent_id: input.to_agent_id }
+        : {}),
+    },
     toKernelCredentials(ctx, { timeoutMs: deps.config.metadataRemoteTimeoutMs }, { omitUserKey: true }),
   );
   if (coreEnv.code === 0) return coreEnv.data ?? { resource_type: 'asset', resource_id: input.asset_id, transferred: true };
@@ -137,6 +147,43 @@ async function transferKnowledgeWithJournal(
   }
   await resolveKnowledgeTransfer(deps, ctx, operationBody, 'failed', 'CORE_FINALIZE_FAILED');
   throw new Error(coreEnv.message || 'CORE_FINALIZE_FAILED');
+}
+
+async function createHandoffAgent(
+  deps: PanelDeps,
+  ctx: MetaCallContext,
+  teamId: string,
+  userId: string,
+): Promise<{ agent_id: string; name: string }> {
+  const userEnv = await deps.metaKernel.invoke('user/get', { user_id: userId }, ctx);
+  if (userEnv.code !== 0) throw new Error(userEnv.message || 'USER_LOOKUP_FAILED');
+  const username = (userEnv.data as { username?: string } | null)?.username ?? userId;
+  const template = getAgentTemplate(deps.config.agentTemplateDir, ctx.instanceId, teamId);
+  const name = template?.name ? `${template.name}-${username}` : `default-agent-${username}`;
+  const metadata = JSON.stringify({
+    ui: { role_prompt: '', rules_prompt: '' },
+    panel_provisioning: {
+      source: 'ownership_handoff',
+      schema_version: 1,
+      team_id: teamId,
+      created_for_user_id: userId,
+    },
+  });
+  const env = await deps.kernelHttp.postEnvelope<{ agent_id: string; name: string }>(
+    '/v3/internal/meta/agent/create-for-handoff',
+    {
+      team_id: teamId,
+      owner_user_id: userId,
+      name,
+      description: template?.description ?? '用于接收 ownership 交接资产的默认 Agent。',
+      prompt: template?.prompt ?? '',
+      visibility: template?.visibility ?? 'team',
+      metadata_json: metadata,
+    },
+    toKernelCredentials(ctx, { timeoutMs: deps.config.metadataRemoteTimeoutMs }, { omitUserKey: true }),
+  );
+  if (env.code !== 0 || !env.data) throw new Error(env.message || 'HANDOFF_AGENT_CREATE_FAILED');
+  return env.data;
 }
 
 async function transferSkillWithJournal(
@@ -408,9 +455,17 @@ export function registerAccountOwnedResourceRoutes(api: Hono, deps: PanelDeps): 
     }
     const callerId = await resolveCallerUserId(deps, ctx);
     if (!callerId) return respondControlError(c, 401, 'INVALID_USER_KEY');
-    type Transfer = { resource_type: 'team' | 'agent' | 'task' | 'asset'; resource_id: string; to_user_id: string; to_agent_id?: string };
+    type Transfer = {
+      resource_type: 'team' | 'agent' | 'task' | 'asset';
+      resource_id: string;
+      to_user_id: string;
+      from_agent_id?: string;
+      to_agent_id?: string;
+    };
     const requested: Transfer[] = [];
     const assetById = new Map<string, BoundAsset>();
+    const automaticTargetAgentByUser = new Map<string, string>();
+    let standaloneAssetTarget: { user_id: string; agent_id: string } | null = null;
 
     // Validate the complete batch before the first backing-store mutation.
     for (const raw of body.transfers) {
@@ -419,11 +474,18 @@ export function registerAccountOwnedResourceRoutes(api: Hono, deps: PanelDeps): 
       const resourceType = item.resource_type;
       const resourceId = typeof item.resource_id === 'string' ? item.resource_id.trim() : '';
       const toUserId = typeof item.to_user_id === 'string' ? item.to_user_id.trim() : '';
+      const fromAgentId = typeof item.from_agent_id === 'string' ? item.from_agent_id.trim() : undefined;
       const toAgentId = typeof item.to_agent_id === 'string' ? item.to_agent_id.trim() : undefined;
       if (!['team', 'agent', 'task', 'asset'].includes(String(resourceType)) || !resourceId || !toUserId) {
         return respondControlError(c, 400, 'INVALID_TRANSFERS');
       }
-      const transfer = { resource_type: resourceType, resource_id: resourceId, to_user_id: toUserId, to_agent_id: toAgentId } as Transfer;
+      const transfer = {
+        resource_type: resourceType,
+        resource_id: resourceId,
+        to_user_id: toUserId,
+        from_agent_id: fromAgentId,
+        to_agent_id: toAgentId,
+      } as Transfer;
       const targetEnv = await deps.metaKernel.invoke(
         'team-member/get',
         { team_id: teamId, user_id: toUserId },
@@ -439,9 +501,63 @@ export function registerAccountOwnedResourceRoutes(api: Hono, deps: PanelDeps): 
         const asset = assetEnv.data as BoundAsset | null;
         if (!asset || asset.team_id !== teamId) return respondControlError(c, 400, 'RESOURCE_TEAM_MISMATCH');
         if (asset.owner_user_id !== callerId) return respondControlError(c, 403, 'NOT_RESOURCE_OWNER');
-        if (asset.asset_type === 'skill') {
-          if (!toAgentId) return respondControlError(c, 400, 'TARGET_AGENT_REQUIRED');
-          const targetAgentEnv = await deps.metaKernel.invoke('agent/get', { agent_id: toAgentId }, ctx);
+        if (['skill', 'llm_wiki', 'code_graph', 'chat_memory'].includes(asset.asset_type)) {
+          if (!fromAgentId) return respondControlError(c, 400, 'SOURCE_AGENT_REQUIRED');
+          const sourceAgentEnv = await deps.metaKernel.invoke('agent/get', { agent_id: fromAgentId }, ctx);
+          if (sourceAgentEnv.code !== 0) return respondEnvelope(c, sourceAgentEnv);
+          const sourceAgent = sourceAgentEnv.data as { team_id?: string; owner_user_id?: string; status?: string } | null;
+          if (!sourceAgent || sourceAgent.team_id !== teamId || sourceAgent.owner_user_id !== callerId) {
+            return respondControlError(c, 409, 'SOURCE_AGENT_NOT_OWNED');
+          }
+          const sourceBindings = await listAgentBoundAssets(deps, ctx, fromAgentId);
+          if (!sourceBindings.some((binding) => binding.asset_id === resourceId)) {
+            return respondControlError(c, 409, 'SOURCE_ASSET_BINDING_NOT_FOUND');
+          }
+
+          let resolvedTargetAgentId = toAgentId ?? automaticTargetAgentByUser.get(toUserId);
+          if (!resolvedTargetAgentId) {
+            const agentsEnv = await deps.metaKernel.invoke('agent/list', {
+              team_id: teamId,
+              owner_user_id: toUserId,
+              status: 'active',
+              limit: 2,
+              offset: 0,
+            }, ctx);
+            if (agentsEnv.code !== 0) return respondEnvelope(c, agentsEnv);
+            const targetAgents = extractListItems<{ agent_id: string; metadata_json?: string }>(agentsEnv);
+            const handoffAgent = targetAgents.find((candidate) => {
+              try {
+                const metadata = JSON.parse(candidate.metadata_json ?? '{}') as {
+                  panel_provisioning?: { source?: string; created_for_user_id?: string };
+                };
+                return metadata.panel_provisioning?.source === 'ownership_handoff'
+                  && metadata.panel_provisioning.created_for_user_id === toUserId;
+              } catch {
+                return false;
+              }
+            });
+            if (handoffAgent) {
+              resolvedTargetAgentId = handoffAgent.agent_id;
+              automaticTargetAgentByUser.set(toUserId, resolvedTargetAgentId);
+            } else if (targetAgents.length > 0) {
+              return respondControlError(c, 400, 'TARGET_AGENT_REQUIRED');
+            }
+          }
+          if (!resolvedTargetAgentId) {
+            try {
+              resolvedTargetAgentId = (await createHandoffAgent(deps, ctx, teamId, toUserId)).agent_id;
+              automaticTargetAgentByUser.set(toUserId, resolvedTargetAgentId);
+            } catch (err) {
+              return respondControlError(c, 502, err instanceof Error ? err.message : 'HANDOFF_AGENT_CREATE_FAILED');
+            }
+          }
+          if (standaloneAssetTarget &&
+            (standaloneAssetTarget.user_id !== toUserId || standaloneAssetTarget.agent_id !== resolvedTargetAgentId)) {
+            return respondControlError(c, 400, 'ASSET_TRANSFER_TARGET_MUST_MATCH');
+          }
+          standaloneAssetTarget = { user_id: toUserId, agent_id: resolvedTargetAgentId };
+          transfer.to_agent_id = resolvedTargetAgentId;
+          const targetAgentEnv = await deps.metaKernel.invoke('agent/get', { agent_id: resolvedTargetAgentId }, ctx);
           if (targetAgentEnv.code !== 0) return respondEnvelope(c, targetAgentEnv);
           const targetAgent = targetAgentEnv.data as { team_id?: string; owner_user_id?: string; status?: string } | null;
           if (!targetAgent || targetAgent.team_id !== teamId || targetAgent.owner_user_id !== toUserId || targetAgent.status !== 'active') {
@@ -494,7 +610,7 @@ export function registerAccountOwnedResourceRoutes(api: Hono, deps: PanelDeps): 
     }
 
     const regular: Transfer[] = [];
-    const knowledge: Array<Transfer & { asset_type: 'llm_wiki' | 'code_graph' }> = [];
+    const knowledge: Array<Transfer & { asset_type: 'llm_wiki' | 'code_graph'; from_agent_id: string; to_agent_id: string }> = [];
     const skills: Array<Transfer & { from_agent_id: string; to_agent_id: string }> = [];
     for (const transfer of requested) {
       if (transfer.resource_type !== 'asset') {
@@ -517,7 +633,15 @@ export function registerAccountOwnedResourceRoutes(api: Hono, deps: PanelDeps): 
         skills.push({ ...transfer, from_agent_id: backing.owner_agent_id, to_agent_id: transfer.to_agent_id });
       } else
       if (asset?.asset_type === 'llm_wiki' || asset?.asset_type === 'code_graph') {
-        knowledge.push({ ...transfer, asset_type: asset.asset_type });
+        if (!transfer.from_agent_id || !transfer.to_agent_id) {
+          return respondControlError(c, 400, 'TARGET_AGENT_REQUIRED');
+        }
+        knowledge.push({
+          ...transfer,
+          asset_type: asset.asset_type,
+          from_agent_id: transfer.from_agent_id,
+          to_agent_id: transfer.to_agent_id,
+        });
       } else {
         regular.push(transfer);
       }
@@ -615,6 +739,8 @@ export function registerAccountOwnedResourceRoutes(api: Hono, deps: PanelDeps): 
           asset_type: transfer.asset_type,
           from_owner_user_id: callerId,
           to_owner_user_id: transfer.to_user_id,
+          from_agent_id: transfer.from_agent_id,
+          to_agent_id: transfer.to_agent_id,
           idempotency_key: idempotencyKey,
         }));
       } catch (err) {

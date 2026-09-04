@@ -11,7 +11,7 @@ export const enUS = {
   'menu.code': 'Code_Graph',
   'menu.skills': 'Skills',
   'menu.chat_memory': 'Chat_Memory',
-  'menu.team_members': 'Members',
+  'menu.team_members': 'Team Management',
   'menu.team_agents': 'Agents',
   'menu.owned_resources': 'My Resource Dependencies',
   'menu.user_management': 'User Management',
@@ -37,6 +37,7 @@ export const enUS = {
   'menu.group.workbench': 'Workbench',
   'menu.group.organization': 'Organization',
   'menu.group.assets': 'Asset Management',
+  'menu.group.system': 'System Management',
   'menu.desc.workbench_board': 'Task list / create / detail',
   'menu.desc.team_atlas': 'Team / Task / Agent / Asset topology',
   'atlas.title': 'Team Atlas',
@@ -184,10 +185,11 @@ export const enUS = {
   'resources.transfer.partial': '{{failed}} transfers failed. Refresh and retry failed items only.',
   'resources.transfer.success': 'Transferred {{count}} resources.',
   'resources.transfer.targetUser': 'Recipient',
-  'resources.transfer.targetAgent': 'Recipient Agent for Skills',
+  'resources.transfer.targetAgent': 'Recipient Agent for assets',
   'resources.transfer.targetAgentHint':
-    'The Skill backing owner_agent_id and fixed binding move to this Agent together.',
-  'resources.transfer.noTargetAgent': 'This user has no active Agent that can receive the Skill.',
+    'Standalone Skill, Wiki, Code Graph, and Chat Memory transfers in this batch share this Agent; ownership and fixed bindings move together.',
+  'resources.transfer.noTargetAgent':
+    'This user has no active Agent. A Team-template Agent will be created when you confirm the transfer.',
   'resources.desc':
     'Inspect resources you own in every Team. Permanent purge is available only for your resources while membership is active.',
   'resources.membership': 'membership',
@@ -1529,6 +1531,13 @@ export const enUS = {
   'error.ALREADY_ALLOCATED':
     'This asset has already been allocated to this Agent. No need to allocate again.',
   'error.IMPORT_LIMIT_EXCEEDED': 'An Agent can borrow at most 2 memories from other Agents.',
+  'error.TARGET_AGENT_REQUIRED': "Select one of the recipient's active Agents.",
+  'error.SOURCE_AGENT_REQUIRED': 'The currently attached Agent could not be resolved. Refresh and retry.',
+  'error.SOURCE_AGENT_NOT_OWNED': 'The source Agent is not owned by the current user.',
+  'error.SOURCE_ASSET_BINDING_NOT_FOUND': 'The source Agent binding changed. Refresh and retry.',
+  'error.TARGET_AGENT_NOT_ACTIVE': 'The target Agent is inactive, missing, or not owned by the recipient.',
+  'error.ASSET_TRANSFER_TARGET_MUST_MATCH': 'Standalone assets in one batch must use one recipient and one Agent.',
+  'error.HANDOFF_AGENT_CREATE_FAILED': 'Could not create a default Agent for the recipient.',
   'error.ASSET_PRIVATE_INACCESSIBLE':
     'This asset has been set to private by its owner. You do not have access.',
   'error.ASSET_NOT_BINDABLE':

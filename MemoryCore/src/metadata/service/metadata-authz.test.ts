@@ -384,19 +384,30 @@ describe("MetadataService caller-scoped personnel and Team authorization", () =>
     expect(await service.getAssetById(borrowedMemoryId)).toMatchObject({ owner_user_id: recipient.user_id });
   });
 
-  it("allows standalone Chat Memory transfer without changing its Agent owner", async () => {
+  it("moves standalone Chat Memory ownership and binding to a recipient Agent", async () => {
     const owner = await user("memory-owner");
     const recipient = await user("memory-recipient");
     const team = await service.createTeam({ name: "memory-handoff", owner_user_id: owner.user_id });
     await service.addTeamMember({ team_id: team.team_id, user_id: recipient.user_id, role: "member" });
     const agent = await service.createAgent({ team_id: team.team_id, owner_user_id: owner.user_id, name: "agent" });
+    const recipientAgent = await service.createAgent({
+      team_id: team.team_id,
+      owner_user_id: recipient.user_id,
+      name: "recipient-agent",
+    });
     const memoryId = `chat_memory-${team.team_id}-${agent.agent_id}`;
     const calls: Array<{ teamId: string; agentId: string; fromOwnerUserId: string; toOwnerUserId: string }> = [];
     service.setChatMemoryOwnerTransfer(async (input) => { calls.push(input); return { l0Updated: 1, l1Updated: 0 }; });
 
     const result = await service.transferOwnershipForCaller({
       team_id: team.team_id,
-      transfers: [{ resource_type: "asset", resource_id: memoryId, to_user_id: recipient.user_id }],
+      transfers: [{
+        resource_type: "asset",
+        resource_id: memoryId,
+        to_user_id: recipient.user_id,
+        from_agent_id: agent.agent_id,
+        to_agent_id: recipientAgent.agent_id,
+      }],
       idempotency_key: "77777777-7777-4777-8777-777777777777",
     }, ctx(owner.user_id));
 
@@ -404,6 +415,35 @@ describe("MetadataService caller-scoped personnel and Team authorization", () =>
     expect(calls).toEqual([{ teamId: team.team_id, agentId: agent.agent_id, fromOwnerUserId: owner.user_id, toOwnerUserId: recipient.user_id }]);
     expect(await service.getAgentById(agent.agent_id)).toMatchObject({ owner_user_id: owner.user_id });
     expect(await service.getAssetById(memoryId)).toMatchObject({ owner_user_id: recipient.user_id });
+    expect((await service.listAgentFixedAssets(agent.agent_id)).items).not.toEqual(
+      expect.arrayContaining([expect.objectContaining({ asset_id: memoryId })]),
+    );
+    expect((await service.listAgentFixedAssets(recipientAgent.agent_id)).items).toEqual(
+      expect.arrayContaining([expect.objectContaining({ asset_id: memoryId })]),
+    );
+  });
+
+  it("creates one idempotent handoff Agent only for an active Team member", async () => {
+    const owner = await user("handoff-owner");
+    const recipient = await user("handoff-recipient");
+    const outsider = await user("handoff-outsider");
+    const team = await service.createTeam({ name: "handoff-agent", owner_user_id: owner.user_id });
+    await service.addTeamMember({ team_id: team.team_id, user_id: recipient.user_id, role: "member" });
+    const input = {
+      team_id: team.team_id,
+      owner_user_id: recipient.user_id,
+      name: "default-agent-handoff-recipient",
+      visibility: "team" as const,
+    };
+
+    const first = await service.createAgentForHandoffInternal(input);
+    const retry = await service.createAgentForHandoffInternal(input);
+    expect(retry.agent_id).toBe(first.agent_id);
+    await expect(service.createAgentForHandoffInternal({
+      ...input,
+      owner_user_id: outsider.user_id,
+      name: "default-agent-outsider",
+    })).rejects.toMatchObject({ code: "target_not_active_member" });
   });
 
   it("refuses a direct Agent metadata commit while owned Knowledge backing is uncoordinated", async () => {

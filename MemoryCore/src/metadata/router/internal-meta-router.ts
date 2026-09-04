@@ -22,6 +22,8 @@ import {
   internalAssetGetSchema,
   internalAssetPrepareTransferSchema,
   internalAssetResolveTransferSchema,
+  internalBoundAssetFinalizeTransferSchema,
+  internalAgentCreateForHandoffSchema,
   internalSkillFinalizeTransferSchema,
   internalSkillTransferOwnerSchema,
   internalListUsersByInstanceSchema,
@@ -97,6 +99,14 @@ const routeTable: Record<string, InternalHandler> = {
   [`${V3_INTERNAL_PREFIX}/asset/finalize-transfer`]: bind(
     internalAssetFinalizeTransferSchema,
     (d, svc) => svc.finalizeAssetTransferInternal(d),
+  ),
+  [`${V3_INTERNAL_PREFIX}/asset/finalize-bound-transfer`]: bind(
+    internalBoundAssetFinalizeTransferSchema,
+    (d, svc) => svc.finalizeBoundAssetTransferInternal(d),
+  ),
+  [`${V3_INTERNAL_PREFIX}/agent/create-for-handoff`]: bind(
+    internalAgentCreateForHandoffSchema,
+    (d, svc) => svc.createAgentForHandoffInternal(d),
   ),
   [`${V3_INTERNAL_PREFIX}/asset/prepare-transfer`]: bind(
     internalAssetPrepareTransferSchema,

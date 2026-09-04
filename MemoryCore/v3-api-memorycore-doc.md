@@ -1022,12 +1022,14 @@ Panel 对本人暴露统一 `/api/v1/account/ownership/transfer`，Core 元数�
 保持附着；绑定的 Skill、Wiki、Code Graph、Chat Memory 中，当前 owner 与原 Agent owner
 相同的资产 metadata 同步迁移，其他 owner 的共享资产保持不变。Agent 所拥有的绑定 Chat
 Memory 对应 L0/L1 `owner_user_id` 先迁移并在失败时补偿，原始 `user_id` 保持不变。Task
-只改 `owner_user_id`。四类绑定资产也可单独处理：Chat Memory 只迁移其 runtime 与 metadata
-owner，不改变 Agent；Skill 必须指定接收用户的 active Agent，同时迁移所有版本的
-`owner_agent_id`、metadata owner 和 fixed binding，并保留 `user_id`/`created_by` 审计字段。
+只改 `owner_user_id`。四类绑定资产也可单独处理：Chat Memory 同步迁移 runtime owner；
+Skill、Wiki、Code Graph、Chat Memory 都必须同时指定 `from_agent_id/to_agent_id`，在事务中
+把 fixed binding 从原 Agent 移到接收用户的 active Agent，并迁移 backing/metadata owner。
+Chat Memory 若会让目标 Agent 超过 2 条外部记忆则返回 `IMPORT_LIMIT_EXCEEDED`，owner 与
+绑定都不改变。历史 `user_id`/`created_by` 审计字段保持不变。
 
 跨服务 Wiki/Code Graph 与 Agent Chat Memory 使用持久化 operation，内部路由为
-`/v3/internal/meta/asset/{prepare-transfer,finalize-transfer,resolve-transfer,get,finalize-delete}`
+`/v3/internal/meta/asset/{prepare-transfer,finalize-transfer,finalize-bound-transfer,resolve-transfer,get,finalize-delete}`
 与 `/v3/internal/meta/skill/{transfer-owner,finalize-transfer}`。这些路由只接受 gateway Bearer，不属于普通
 用户 API；operation 未完成或 `inconsistent_retryable` 会继续阻止成员离组。
 

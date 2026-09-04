@@ -94,14 +94,14 @@ export function usePageMeta(): Record<PageId, PageMeta> {
       id: 'user_management',
       label: t('menu.user_management'),
       desc: t('menu.desc.user_management'),
-      group: t('menu.group.organization'),
+      group: t('menu.group.system'),
       order: 0,
     },
     zombie_resources: {
       id: 'zombie_resources',
       label: t('menu.zombie_resources'),
       desc: t('menu.desc.zombie_resources'),
-      group: t('menu.group.organization'),
+      group: t('menu.group.system'),
       order: 1,
     },
     team_members: {
@@ -109,34 +109,34 @@ export function usePageMeta(): Record<PageId, PageMeta> {
       label: t('menu.team_members'),
       desc: t('menu.desc.team_members'),
       group: t('menu.group.organization'),
-      order: 2,
+      order: 0,
     },
     team_agents: {
       id: 'team_agents',
       label: t('menu.team_agents'),
       desc: t('menu.desc.team_agents'),
       group: t('menu.group.organization'),
-      order: 3,
+      order: 1,
     },
     owned_resources: {
       id: 'owned_resources',
       label: t('menu.owned_resources'),
       desc: t('menu.desc.owned_resources'),
       group: t('menu.group.organization'),
-      order: 4,
+      order: 2,
     },
     api_keys: {
       id: 'api_keys',
       label: t('menu.api_keys'),
       desc: t('menu.desc.api_keys'),
       group: t('menu.group.organization'),
-      order: 5,
+      order: 3,
     },
   };
 }
 
 /** 分组排序顺序 */
-export const GROUP_ORDER_KEYS = ['workbench', 'organization', 'assets'] as const;
+export const GROUP_ORDER_KEYS = ['workbench', 'organization', 'assets', 'system'] as const;
 
 /** 每个页面在侧边栏菜单中的图标（Tea 官方图标，size 16） */
 export const ITEM_ICON: Record<PageId, JSX.Element> = {
@@ -173,7 +173,7 @@ export const ITEM_ICON: Record<PageId, JSX.Element> = {
   chat_memory: <ChatIcon size={16} />,
 };
 
-/** 分组图标（工作台 / 组织与权限 / 资产管理） */
+/** 分组图标（工作台 / 组织与权限 / 资产管理 / 系统管理） */
 export const GROUP_ICON: Record<string, JSX.Element> = {
   workbench: (
     <svg
@@ -217,6 +217,19 @@ export const GROUP_ICON: Record<string, JSX.Element> = {
       <path d="M12 2l9 5-9 5-9-5 9-5z" />
       <path d="M3 12l9 5 9-5" />
       <path d="M3 17l9 5 9-5" />
+    </svg>
+  ),
+  system: (
+    <svg
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.8"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <path d="M12 3l7 3v5c0 4.6-2.8 8.2-7 10-4.2-1.8-7-5.4-7-10V6l7-3z" />
+      <path d="M9 12l2 2 4-4" />
     </svg>
   ),
 };
