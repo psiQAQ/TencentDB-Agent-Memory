@@ -76,6 +76,34 @@ async function listAgentBoundAssets(
   return assets;
 }
 
+async function listInactiveOwnedAgentChildIds(
+  deps: PanelDeps,
+  ctx: MetaCallContext,
+  teamId: string,
+  ownerUserId: string,
+): Promise<Set<string>> {
+  const result = new Set<string>();
+  for (let offset = 0; ; offset += 100) {
+    const env = await deps.metaKernel.invoke('agent/list', {
+      team_id: teamId,
+      owner_user_id: ownerUserId,
+      status: 'inactive',
+      limit: 100,
+      offset,
+    }, ctx);
+    if (env.code !== 0) throw new Error(env.message || 'INACTIVE_AGENT_LIST_FAILED');
+    const agents = extractListItems<{ agent_id: string }>(env);
+    for (const agent of agents) {
+      for (const asset of await listAgentBoundAssets(deps, ctx, agent.agent_id)) {
+        result.add(asset.asset_id);
+      }
+    }
+    const total = (env.data as { total?: number } | null)?.total ?? agents.length;
+    if (agents.length === 0 || offset + agents.length >= total) break;
+  }
+  return result;
+}
+
 async function transferKnowledgeWithJournal(
   deps: PanelDeps,
   ctx: MetaCallContext,
@@ -509,6 +537,9 @@ export function registerAccountOwnedResourceRoutes(api: Hono, deps: PanelDeps): 
           if (!sourceAgent || sourceAgent.team_id !== teamId || sourceAgent.owner_user_id !== callerId) {
             return respondControlError(c, 409, 'SOURCE_AGENT_NOT_OWNED');
           }
+          if (sourceAgent.status !== 'active') {
+            return respondControlError(c, 409, 'SOURCE_AGENT_NOT_ACTIVE');
+          }
           const sourceBindings = await listAgentBoundAssets(deps, ctx, fromAgentId);
           if (!sourceBindings.some((binding) => binding.asset_id === resourceId)) {
             return respondControlError(c, 409, 'SOURCE_ASSET_BINDING_NOT_FOUND');
@@ -789,6 +820,20 @@ export function registerAccountOwnedResourceRoutes(api: Hono, deps: PanelDeps): 
     if (memberEnv.code !== 0) return respondEnvelope(c, memberEnv);
     const membership = memberEnv.data as { status?: string } | null;
     if (membership?.status !== 'active') return respondControlError(c, 403, 'ACTIVE_TEAM_MEMBERSHIP_REQUIRED');
+
+    let inactiveAgentChildren: Set<string>;
+    try {
+      inactiveAgentChildren = await listInactiveOwnedAgentChildIds(deps, ctx, teamId, callerId);
+    } catch (err) {
+      return respondControlError(
+        c,
+        502,
+        err instanceof Error ? err.message : 'INACTIVE_AGENT_CHILD_LOOKUP_FAILED',
+      );
+    }
+    if (refs.some((ref) => ref.resource_type === 'asset' && inactiveAgentChildren.has(ref.resource_id))) {
+      return respondControlError(c, 409, 'INACTIVE_AGENT_CHILD_REQUIRES_AGENT_PURGE');
+    }
 
     const validated: OwnedEntity[] = [];
     const alreadyAbsent: ResourceRef[] = [];

@@ -141,17 +141,6 @@ export class MetadataError extends Error {
   }
 }
 
-/**
- * 清空某个 (team, agent) 的 chat_memory 内容（L0/L1/L2/L3 + 向量 + 文件）。
- *
- * 由 gateway 装配处实现并注入（见 MetadataService.setChatMemoryContentCleaner），
- * 因为内容存放在 IMemoryStore / StorageAdapter，不在 metadata store 里。
- */
-export type ChatMemoryContentCleaner = (params: {
-  teamId: string;
-  agentId: string;
-}) => Promise<void>;
-
 export type ChatMemoryOwnerTransfer = (params: {
   teamId: string;
   agentId: string;
@@ -287,8 +276,6 @@ export class MetadataService {
   private readonly ensuredSkillAssets = new Map<string, true>();
   private static readonly SKILL_ENSURE_CACHE_SIZE = 4096;
 
-  /** 由 gateway 注入的 chat_memory 内容清理器；未注入时归档只删资产不清内容。 */
-  private _chatMemoryContentCleaner?: ChatMemoryContentCleaner;
   private _chatMemoryOwnerTransfer?: ChatMemoryOwnerTransfer;
   private _operationalIntegrityHooks?: OperationalIntegrityHooks;
 
@@ -316,21 +303,6 @@ export class MetadataService {
 
   setConfigParamService(svc: import("./config-param-service.js").IConfigParamService): void {
     this._configParams = svc;
-  }
-
-  /**
-   * 注入「chat_memory 内容清理器」。
-   *
-   * 为什么用可选钩子而不是直接依赖 store：metadata 层只持有 IMetadataStore
-   * （元数据），拿不到 IMemoryStore / StorageAdapter（L0–L3 内容）。归档
-   * Agent 时要顺带删掉它的记忆内容，就需要由gateway 装配处把清理能力注入
-   * 进来 —— 与 setConfigParamService 同一模式，保持依赖方向不反转。
-   *
-   * 未注入时 archiveAgent 退化为原行为（只删资产，不清内容），因此
-   * 单测/ 迁移脚本等不装配该钩子的场景不受影响。
-   */
-  setChatMemoryContentCleaner(cleaner: ChatMemoryContentCleaner): void {
-    this._chatMemoryContentCleaner = cleaner;
   }
 
   setChatMemoryOwnerTransfer(transfer: ChatMemoryOwnerTransfer): void {
@@ -1011,36 +983,18 @@ export class MetadataService {
   }
 
   /**
-   * 归档（软关闭）agent。
+   * 归档（可恢复的软关闭）Agent。
    *
-   * 顺序很关键 —— **先清内容，再删资产**：
-   *   1. status → inactive
-   *   2.清空该 agent 的 chat_memory 内容（L0/L1/L2/L3 + 向量 + 文件）
-   *   3. 删除自身 chat_memory 资产记录（并级联清掉其它 agent 的借入绑定）
-   *
-   * 若把顺序颠倒（先删资产再清内容），资产记录一没，就再也无法从
-   * asset_id 定位到 (team, agent)，内容会变成**永久不可达的孤儿数据**
-   * 留在库里 —— 这正是本次修复的问题。
-   *
-   * 内容清理失败时**中止归档**并向上抛：宁可让调用方重试，也不要留下
-   * "资产已删、内容还在"的不一致状态。未注入 cleaner 时（单测 / 迁移
-   * 脚本）跳过第 2 步，退化为原行为。
+   * 归档只把 Agent 标记为 inactive。它拥有或借入的 Skill、Wiki、Code Graph、
+   * Chat Memory、backing data 和 fixed bindings 全部保留，因此重新激活同一
+   * Agent 后可以继续使用原配置。需要永久删除 Agent 及其资产时，必须走
+   * owned-resource lifecycle purge 的 backing-first 流程。
    */
   async archiveAgent(agentId: string): Promise<AgentEntity> {
     const existing = await this.getAgentById(agentId);
     if (!existing) throw new MetadataError("agent_not_found", `agent not found: ${agentId}`);
-    const archived = await this.updateAgent(agentId, { status: "inactive" });
-
-    if (this._chatMemoryContentCleaner) {
-      await this._chatMemoryContentCleaner({
-        teamId: existing.team_id,
-        agentId: existing.agent_id,
-      });
-    }
-
-    const selfMemoryAssetId = buildChatMemoryAssetId(existing.team_id, existing.agent_id);
-    await this.store.deleteAssets([selfMemoryAssetId]);
-    return archived;
+    if (existing.status === "inactive") return existing;
+    return this.updateAgent(agentId, { status: "inactive" });
   }
 
   // ============================================================
@@ -2169,6 +2123,12 @@ export class MetadataService {
         const agent = await this.getAgentById(transfer.resource_id);
         if (!agent || agent.team_id !== input.team_id) throw new MetadataError("agent_not_found", "agent not found");
         this.assertCallerIsResourceOwner(ctx, agent.owner_user_id);
+        if (agent.status !== "active") {
+          throw new MetadataError(
+            "inactive_agent_cannot_transfer",
+            "Inactive Agents cannot transfer ownership; reactivate or permanently purge the Agent",
+          );
+        }
         for (let offset = 0; ; offset += 100) {
           const page = await this.store.listAgentFixedAssets(transfer.resource_id, { limit: 100, offset });
           for (const binding of page.items) {
@@ -2204,6 +2164,29 @@ export class MetadataService {
         }
         if (asset.asset_type === "chat_memory" && (!transfer.from_agent_id || !transfer.to_agent_id)) {
           throw new MetadataError("target_agent_required", "standalone Chat Memory transfer requires source and target Agents");
+        }
+        if (asset.asset_type === "chat_memory") {
+          const sourceAgent = await this.getAgentById(transfer.from_agent_id!);
+          if (
+            !sourceAgent
+            || sourceAgent.team_id !== input.team_id
+            || sourceAgent.owner_user_id !== callerId
+            || sourceAgent.status !== "active"
+          ) {
+            throw new MetadataError(
+              "source_agent_not_active",
+              "Assets attached to an inactive Agent cannot transfer independently",
+            );
+          }
+          const targetAgent = await this.getAgentById(transfer.to_agent_id!);
+          if (
+            !targetAgent
+            || targetAgent.team_id !== input.team_id
+            || targetAgent.owner_user_id !== transfer.to_user_id
+            || targetAgent.status !== "active"
+          ) {
+            throw new MetadataError("target_agent_not_active", "target Agent must be active and owned by the recipient");
+          }
         }
       }
     }

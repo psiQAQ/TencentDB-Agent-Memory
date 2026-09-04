@@ -932,11 +932,13 @@ finding 存在时均拒绝，membership 不变。
 | `POST /agent/update` | 更新（owner 不可改） |
 | `POST /agent/delete` | 批量删除 |
 | `POST /agent/list` | active member 按 Team 列表；owner 分支只能查 caller 自己 |
-| `POST /agent/archive` | 归档 |
+| `POST /agent/archive` | 可恢复归档：仅设为 inactive，保留全部资产和 binding |
 
 **create 请求体**：`team_id`、`owner_user_id`、`name`、`description?`、`prompt?`、`visibility?`、`status?`、`metadata_json?`。
 创建者只能把 owner 设为 caller。存在派生 Chat Memory/Skill/backing 的 Agent 不能通过公开
 delete 绕过 lifecycle coordinator。
+inactive Agent 不可转移 ownership；`agent/update` 由 owner 将 status 恢复为 `active` 后，
+原有资产和 fixed binding 继续生效。永久删除必须使用 owner lifecycle purge。
 **list 请求体**：`team_id`/`owner_user_id`/`owner_user_key`(至少一) + `status?`、`name?` + 分页。
 
 **AgentEntity 响应**：`{ agent_id, team_id, owner_user_id, name, description?, prompt?, visibility, status, created_at, updated_at, metadata_json }`。

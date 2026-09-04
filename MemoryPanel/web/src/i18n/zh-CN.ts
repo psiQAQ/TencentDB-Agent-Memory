@@ -203,6 +203,10 @@ export const zhCN = {
   'resources.purge.success': '已永久清理 {{count}} 项资源。',
   'resources.purge.partial':
     '已清理 {{deleted}} 项，{{failed}} 项失败；失败项 metadata 已保留，可修复后重试。',
+  'resources.inactiveAgent':
+    '该 Agent 已归档。不可转移 ownership；只能选择 Agent 本身进行永久清理，其关联资产会一并删除。',
+  'resources.restoreAgent': '激活恢复',
+  'resources.restoreAgent.success': 'Agent「{{name}}」及其保留的资产已恢复可用。',
   'resources.filter.allTeams': '全部 Team',
   'resources.filter.allTypes': '全部类型',
   'resources.filter.allStatuses': '全部状态',
@@ -1010,13 +1014,15 @@ export const zhCN = {
   'team.emptyTeam.cta': '创建第一个 Team',
   'team.emptyTeam.contactAdmin':
     '你还没有被加入任何 team。请联系实例管理员将你加入团队，或由管理员代为创建 team。',
-  'team.deleteAgent.confirm': '确认删除 Agent「{{name}}」？',
-  'team.deleteAgent.desc': '{{id}} 删除后不可恢复。',
+  'team.deleteAgent.confirm': '确认归档 Agent「{{name}}」？',
+  'team.deleteAgent.desc':
+    '{{id}} 仅会转为 inactive；关联的 Skill、Wiki、Code Graph、Chat Memory 及其绑定全部保留，可稍后激活恢复。如需彻底删除 Agent 及其资产，请到“我的资源依赖”执行永久清理。',
+  'team.deleteAgent.action': '确认归档',
+  'team.deleteAgent.success': 'Agent「{{name}}」已归档，关联资产已保留。',
   'team.deleteAgent.noPermission':
     '你不是 agent「{{name}}」({{id}}) 的 owner，也不是 team「{{teamName}}」的管理员，无法删除。owner: {{owner}}',
   'team.deleteAgent.ownerUnset': '（未设置）',
-  'team.deleteAgent.skillFailed':
-    'Agent「{{name}}」未删除：级联删除 Skill 中途失败。请到 Skill 面板检查并重试。原始错误：{{raw}}',
+  'team.restoreAgent.success': 'Agent「{{name}}」及其关联资产已激活恢复。',
 
   // ===== CreateTeamDialog =====
   'createTeam.caption': '创建 Team',
@@ -1119,9 +1125,13 @@ export const zhCN = {
   'agentGrid.card.id': 'id: {{id}}',
   'agentGrid.card.owner': 'owner',
   'agentGrid.card.readonly': '· 只读',
-  'agentGrid.card.delete': '删除',
-  'agentGrid.card.delete.tooltip.can': '删除该 Agent',
-  'agentGrid.card.delete.tooltip.cannot': '你没有删除该 Agent 的权限',
+  'agentGrid.card.delete': '归档',
+  'agentGrid.card.delete.tooltip.can': '将该 Agent 转为 inactive，并保留关联资产',
+  'agentGrid.card.delete.tooltip.cannot': '你没有归档该 Agent 的权限',
+  'agentGrid.card.restore': '激活恢复',
+  'agentGrid.card.restore.tooltip.can': '恢复该 Agent 及其保留的资产绑定',
+  'agentGrid.card.restore.tooltip.cannot': '你没有恢复该 Agent 的权限',
+  'agentGrid.status.inactive': '已归档',
   'agentGrid.card.edit.tooltip.can': '点击查看并编辑该 Agent',
   'agentGrid.card.edit.tooltip.cannot': '仅 owner（{{owner}}）可编辑',
   'agentGrid.card.ownerUnset': '未设置',
@@ -1130,7 +1140,8 @@ export const zhCN = {
   'agentGrid.table.assets': '挂载资产',
   'agentGrid.table.desc': '描述',
   'agentGrid.table.actions': '操作',
-  'agentGrid.table.delete': '删除',
+  'agentGrid.table.delete': '归档',
+  'agentGrid.table.restore': '激活恢复',
   'agentGrid.owner.you': '（你）',
   'agentGrid.defaultCreate.hint':
     '你在当前 Team 尚无自有 Agent。可显式确认从 Team 默认模板创建；也可继续使用“新建 Agent”手动创建。',
@@ -1486,8 +1497,14 @@ export const zhCN = {
   'error.TARGET_AGENT_REQUIRED': '请选择接收用户的 active Agent。',
   'error.SOURCE_AGENT_REQUIRED': '无法确定该资产当前绑定的 Agent，请刷新后重试。',
   'error.SOURCE_AGENT_NOT_OWNED': '该资产的来源 Agent 不属于当前用户。',
+  'error.SOURCE_AGENT_NOT_ACTIVE':
+    '该资产附着的 Agent 已归档，不能单独转移资产。请先激活 Agent，或永久清理整个 Agent。',
   'error.SOURCE_ASSET_BINDING_NOT_FOUND': '资产与来源 Agent 的绑定已变化，请刷新后重试。',
   'error.TARGET_AGENT_NOT_ACTIVE': '目标 Agent 不存在、已停用或不属于接收用户。',
+  'error.INACTIVE_AGENT_CANNOT_TRANSFER':
+    '已归档 Agent 不可转移 ownership；请先激活恢复，或永久清理。',
+  'error.INACTIVE_AGENT_CHILD_REQUIRES_AGENT_PURGE':
+    '已归档 Agent 下的资产不能单独清理；请选择 Agent 本身执行永久清理。',
   'error.ASSET_TRANSFER_TARGET_MUST_MATCH': '同批独立资产必须转给同一用户的同一个 Agent。',
   'error.HANDOFF_AGENT_CREATE_FAILED': '无法为接收用户创建默认 Agent。',
   'error.ASSET_PRIVATE_INACCESSIBLE': '该资产已被 owner 设为私密，你无权访问。',

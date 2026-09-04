@@ -163,8 +163,10 @@ ownership 不随 membership 自动转移或删除。移除成员或删除账号�
      Code Graph、Chat Memory）中，owner 与原 Agent owner 相同的资产及相应 backing
      ownership 一并转移，其他成员拥有的共享资产保留原 owner 和绑定。历史
      `user_id`/`creator_user_id` 不改写。即使同时勾选 Agent 和其子资产，Panel 也会归一化
-     为一次 Agent 聚合转移，不会把四类子资产重复提交。未勾选 Agent 时，四类子资产仍可
-     各自转移或永久清理；借入可见但非本人 owner 的资产只展示，不能勾选。
+     为一次 Agent 聚合转移，不会把四类子资产重复提交。active Agent 未被勾选时，四类
+     子资产仍可各自转移或永久清理；借入可见但非本人 owner 的资产只展示，不能勾选。
+     inactive Agent 不可转移 ownership；只能选择 Agent 根进行永久清理，其下资产不可
+     单独勾选。也可先点击“激活恢复”，恢复同一 Agent 及其保留的资产绑定。
    - “永久清理”：先清 backing data，再清 metadata 和关系。普通 Agent“归档”不等于
      解除 ownership。
 4. ownership 和活动授权归零后，成员可点击“退出当前 Team”，Team owner/admin 也可再次
@@ -176,6 +178,10 @@ ownership 不随 membership 自动转移或删除。移除成员或删除账号�
 所有状态的 Agent、Task、细分 Asset、活动 ACL 和未完成 lifecycle operation；有依赖时
 返回结构化 `409` 且 membership 保持不变。成员不能带着资源主动退出，也不能被 admin
 强制移出。
+
+Agents 管理中的“归档”只把 Agent 设为 `inactive`，不会删除其 Skill、Wiki、Code Graph、
+Chat Memory、backing data 或 fixed binding。确认框会明确提示该操作可恢复；需要彻底删除
+时必须到“我的资源依赖”选择 inactive Agent 根执行“永久清理”。
 `user/delete` 同样检查所有状态的 Team、Agent、Task、Asset，批量请求中任一用户有依赖
 都会整批拒绝。`system_admin` 可在用户详情查看依赖名称、状态、Team 和 membership，
 但页面不提供业务资源清理或 membership 修改按钮；它也不能代替资源 owner 清理。

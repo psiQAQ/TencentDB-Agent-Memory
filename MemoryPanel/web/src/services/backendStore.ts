@@ -52,6 +52,7 @@ export interface Agent {
   agent_id: string;
   team_id: string;
   owner_user_id: string;
+  status: 'active' | 'inactive';
   name: string;
   description: string;
   role_prompt: string;
@@ -222,6 +223,7 @@ export function adaptAgent(ba: BackendAgent, index: number): Agent {
     agent_id: ba.agent_id,
     team_id: ba.team_id,
     owner_user_id: ba.owner_user_id,
+    status: ba.status,
     name: ba.name,
     description: ba.description ?? '',
     role_prompt: rolePrompt,

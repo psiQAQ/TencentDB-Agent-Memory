@@ -384,6 +384,48 @@ describe("MetadataService caller-scoped personnel and Team authorization", () =>
     expect(await service.getAssetById(borrowedMemoryId)).toMatchObject({ owner_user_id: recipient.user_id });
   });
 
+  it("archives an Agent without deleting assets or bindings and blocks transfer until restored", async () => {
+    const owner = await user("archive-owner");
+    const recipient = await user("archive-recipient");
+    const team = await service.createTeam({ name: "archive-team", owner_user_id: owner.user_id });
+    await service.addTeamMember({ team_id: team.team_id, user_id: recipient.user_id, role: "member" });
+    const agent = await service.createAgent({
+      team_id: team.team_id,
+      owner_user_id: owner.user_id,
+      name: "recoverable-agent",
+    });
+    const skill = await service.createAsset({
+      asset_id: "skill-preserved-by-archive",
+      team_id: team.team_id,
+      asset_type: "skill",
+      name: "preserved skill",
+      owner_user_id: owner.user_id,
+      source_type: "manual",
+    });
+    const selfMemoryId = `chat_memory-${team.team_id}-${agent.agent_id}`;
+    await service.setAgentFixedAssets(agent.agent_id, [
+      { asset_id: selfMemoryId, asset_type: "chat_memory", created_by: owner.user_id },
+      { asset_id: skill.asset_id, asset_type: "skill", created_by: owner.user_id },
+    ]);
+
+    await expect(service.archiveAgentForCaller(agent.agent_id, ctx(owner.user_id)))
+      .resolves.toMatchObject({ status: "inactive" });
+    expect(await service.getAssetById(selfMemoryId)).toMatchObject({ asset_id: selfMemoryId });
+    expect(await service.getAssetById(skill.asset_id)).toMatchObject({ asset_id: skill.asset_id });
+    expect((await service.listAgentFixedAssets(agent.agent_id)).items.map((item) => item.asset_id))
+      .toEqual(expect.arrayContaining([selfMemoryId, skill.asset_id]));
+
+    await expect(service.transferOwnershipForCaller({
+      team_id: team.team_id,
+      transfers: [{ resource_type: "agent", resource_id: agent.agent_id, to_user_id: recipient.user_id }],
+      idempotency_key: "99999999-9999-4999-8999-999999999999",
+    }, ctx(owner.user_id))).rejects.toMatchObject({ code: "inactive_agent_cannot_transfer" });
+
+    await expect(service.updateAgentForCaller(agent.agent_id, { status: "active" }, ctx(owner.user_id)))
+      .resolves.toMatchObject({ status: "active" });
+    expect((await service.listAgentFixedAssets(agent.agent_id)).total).toBe(2);
+  });
+
   it("moves standalone Chat Memory ownership and binding to a recipient Agent", async () => {
     const owner = await user("memory-owner");
     const recipient = await user("memory-recipient");

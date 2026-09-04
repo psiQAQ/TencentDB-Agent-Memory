@@ -208,6 +208,10 @@ export const enUS = {
   'resources.purge.success': 'Permanently purged {{count}} resources.',
   'resources.purge.partial':
     'Purged {{deleted}} resources; {{failed}} failed. Failed metadata was retained and can be retried.',
+  'resources.inactiveAgent':
+    'This Agent is archived. Ownership transfer is disabled; select only the Agent itself for permanent purge, which also deletes its attached assets.',
+  'resources.restoreAgent': 'Reactivate',
+  'resources.restoreAgent.success': 'Agent "{{name}}" and its retained assets are active again.',
   'resources.filter.allTeams': 'All Teams',
   'resources.filter.allTypes': 'All Types',
   'resources.filter.allStatuses': 'All Statuses',
@@ -1028,13 +1032,15 @@ export const enUS = {
   'team.emptyTeam.cta': 'Create Your First Team',
   'team.emptyTeam.contactAdmin':
     "You haven't been added to any team yet. Please contact an instance admin to add you to a team, or have an admin create a team for you.",
-  'team.deleteAgent.confirm': 'Delete Agent "{{name}}"?',
-  'team.deleteAgent.desc': '{{id}} cannot be restored after deletion.',
+  'team.deleteAgent.confirm': 'Archive Agent "{{name}}"?',
+  'team.deleteAgent.desc':
+    '{{id}} will only become inactive. Its Skills, Wikis, Code Graphs, Chat Memories, and bindings are retained and can be reactivated later. To delete the Agent and its assets permanently, use My Resource Dependencies.',
+  'team.deleteAgent.action': 'Archive Agent',
+  'team.deleteAgent.success': 'Agent "{{name}}" was archived; its assets were retained.',
   'team.deleteAgent.noPermission':
     'You are not the owner of agent "{{name}}" ({{id}}) nor an admin of team "{{teamName}}". Cannot delete. Owner: {{owner}}',
   'team.deleteAgent.ownerUnset': '(not set)',
-  'team.deleteAgent.skillFailed':
-    'Agent "{{name}}" was not deleted: cascading skill deletion failed midway. Please check the Skill panel and retry. Original error: {{raw}}',
+  'team.restoreAgent.success': 'Agent "{{name}}" and its attached assets are active again.',
 
   // ===== CreateTeamDialog =====
   'createTeam.caption': 'Create Team',
@@ -1146,9 +1152,13 @@ export const enUS = {
   'agentGrid.card.id': 'id: {{id}}',
   'agentGrid.card.owner': 'owner',
   'agentGrid.card.readonly': '· Read-only',
-  'agentGrid.card.delete': 'Delete',
-  'agentGrid.card.delete.tooltip.can': 'Delete this Agent',
-  'agentGrid.card.delete.tooltip.cannot': 'You do not have permission to delete this Agent',
+  'agentGrid.card.delete': 'Archive',
+  'agentGrid.card.delete.tooltip.can': 'Set this Agent inactive and retain its attached assets',
+  'agentGrid.card.delete.tooltip.cannot': 'You do not have permission to archive this Agent',
+  'agentGrid.card.restore': 'Reactivate',
+  'agentGrid.card.restore.tooltip.can': 'Reactivate this Agent with its retained asset bindings',
+  'agentGrid.card.restore.tooltip.cannot': 'You do not have permission to reactivate this Agent',
+  'agentGrid.status.inactive': 'Archived',
   'agentGrid.card.edit.tooltip.can': 'Click to view and edit this Agent',
   'agentGrid.card.edit.tooltip.cannot': 'Only owner ({{owner}}) can edit',
   'agentGrid.card.ownerUnset': 'Not set',
@@ -1157,7 +1167,8 @@ export const enUS = {
   'agentGrid.table.assets': 'Mounted Assets',
   'agentGrid.table.desc': 'Description',
   'agentGrid.table.actions': 'Actions',
-  'agentGrid.table.delete': 'Delete',
+  'agentGrid.table.delete': 'Archive',
+  'agentGrid.table.restore': 'Reactivate',
   'agentGrid.owner.you': ' (you)',
   'agentGrid.defaultCreate.hint':
     'You do not own an Agent in this Team. Confirm to create from the Team default template, or use New Agent to create one manually.',
@@ -1532,11 +1543,20 @@ export const enUS = {
     'This asset has already been allocated to this Agent. No need to allocate again.',
   'error.IMPORT_LIMIT_EXCEEDED': 'An Agent can borrow at most 2 memories from other Agents.',
   'error.TARGET_AGENT_REQUIRED': "Select one of the recipient's active Agents.",
-  'error.SOURCE_AGENT_REQUIRED': 'The currently attached Agent could not be resolved. Refresh and retry.',
+  'error.SOURCE_AGENT_REQUIRED':
+    'The currently attached Agent could not be resolved. Refresh and retry.',
   'error.SOURCE_AGENT_NOT_OWNED': 'The source Agent is not owned by the current user.',
+  'error.SOURCE_AGENT_NOT_ACTIVE':
+    'The asset is attached to an archived Agent and cannot transfer independently. Reactivate or permanently purge the Agent.',
   'error.SOURCE_ASSET_BINDING_NOT_FOUND': 'The source Agent binding changed. Refresh and retry.',
-  'error.TARGET_AGENT_NOT_ACTIVE': 'The target Agent is inactive, missing, or not owned by the recipient.',
-  'error.ASSET_TRANSFER_TARGET_MUST_MATCH': 'Standalone assets in one batch must use one recipient and one Agent.',
+  'error.TARGET_AGENT_NOT_ACTIVE':
+    'The target Agent is inactive, missing, or not owned by the recipient.',
+  'error.INACTIVE_AGENT_CANNOT_TRANSFER':
+    'Archived Agents cannot transfer ownership. Reactivate or permanently purge the Agent.',
+  'error.INACTIVE_AGENT_CHILD_REQUIRES_AGENT_PURGE':
+    'Assets under an archived Agent cannot be purged separately. Select the Agent itself for permanent purge.',
+  'error.ASSET_TRANSFER_TARGET_MUST_MATCH':
+    'Standalone assets in one batch must use one recipient and one Agent.',
   'error.HANDOFF_AGENT_CREATE_FAILED': 'Could not create a default Agent for the recipient.',
   'error.ASSET_PRIVATE_INACCESSIBLE':
     'This asset has been set to private by its owner. You do not have access.',

@@ -103,7 +103,8 @@
 | POST | `/api/v1/agent-overview/bootstrap` | Agent 概览引导数据聚合 |
 | POST | `/api/v1/topology/bootstrap` | Team Atlas 可见拓扑聚合 |
 | POST | `/api/v1/chat-memory/status` | Chat Memory 四层数量状态（不返回正文） |
-| POST | `/api/v1/agent/delete-cascade` | 删除 Agent（级联清 skill 后 archive） |
+| POST | `/api/v1/agent/archive` | 可恢复归档 Agent；保留全部资产与绑定 |
+| POST | `/api/v1/agent/delete-cascade` | 兼容别名；语义同 `/agent/archive` |
 | POST | `/api/v1/agent/create-default` | 本人确认后幂等创建 Team 默认 Agent/资产 |
 | POST | `/api/v1/account/owned-resources/purge` | owner-only 永久清理业务资源 |
 | POST | `/api/v1/account/ownership/transfer` | owner 本人在 Team 内直接转移 ownership |
@@ -784,12 +785,13 @@ UI 在发请求前完成。
 **响应** `data`：`agent_id`、`agent_name`、`agent_created`、`failed_assets`。部分资产
 失败时 Agent 和成功项保留，再次调用可恢复。
 
-### POST /agent/delete-cascade
+### POST /agent/archive
 
-删除 Agent：先 backing-first 清理其 Skill、Chat Memory、关系，再调用内部 lifecycle
-finalizer 物理删除 metadata。公开 `agent/delete`/`asset/delete` 不能绕过受管资源清理。
+可恢复归档 Agent：只把 Agent metadata 状态设为 `inactive`，Skill、Wiki、Code Graph、
+Chat Memory、backing data 和 fixed binding 均保留。`/agent/delete-cascade` 是兼容旧客户端
+的别名，但不再执行级联删除。彻底删除只能走 `/account/owned-resources/purge`。
 
-**上游**：`skill/list`、`skill/delete`、`meta/agent/archive`。
+**上游**：`meta/agent/archive`。
 
 **请求体**：`{ agent_id: string }`
 
@@ -799,10 +801,9 @@ finalizer 物理删除 metadata。公开 `agent/delete`/`asset/delete` 不能绕
 |---|---|---|
 | archived | boolean | 固定 `true` |
 | agent_id | string | 被归档的 agent |
-| deleted_skill_count | number | 已删 skill 数 |
-| deleted_skill_ids | string[] | 已删 skill ID 列表 |
+| assets_preserved | boolean | 固定 `true`，关联资产和 binding 未删除 |
 
-**错误**：`MISSING_AGENT_ID`、`INVALID_USER_KEY`、`AGENT_NOT_FOUND`、`NOT_YOUR_AGENT`；任一 skill 删除失败返回 `500 SKILL_DELETE_FAILED`（含 `failed_skill_id`、`deleted_skill_ids`），此时 agent 不会 archive。
+**错误**：`MISSING_AGENT_ID`、`INVALID_USER_KEY`、`AGENT_NOT_FOUND`、`NOT_YOUR_AGENT`。
 
 **示例**
 
@@ -815,7 +816,7 @@ finalizer 物理删除 metadata。公开 `agent/delete`/`asset/delete` 不能绕
   "code": 0,
   "message": "ok",
   "request_id": "abc-123",
-  "data": { "archived": true, "agent_id": "agt_1", "deleted_skill_count": 2, "deleted_skill_ids": ["skl_1", "skl_2"] }
+  "data": { "archived": true, "agent_id": "agt_1", "assets_preserved": true }
 }
 ```
 
@@ -824,6 +825,8 @@ finalizer 物理删除 metadata。公开 `agent/delete`/`asset/delete` 不能绕
 由资源 owner 本人永久清理当前 Team 的 Agent、Task 或 Asset。caller 必须是目标 Team
 active member，并且必须是请求中每项资源的 owner/creator；先校验整批，任一越权时不
 删除任何项。Team owner/admin、`system_admin` 均不能代替其他 owner 调用。
+inactive Agent 下的四类子资产不能单独提交，必须选择该 Agent 根进行聚合永久清理；
+inactive Agent 也不能进入 ownership transfer。
 
 **请求体**：
 

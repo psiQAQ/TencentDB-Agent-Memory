@@ -51,6 +51,10 @@
   padding-left: 14px;
   border-left: 2px solid var(--tea-color-border-secondary);
 }
+.owned-resource-row__content {
+  flex: 1 1 auto;
+  min-width: 0;
+}
 .owned-resource-row__meta {
   margin-top: 3px;
   color: var(--tea-color-text-secondary);

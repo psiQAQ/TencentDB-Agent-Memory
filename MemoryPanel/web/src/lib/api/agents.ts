@@ -82,6 +82,15 @@ export const agentsApi = {
       owner_user_id: params?.owner_user_id,
     }),
 
+  /** Agents 管理专用：同时列出 active 与 inactive，其他业务选择器仍只使用 list()。 */
+  listIncludingInactive: async (teamId: string) => {
+    const [active, inactive] = await Promise.all([
+      metaListAll<Agent>('agent/list', { team_id: teamId, status: 'active' }),
+      metaListAll<Agent>('agent/list', { team_id: teamId, status: 'inactive' }),
+    ]);
+    return [...new Map([...active, ...inactive].map((agent) => [agent.agent_id, agent])).values()];
+  },
+
   /** agent 详情 */
   get: (agentId: string) => metaPost<Agent>('agent/get', { agent_id: agentId }),
 
@@ -119,15 +128,8 @@ export const agentsApi = {
     },
   ) => metaPost<Agent>('agent/update', { agent_id: agentId, ...data }),
 
-  /**
-   * 删除 agent：走业务路由 /api/v1/agent/delete-cascade。
-   *
-   * 该路由会先把 owner_agent_id = 当前 agent 的所有 active skill 走 skill/delete，
-   * 全部成功后才调 meta/agent/archive；任一 skill 删失败即中断，agent 不会被 archive，
-   * 抛出 SKILL_DELETE_FAILED 让调用方给用户展示（错误 data 里带上已删的 skill_ids
-   * 和失败的 skill_id）。归档时后端会顺手清 chat_memory asset。
-   */
-  delete: async (agentId: string) => {
+  /** 可恢复归档：仅把 Agent 设为 inactive，保留关联资产、backing data 和 bindings。 */
+  archive: async (agentId: string) => {
     const session = getPanelSession();
     if (!session) {
       throw new ApiError(401, 'Unauthorized', 'no active panel session');
@@ -136,12 +138,11 @@ export const agentsApi = {
       MetaEnvelope<{
         archived: boolean;
         agent_id: string;
-        deleted_skill_count: number;
-        deleted_skill_ids: string[];
+        assets_preserved: boolean;
       }>
     >(
       'POST',
-      '/api/v1/agent/delete-cascade',
+      '/api/v1/agent/archive',
       { agent_id: agentId },
       {
         'X-Tdai-Service-Id': session.instanceId,
@@ -156,6 +157,13 @@ export const agentsApi = {
       });
     }
   },
+
+  /** 恢复归档 Agent；关联资产从未删除，因此无需重新创建或重新绑定。 */
+  restore: (agentId: string) =>
+    metaPost<Agent>('agent/update', {
+      agent_id: agentId,
+      status: 'active',
+    }),
 
   /** 获取 agent 的资产聚合视图（binding + asset 详情）。
    *  用 metaListAll 翻页拉全量（list-with-detail 默认 limit 20，绑定资产一多会被截断）。

@@ -74,7 +74,7 @@ export default function TeamManagementPanel({
   const showAgents = section === 'agents' || section === 'all';
   const { activeTeamId, activeTeam, loading: teamsLoading } = useTeams();
   // 只取当前 team 的 agent — agent 严格归属 team，不会跨 team 显示
-  const { agents: allAgents, loading: agentsLoading } = useAgents(activeTeamId);
+  const { agents: allAgents, loading: agentsLoading } = useAgents(activeTeamId, true);
   const { t } = useTranslation();
   // Agent 可见性：
   //   - 当前 team 的 admin(owner)：可见 team 内全部 agent
@@ -155,7 +155,7 @@ export default function TeamManagementPanel({
     setShowCreateAgent(false);
   }
 
-  async function handleDeleteAgent(agent: StoreAgent) {
+  async function handleArchiveAgent(agent: StoreAgent) {
     if (!activeTeamId || !activeTeam) return;
     if (
       !canManageAsset(
@@ -180,21 +180,25 @@ export default function TeamManagementPanel({
     const ok = await tea.confirm({
       message: t('team.deleteAgent.confirm', { name: agent.name }),
       description: t('team.deleteAgent.desc', { id: agent.agent_id }),
-      okText: t('common.delete'),
+      okText: t('team.deleteAgent.action'),
     });
     if (!ok) return;
     try {
-      await agentsApi.delete(agent.agent_id);
+      await agentsApi.archive(agent.agent_id);
       invalidateBackendCache();
+      tea.notify.success(t('team.deleteAgent.success', { name: agent.name }));
     } catch (err) {
-      // SKILL_DELETE_FAILED：控制台层已删了一部分 skill 但被中断，agent 未 archive
-      // —— 明确告诉用户去 skill 面板处理后重试，别只给一句技术错误码
-      const raw = err instanceof Error ? err.message : String(err);
-      if (raw.includes('SKILL_DELETE_FAILED')) {
-        tea.notify.error(t('team.deleteAgent.skillFailed', { name: agent.name, raw }));
-      } else {
-        tea.notify.error(errMsg(err));
-      }
+      tea.notify.error(errMsg(err));
+    }
+  }
+
+  async function handleRestoreAgent(agent: StoreAgent) {
+    try {
+      await agentsApi.restore(agent.agent_id);
+      invalidateBackendCache();
+      tea.notify.success(t('team.restoreAgent.success', { name: agent.name }));
+    } catch (err) {
+      tea.notify.error(errMsg(err));
     }
   }
 
@@ -421,7 +425,8 @@ export default function TeamManagementPanel({
                   : undefined
               }
               onEditAgent={setEditingAgent}
-              onDeleteAgent={handleDeleteAgent}
+              onArchiveAgent={handleArchiveAgent}
+              onRestoreAgent={handleRestoreAgent}
             />
           )}
         </>

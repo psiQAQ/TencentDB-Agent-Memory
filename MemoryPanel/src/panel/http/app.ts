@@ -35,7 +35,7 @@ export function buildPanelApp(deps: PanelDeps): Hono {
   // Task 聚合路由：task/list + 批量 task-agent/list 一次返回
   registerTaskRoutes(api, deps);
   registerAgentOverviewRoutes(api, deps);
-  // Agent 生命周期业务路由：/agent/delete-cascade 在 control 层级联清 skill 再 archive
+  // Agent 生命周期业务路由：可恢复 archive 保留资产；永久删除只走 owned-resource purge
   registerAgentLifecycleRoutes(api, deps);
   registerKnowledgeRoutes(api, deps);
   registerTeamAtlasRoutes(api, deps);

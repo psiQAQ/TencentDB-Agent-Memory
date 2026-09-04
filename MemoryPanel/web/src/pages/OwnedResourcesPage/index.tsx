@@ -179,17 +179,38 @@ export function OwnedResourcesPage() {
     };
   }, [dependencies]);
 
+  const agentStatusById = useMemo(() => {
+    const result = new Map<string, string>();
+    for (const [, group] of groups) {
+      for (const item of group.items) {
+        if (item.resource_type === 'agent') result.set(item.resource_id, item.status);
+      }
+    }
+    return result;
+  }, [groups]);
+  const inactiveChildKeys = useMemo(() => {
+    const result = new Set<string>();
+    for (const [, group] of groups) {
+      for (const item of group.items) {
+        if (item.parent_agent_id && agentStatusById.get(item.parent_agent_id) !== 'active') {
+          result.add(resourceKey(item));
+        }
+      }
+    }
+    return result;
+  }, [agentStatusById, groups]);
   const childKeysByAgent = useMemo(() => {
     const result = new Map<string, Set<string>>();
     for (const [, group] of groups)
       for (const item of group.items) {
         if (!item.parent_agent_id || item.borrowed) continue;
+        if (agentStatusById.get(item.parent_agent_id) !== 'active') continue;
         const set = result.get(item.parent_agent_id) ?? new Set<string>();
         set.add(resourceKey(item));
         result.set(item.parent_agent_id, set);
       }
     return result;
-  }, [groups]);
+  }, [agentStatusById, groups]);
   const effectiveSelected = useMemo(() => {
     const next = new Set(selected);
     for (const [agentId, children] of childKeysByAgent)
@@ -204,7 +225,11 @@ export function OwnedResourcesPage() {
   }, [childKeysByAgent, selected]);
 
   function canSelect(item: DisplayItem) {
-    return item.membership_status === 'active' && !item.borrowed;
+    return (
+      item.membership_status === 'active' &&
+      !item.borrowed &&
+      !(item.resource_type === 'asset' && inactiveChildKeys.has(resourceKey(item)))
+    );
   }
   function toggle(key: string) {
     setSelected((current) => {
@@ -222,9 +247,10 @@ export function OwnedResourcesPage() {
     ];
   }
   function operationItems(items: DisplayItem[], purge: boolean): DisplayItem[] {
-    const owned = uniqueOwned(items).filter(
-      (item) => item.membership_status === 'active' && (!purge || item.resource_type !== 'team'),
-    );
+    const owned = uniqueOwned(items).filter((item) => {
+      if (!canSelect(item) || (purge && item.resource_type === 'team')) return false;
+      return purge || item.resource_type !== 'agent' || item.status === 'active';
+    });
     const selectedAgents = new Set(
       owned
         .filter((item) => item.resource_type === 'agent' && selected.has(resourceKey(item)))
@@ -245,7 +271,7 @@ export function OwnedResourcesPage() {
     });
   }
   function selectTeam(items: DisplayItem[]) {
-    const choices = uniqueOwned(items).filter((item) => item.membership_status === 'active');
+    const choices = uniqueOwned(items).filter(canSelect);
     setSelected((current) => {
       const next = new Set(current);
       const allSelected = choices.every((item) => effectiveSelected.has(resourceKey(item)));
@@ -300,6 +326,18 @@ export function OwnedResourcesPage() {
         targetAgents: [],
         members: membersByTeam.get(teamId) ?? (await membersApi.list(teamId)),
       });
+    } catch (err) {
+      tea.notify.error(getErrorMessage(err));
+    }
+  }
+  async function restoreAgent(item: DisplayItem) {
+    try {
+      await agentsApi.restore(item.resource_id);
+      setSelected(new Set());
+      tea.notify.success(
+        t('resources.restoreAgent.success', { name: item.name || item.resource_id }),
+      );
+      await refresh();
     } catch (err) {
       tea.notify.error(getErrorMessage(err));
     }
@@ -501,7 +539,7 @@ export function OwnedResourcesPage() {
                           disabled={!selectable || locked}
                           onChange={() => selectable && !locked && toggle(key)}
                         />
-                        <div>
+                        <div className="owned-resource-row__content">
                           <div>
                             <Tag size="sm">{typeLabel(item)}</Tag>{' '}
                             <strong>{item.name || item.resource_id}</strong>
@@ -521,7 +559,20 @@ export function OwnedResourcesPage() {
                               ? ` · ${t('resources.owner', { owner: ownerName(item) })}`
                               : ''}
                           </div>
+                          {item.resource_type === 'agent' && item.status !== 'active' && (
+                            <div className="owned-resource-row__meta">
+                              {t('resources.inactiveAgent')}
+                            </div>
+                          )}
                         </div>
+                        {item.resource_type === 'agent' &&
+                          item.status !== 'active' &&
+                          item.membership_status === 'active' &&
+                          !item.borrowed && (
+                            <Button type="link" onClick={() => void restoreAgent(item)}>
+                              {t('resources.restoreAgent')}
+                            </Button>
+                          )}
                       </div>
                     );
                   })}

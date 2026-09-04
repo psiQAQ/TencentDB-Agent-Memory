@@ -11,24 +11,71 @@ export interface ErrorEnvelopeLike {
  * 保留列表用于快速判断 code 是否有效（比 i18n.exists 更显式）。
  */
 const KNOWN_ERROR_CODES: ReadonlySet<string> = new Set([
-  'UNAUTHORIZED', 'INVALID_USER_KEY', 'MISSING_USER_KEY', 'MISSING_INSTANCE_ID',
-  'INVALID_INSTANCE', 'NOT_TEAM_MEMBER', 'PERMISSION_DENIED', 'FORBIDDEN',
-  'NOT_FOUND', 'ALREADY_EXISTS', 'MEMBER_ALREADY_EXISTS', 'CONFLICT',
-  'KERNEL_UNAVAILABLE', 'UPSTREAM_ERROR', 'UNKNOWN_META_ACTION', 'NOT_IN_SCOPE',
-  'MISSING_TEAM_ID', 'MISSING_AGENT_ID', 'AGENT_NOT_FOUND', 'NOT_YOUR_AGENT',
-  'AGENT_NOT_IN_TEAM', 'MISSING_TASK_ID', 'MISSING_ASSET_ID', 'ASSET_NOT_FOUND',
-  'ASSET_NOT_SHARED', 'ASSET_TYPE_MISMATCH', 'MISSING_BLOCK_ID', 'BLOCK_NOT_FOUND',
-  'NOT_CHAT_MEMORY', 'TEAM_MISMATCH', 'INVALID_SCOPE',
-  'CANNOT_ALLOCATE_SELF_CHAT_MEMORY', 'CANNOT_UNBIND_SELF_CHAT_MEMORY',
-  'ALREADY_ALLOCATED', 'IMPORT_LIMIT_EXCEEDED', 'ASSET_PRIVATE_INACCESSIBLE',
-  'TARGET_AGENT_REQUIRED', 'SOURCE_AGENT_REQUIRED', 'SOURCE_AGENT_NOT_OWNED',
-  'SOURCE_ASSET_BINDING_NOT_FOUND', 'TARGET_AGENT_NOT_ACTIVE',
-  'ASSET_TRANSFER_TARGET_MUST_MATCH', 'HANDOFF_AGENT_CREATE_FAILED',
-  'ASSET_NOT_BINDABLE', 'INVALID_TITLE', 'MISSING_MESSAGES', 'TOO_MANY_MESSAGES',
-  'NO_VALID_MESSAGES', 'MISSING_WIKI_ID', 'WIKI_NOT_FOUND', 'WIKI_EMPTY_NO_SOURCES',
-  'MISSING_FILES', 'TOO_MANY_FILES', 'FILE_TOO_LARGE', 'TOTAL_TOO_LARGE',
-  'MISSING_CODE_GRAPH_ID', 'CODE_GRAPH_NOT_FOUND', 'KNOWLEDGE_NOT_FOUND',
-  'INVALID_ARGUMENT', 'VALIDATION_ERROR', 'RATE_LIMITED', 'INTERNAL_ERROR',
+  'UNAUTHORIZED',
+  'INVALID_USER_KEY',
+  'MISSING_USER_KEY',
+  'MISSING_INSTANCE_ID',
+  'INVALID_INSTANCE',
+  'NOT_TEAM_MEMBER',
+  'PERMISSION_DENIED',
+  'FORBIDDEN',
+  'NOT_FOUND',
+  'ALREADY_EXISTS',
+  'MEMBER_ALREADY_EXISTS',
+  'CONFLICT',
+  'KERNEL_UNAVAILABLE',
+  'UPSTREAM_ERROR',
+  'UNKNOWN_META_ACTION',
+  'NOT_IN_SCOPE',
+  'MISSING_TEAM_ID',
+  'MISSING_AGENT_ID',
+  'AGENT_NOT_FOUND',
+  'NOT_YOUR_AGENT',
+  'AGENT_NOT_IN_TEAM',
+  'MISSING_TASK_ID',
+  'MISSING_ASSET_ID',
+  'ASSET_NOT_FOUND',
+  'ASSET_NOT_SHARED',
+  'ASSET_TYPE_MISMATCH',
+  'MISSING_BLOCK_ID',
+  'BLOCK_NOT_FOUND',
+  'NOT_CHAT_MEMORY',
+  'TEAM_MISMATCH',
+  'INVALID_SCOPE',
+  'CANNOT_ALLOCATE_SELF_CHAT_MEMORY',
+  'CANNOT_UNBIND_SELF_CHAT_MEMORY',
+  'ALREADY_ALLOCATED',
+  'IMPORT_LIMIT_EXCEEDED',
+  'ASSET_PRIVATE_INACCESSIBLE',
+  'TARGET_AGENT_REQUIRED',
+  'SOURCE_AGENT_REQUIRED',
+  'SOURCE_AGENT_NOT_OWNED',
+  'SOURCE_AGENT_NOT_ACTIVE',
+  'SOURCE_ASSET_BINDING_NOT_FOUND',
+  'TARGET_AGENT_NOT_ACTIVE',
+  'INACTIVE_AGENT_CANNOT_TRANSFER',
+  'INACTIVE_AGENT_CHILD_REQUIRES_AGENT_PURGE',
+  'ASSET_TRANSFER_TARGET_MUST_MATCH',
+  'HANDOFF_AGENT_CREATE_FAILED',
+  'ASSET_NOT_BINDABLE',
+  'INVALID_TITLE',
+  'MISSING_MESSAGES',
+  'TOO_MANY_MESSAGES',
+  'NO_VALID_MESSAGES',
+  'MISSING_WIKI_ID',
+  'WIKI_NOT_FOUND',
+  'WIKI_EMPTY_NO_SOURCES',
+  'MISSING_FILES',
+  'TOO_MANY_FILES',
+  'FILE_TOO_LARGE',
+  'TOTAL_TOO_LARGE',
+  'MISSING_CODE_GRAPH_ID',
+  'CODE_GRAPH_NOT_FOUND',
+  'KNOWLEDGE_NOT_FOUND',
+  'INVALID_ARGUMENT',
+  'VALIDATION_ERROR',
+  'RATE_LIMITED',
+  'INTERNAL_ERROR',
 ]);
 
 /**
@@ -109,7 +156,10 @@ function isJsonLike(message: string): boolean {
   return trimmed.startsWith('{') || trimmed.startsWith('[');
 }
 
-export function mapErrorCode(codeOrMessage: number | string | undefined, fallbackMessage?: string): string | null {
+export function mapErrorCode(
+  codeOrMessage: number | string | undefined,
+  fallbackMessage?: string,
+): string | null {
   const raw = String(codeOrMessage ?? '').trim();
   const text = fallbackMessage ?? raw;
 
@@ -143,9 +193,10 @@ export function formatApiErrorMessage(input: {
   fallback?: string;
 }): string {
   const bodyJson = input.body ? tryParseJson(input.body) : null;
-  const env = bodyJson && !Array.isArray(bodyJson) ? bodyJson as ErrorEnvelopeLike : null;
+  const env = bodyJson && !Array.isArray(bodyJson) ? (bodyJson as ErrorEnvelopeLike) : null;
   const code = input.code ?? env?.code ?? input.httpStatus;
-  const rawMessage = env?.message ?? input.message ?? input.httpStatusText ?? input.body ?? input.fallback ?? '';
+  const rawMessage =
+    env?.message ?? input.message ?? input.httpStatusText ?? input.body ?? input.fallback ?? '';
 
   const mapped = mapErrorCode(code, rawMessage) ?? mapErrorCode(rawMessage);
   if (mapped) return mapped;
@@ -180,7 +231,8 @@ export function getErrorMessage(err: unknown): string {
       fallback: apiErr.message,
     });
   }
-  if (err instanceof Error) return formatApiErrorMessage({ message: err.message, fallback: err.message });
+  if (err instanceof Error)
+    return formatApiErrorMessage({ message: err.message, fallback: err.message });
   if (typeof err === 'string') return formatApiErrorMessage({ message: err, fallback: err });
   return i18n.t('error.fallback');
 }

@@ -9,6 +9,8 @@ function buildApp(options: {
   clearCode?: number;
   assetType?: 'skill' | 'chat_memory' | 'llm_wiki' | 'code_graph';
   targetHasAgent?: boolean;
+  sourceAgentStatus?: 'active' | 'inactive';
+  inactiveOwnedAgent?: boolean;
   boundAssets?: Array<{ asset_id: string; asset_type: 'skill' | 'chat_memory' | 'llm_wiki' | 'code_graph'; owner_user_id?: string }>;
 } = {}) {
   const invoke = vi.fn(async (action: string, body: Record<string, unknown>) => {
@@ -32,6 +34,12 @@ function buildApp(options: {
       };
     }
     if (action === 'agent/list') {
+      if (body.status === 'inactive') {
+        const items = options.inactiveOwnedAgent
+          ? [{ agent_id: 'inactive-agent', name: 'inactive', owner_user_id: 'caller', status: 'inactive' }]
+          : [];
+        return { code: 0, message: 'ok', data: { items, total: items.length } };
+      }
       const items = options.targetHasAgent === false ? [] : [{ agent_id: 'target-agent', name: 'target' }];
       return { code: 0, message: 'ok', data: { items, total: items.length } };
     }
@@ -41,7 +49,16 @@ function buildApp(options: {
     }
     if (action === 'agent/get') {
       const target = body.agent_id === 'target-agent' || body.agent_id === 'handoff-agent';
-      return { code: 0, message: 'ok', data: { agent_id: body.agent_id, team_id: 'team-1', owner_user_id: target ? 'target' : 'caller', status: 'active' } };
+      return {
+        code: 0,
+        message: 'ok',
+        data: {
+          agent_id: body.agent_id,
+          team_id: 'team-1',
+          owner_user_id: target ? 'target' : 'caller',
+          status: target ? 'active' : (options.sourceAgentStatus ?? 'active'),
+        },
+      };
     }
     if (action === 'asset/get') {
       const bound = options.boundAssets?.find((item) => item.asset_id === body.asset_id);
@@ -129,6 +146,17 @@ describe('owner-only owned resource purge', () => {
     const body = await response.json() as { data: { failed: unknown[] } };
     expect(body.data.failed).toHaveLength(1);
     expect(failed.invoke.mock.calls.some(([action]) => action === 'asset/delete')).toBe(false);
+  });
+
+  it('requires an inactive Agent child to be purged through its Agent aggregate', async () => {
+    const fixture = buildApp({
+      inactiveOwnedAgent: true,
+      boundAssets: [{ asset_id: 'memory-1', asset_type: 'chat_memory' }],
+    });
+    const response = await purge(fixture.app, [{ resource_type: 'asset', resource_id: 'memory-1' }]);
+    expect(response.status).toBe(409);
+    await expect(response.json()).resolves.toMatchObject({ message: 'INACTIVE_AGENT_CHILD_REQUIRES_AGENT_PURGE' });
+    expect(fixture.kernelPost.mock.calls.some(([path]) => path === '/v3/chat-memory/clear')).toBe(false);
   });
 });
 
@@ -295,5 +323,29 @@ describe('ownership transfer lifecycle', () => {
         from_agent_id: 'source-agent', to_agent_id: 'handoff-agent',
       }],
     });
+  });
+
+  it('rejects standalone asset transfer from an inactive source Agent', async () => {
+    const fixture = buildApp({
+      assetType: 'chat_memory',
+      sourceAgentStatus: 'inactive',
+      boundAssets: [{ asset_id: 'memory-1', asset_type: 'chat_memory' }],
+    });
+    const response = await fixture.app.request('/account/ownership/transfer', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'X-Tdai-Service-Id': 'local', 'X-Tdai-User-Key': 'key' },
+      body: JSON.stringify({
+        team_id: 'team-1',
+        transfers: [{
+          resource_type: 'asset', resource_id: 'memory-1', to_user_id: 'target',
+          from_agent_id: 'source-agent', to_agent_id: 'target-agent',
+        }],
+        idempotency_key: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+        confirmation: 'TRANSFER_OWNERSHIP',
+      }),
+    });
+    expect(response.status).toBe(409);
+    await expect(response.json()).resolves.toMatchObject({ message: 'SOURCE_AGENT_NOT_ACTIVE' });
+    expect(fixture.invoke.mock.calls.some(([action]) => action === 'ownership/transfer')).toBe(false);
   });
 });

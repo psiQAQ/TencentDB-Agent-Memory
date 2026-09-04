@@ -104,7 +104,6 @@ import type { SkillBufferStorage } from "../core/skill/conversation-add/index.js
 import { makeKnowledgeRouteTable } from "./knowledge-handlers.js";
 import {
   makeChatMemoryRouteTable,
-  clearChatMemoryContentResilient,
   transferChatMemoryContentOwnership,
 } from "./chat-memory-handlers.js";
 import { makeMemoryPromptRouteTable } from "./memory-prompt-handlers.js";
@@ -457,19 +456,6 @@ export class TdaiGateway {
       await configSvc.initDefaults(registry, this.config.metadata);
       rawSvc.setConfigParamService(configSvc);
 
-      // 归档 Agent 时连带清掉它的 chat_memory 内容（L0–L3 + 向量 + 文件）。
-      // metadata 层拿不到 IMemoryStore / StorageAdapter，所以这里把清理能力
-      // 注入进去；与 /v3/chat-memory/clear 共用同一份清理实现 + 重试策略，
-      // 避免出现"资产已删、内容还在"的孤儿数据。
-      //
-      // 必须按 instanceId 解析 store/storage：service 模式下每个实例有独立的
-      // TCVDB + COS，用全局单例会清到错误的库。
-      rawSvc.setChatMemoryContentCleaner(async ({ teamId, agentId }) => {
-        const { store: memoryStore, storage } = await this.resolveMemoryContentTargets(instanceId);
-        await clearChatMemoryContentResilient({
-          store: memoryStore, storage, teamId, agentId, instanceId, logger: this.logger,
-        });
-      });
       rawSvc.setChatMemoryOwnerTransfer(async ({ teamId, agentId, fromOwnerUserId, toOwnerUserId }) => {
         const { store: memoryStore, storage } = await this.resolveMemoryContentTargets(instanceId);
         return await transferChatMemoryContentOwnership({
