@@ -114,6 +114,7 @@ describe('explicit default Agent provisioning', () => {
     expect(result.agent_name).toBe('second-template');
     expect(first.template_id).not.toBe(second.template_id);
     const createBody = metaInvoke.mock.calls.find(([action]) => action === 'agent/create')?.[1];
+    expect(createBody?.description).toBe('');
     expect(JSON.parse(String(createBody?.metadata_json))).toMatchObject({
       panel_provisioning: { template_id: second.template_id },
     });

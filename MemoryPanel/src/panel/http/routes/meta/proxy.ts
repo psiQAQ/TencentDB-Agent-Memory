@@ -435,7 +435,8 @@ export async function provisionDefaultAgentForCaller(
         team_id: teamId,
         owner_user_id: userId,
         name: agentName,
-        description: hasTemplate ? (template!.description ?? null) : DEFAULT_AGENT_DESCRIPTION,
+        // Core agent/create 的 description 只接受 string；模板存储允许 null 表示“未填写”。
+        description: hasTemplate ? (template!.description ?? '') : DEFAULT_AGENT_DESCRIPTION,
         prompt: hasTemplate ? (template!.prompt ?? '') : DEFAULT_AGENT_PROMPT,
         visibility: hasTemplate ? (template!.visibility ?? 'team') : 'team',
         metadata_json: provisioningMetadata(
