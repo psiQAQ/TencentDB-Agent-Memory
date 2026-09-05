@@ -1353,7 +1353,7 @@
   color: var(--tea-color-text-tertiary);
 }
 
-/* ===== DefaultAgentTemplateSection（默认 Agent 模板，仅 admin 可见）===== */
+/* ===== DefaultAgentTemplateSection（Team active member 共同维护）===== */
 ._memory-default-agent-section {
   padding: 14px 16px;
 }
@@ -1394,6 +1394,29 @@
   display: flex;
   flex-direction: column;
   gap: 4px;
+}
+
+._memory-default-agent-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+._memory-default-agent-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 10px 12px;
+  border: 1px solid var(--tea-color-border-secondary);
+  border-radius: 2px;
+}
+
+._memory-default-agent-item-actions {
+  display: flex;
+  flex-shrink: 0;
+  gap: 8px;
 }
 
 ._memory-default-agent-placeholder {

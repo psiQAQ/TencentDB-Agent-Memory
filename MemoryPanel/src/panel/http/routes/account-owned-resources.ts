@@ -5,7 +5,7 @@ import type { PanelDeps } from '../../panel-deps.js';
 import { toKernelCredentials, type MetaCallContext } from '../../kernel/types.js';
 import { validatePanelMetaHeaders } from '../middleware/validate-panel-headers.js';
 import { respondControlError, respondEnvelope } from '../envelope.js';
-import { getAgentTemplate } from '../../state/agent-template-store.js';
+import { listAgentTemplates } from '../../state/agent-template-store.js';
 import {
   buildCtx,
   extractListItems,
@@ -186,7 +186,7 @@ async function createHandoffAgent(
   const userEnv = await deps.metaKernel.invoke('user/get', { user_id: userId }, ctx);
   if (userEnv.code !== 0) throw new Error(userEnv.message || 'USER_LOOKUP_FAILED');
   const username = (userEnv.data as { username?: string } | null)?.username ?? userId;
-  const template = getAgentTemplate(deps.config.agentTemplateDir, ctx.instanceId, teamId);
+  const template = listAgentTemplates(deps.config.agentTemplateDir, ctx.instanceId, teamId)[0] ?? null;
   const name = template?.name ? `${template.name}-${username}` : `default-agent-${username}`;
   const metadata = JSON.stringify({
     ui: { role_prompt: '', rules_prompt: '' },

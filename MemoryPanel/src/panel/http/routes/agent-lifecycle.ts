@@ -24,6 +24,7 @@ export function registerAgentLifecycleRoutes(api: Hono, deps: PanelDeps): void {
     const ctx = buildCtx(c);
     const body = await readJson(c);
     const teamId = str(body, 'team_id');
+    const templateId = str(body, 'template_id') || null;
     if (!teamId) return respondControlError(c, 400, 'MISSING_TEAM_ID');
     const callerId = await resolveCallerUserId(deps, ctx);
     if (!callerId) return respondControlError(c, 401, 'INVALID_USER_KEY');
@@ -33,8 +34,11 @@ export function registerAgentLifecycleRoutes(api: Hono, deps: PanelDeps): void {
       ctx,
     );
     if (memberEnv.code !== 0) return respondEnvelope(c, memberEnv);
+    if ((memberEnv.data as { status?: string } | null)?.status !== 'active') {
+      return respondControlError(c, 403, 'permission_denied');
+    }
     try {
-      const result = await provisionDefaultAgentForCaller(callerId, teamId, ctx, deps);
+      const result = await provisionDefaultAgentForCaller(callerId, teamId, templateId, ctx, deps);
       return respondEnvelope(c, okEnvelope(c, result));
     } catch (err) {
       deps.logger.warn('explicit default agent provisioning failed', {
@@ -67,9 +71,9 @@ export function registerAgentLifecycleRoutes(api: Hono, deps: PanelDeps): void {
       const archiveEnv = await deps.metaKernel.invoke('agent/archive', { agent_id: agentId }, ctx);
       if (archiveEnv.code !== 0) return respondEnvelope(c, archiveEnv);
       return respondEnvelope(c, okEnvelope(c, {
-        archived: true,
-        agent_id: agentId,
-        assets_preserved: true,
+          archived: true,
+          agent_id: agentId,
+          assets_preserved: true,
       }));
     });
   }

@@ -17,13 +17,14 @@ export interface AgentTemplateAssetIds {
 }
 
 /**
- * 默认 Agent 模板配置（agent/get-default-template / set-default-template 的 template 结构）。
+ * Team 默认 Agent 模板。模板集合由 Team 全体 active member 共同维护。
  * 注意：
  *   - asset_ids 为团队资产 ID 快照，只允许选 visibility=team 的公共资产；
  *   - 覆盖式写入：set 时需一次回传完整 template；
  *   - metadata_json 为 JSON 字符串，ui.role_prompt / ui.rules_prompt 存拆分 prompt。
  */
 export interface AgentTemplateConfig {
+  template_id: string;
   name: string;
   description?: string | null;
   prompt?: string | null;
@@ -31,11 +32,20 @@ export interface AgentTemplateConfig {
   visibility?: string;
   metadata_json?: string;
   asset_ids?: AgentTemplateAssetIds;
+  created_by?: string | null;
+  updated_by?: string | null;
+  created_at: string;
+  updated_at: string;
 }
+
+export type AgentTemplateInput = Omit<
+  AgentTemplateConfig,
+  'template_id' | 'created_by' | 'updated_by' | 'created_at' | 'updated_at'
+>;
 
 export const agentsApi = {
   /** 当前登录用户显式确认后，为自己创建 Team 默认 Agent。 */
-  createDefault: async (teamId: string) => {
+  createDefault: async (teamId: string, templateId?: string) => {
     const session = getPanelSession();
     if (!session) throw new ApiError(401, 'Unauthorized', 'no active panel session');
     const envelope = await request<
@@ -50,6 +60,7 @@ export const agentsApi = {
       '/api/v1/agent/create-default',
       {
         team_id: teamId,
+        template_id: templateId,
       },
       {
         'X-Tdai-Service-Id': session.instanceId,
@@ -233,17 +244,27 @@ export const agentsApi = {
     });
   },
 
-  /**
-   * 读取当前 team 的默认 Agent 模板（按实例 × Team 隔离；要求 active membership）。
-   * 未配置时后端返回 `{}`，调用方以 `data.name` 是否存在判断「未配置」。
-   */
-  getDefaultTemplate: (teamId: string) =>
-    metaPost<AgentTemplateConfig>('agent/get-default-template', { team_id: teamId }),
+  listDefaultTemplates: async (teamId: string) => {
+    const result = await metaPost<{ items: AgentTemplateConfig[]; total: number }>(
+      'agent/list-default-templates',
+      { team_id: teamId },
+    );
+    return result.items;
+  },
 
-  /**
-   * 配置/覆盖当前 team 的默认 Agent 模板（仅当前 Team owner/admin）。
-   * 覆盖式写入：必须一次回传完整 template。
-   */
-  setDefaultTemplate: (teamId: string, template: AgentTemplateConfig) =>
-    metaPost<{ ok: boolean }>('agent/set-default-template', { team_id: teamId, template }),
+  createDefaultTemplate: (teamId: string, template: AgentTemplateInput) =>
+    metaPost<AgentTemplateConfig>('agent/create-default-template', { team_id: teamId, template }),
+
+  updateDefaultTemplate: (teamId: string, templateId: string, template: AgentTemplateInput) =>
+    metaPost<AgentTemplateConfig>('agent/update-default-template', {
+      team_id: teamId,
+      template_id: templateId,
+      template,
+    }),
+
+  deleteDefaultTemplate: (teamId: string, templateId: string) =>
+    metaPost<{ deleted: boolean }>('agent/delete-default-template', {
+      team_id: teamId,
+      template_id: templateId,
+    }),
 };

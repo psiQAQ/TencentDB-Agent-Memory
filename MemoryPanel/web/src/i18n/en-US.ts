@@ -1182,23 +1182,22 @@ export const enUS = {
     'The Agent is ready, but {{count}} template assets failed. Confirm again to retry missing items.',
   'agentGrid.defaultCreate.success': 'Default Agent "{{name}}" is ready.',
 
-  // ===== DefaultAgentTemplate (admin only) =====
-  'defaultAgent.title': 'Default Agent Template',
+  // ===== DefaultAgentTemplate (shared by active Team members) =====
+  'defaultAgent.title': 'Default Agent Templates',
   'defaultAgent.desc':
-    'Team members who do not own an Agent can inspect the summary and explicitly confirm creation from this template. Only team-public assets (visibility=team) can be selected.',
+    'Every active Team member can create, edit, delete, and use templates. Templates can reference only team-public assets (visibility=team).',
   'defaultAgent.empty':
-    'Not configured · Members can still explicitly create the built-in default Agent',
-  'defaultAgent.create': 'New Default Agent',
-  'defaultAgent.create.tooltip': 'Configure the default Agent template for the current team',
+    'No templates yet. Add one so Team members can create their own Agents from it.',
+  'defaultAgent.create': 'New Template',
+  'defaultAgent.create.tooltip': 'Add a default Agent template to the current Team',
   'defaultAgent.create.caption': 'New Default Agent Template',
   'defaultAgent.create.desc':
-    'Configure the current Team template. Members must confirm creation themselves from the Agents page.',
+    'Add a Team-shared default Agent template. Saving a template does not create an Agent.',
   'defaultAgent.create.submit': 'Create',
   'defaultAgent.edit': 'Edit Config',
-  'defaultAgent.edit.tooltip': 'Edit the default Agent template for the current team',
+  'defaultAgent.edit.tooltip': 'Edit this default Agent template',
   'defaultAgent.edit.caption': 'Edit Default Agent Template',
-  'defaultAgent.edit.desc':
-    'Overwrite the current Team default Agent template. Existing Agents are not modified.',
+  'defaultAgent.edit.desc': 'Update this Team template. Existing Agents are not modified.',
   'defaultAgent.save': 'Save Config',
   'defaultAgent.name': 'Default Agent name *',
   'defaultAgent.name.hint':
@@ -1206,6 +1205,13 @@ export const enUS = {
   'defaultAgent.assets.label': 'Team-public assets: ',
   'defaultAgent.assets.hint': 'Only team-public assets (visibility=team) are selectable',
   'defaultAgent.notify.saved': 'Default Agent template saved.',
+  'defaultAgent.assets.summary': 'Skills {{skills}} · Code Graphs {{codeGraphs}} · Wikis {{wikis}}',
+  'defaultAgent.use': 'Create from template',
+  'defaultAgent.delete.confirm': 'Delete template "{{name}}"?',
+  'defaultAgent.delete.desc':
+    'This removes only the template. Existing Agents and assets are unchanged.',
+  'defaultAgent.delete.action': 'Delete template',
+  'defaultAgent.delete.success': 'Template "{{name}}" deleted.',
 
   // ===== MemberSection =====
   'member.title': 'Members ({{count}})',

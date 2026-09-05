@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { Hono } from 'hono';
@@ -13,20 +13,38 @@ afterEach(() => {
   }
 });
 
-function createApp(role: 'admin' | 'member' | 'reviewer' | null) {
+function createApp(role: 'admin' | 'member' | 'reviewer' | null, setupLegacy = false) {
   const agentTemplateDir = mkdtempSync(path.join(tmpdir(), 'memory-panel-template-auth-'));
   temporaryDirectories.push(agentTemplateDir);
+  if (setupLegacy) {
+    const teamDir = path.join(agentTemplateDir, 'local', 'team-1');
+    mkdirSync(teamDir, { recursive: true });
+    writeFileSync(
+      path.join(teamDir, 'template.json'),
+      JSON.stringify({ name: 'legacy-default', visibility: 'team' }),
+      'utf8',
+    );
+  }
   const invoke = vi.fn(async (action: string) => {
     if (action === 'auth/verify') {
       return {
         code: 0,
         message: 'ok',
         request_id: 'r',
-        data: { valid: true, user: { user_id: 'caller', user_type: 'system_admin' } },
+        data: {
+          valid: true,
+          user: { user_id: 'caller', user_type: 'system_admin' },
+        },
       };
     }
     if (action === 'team-member/get') {
-      if (!role) return { code: 404, message: 'member_not_found', request_id: 'r', data: null };
+      if (!role)
+        return {
+          code: 404,
+          message: 'member_not_found',
+          request_id: 'r',
+          data: null,
+        };
       return {
         code: 0,
         message: 'ok',
@@ -41,7 +59,11 @@ function createApp(role: 'admin' | 'member' | 'reviewer' | null) {
   });
   const deps = {
     instanceRegistry: {
-      resolve: () => ({ instance_id: 'local', gateway_endpoint: 'http://core', api_key: 'secret' }),
+      resolve: () => ({
+        instance_id: 'local',
+        gateway_endpoint: 'http://core',
+        api_key: 'secret',
+      }),
     },
     config: { agentTemplateDir },
     metaKernel: { invoke },
@@ -76,35 +98,107 @@ describe('default Agent template Team-role authorization', () => {
     expect(invoke.mock.calls.map(([action]) => action)).toEqual(['team-member/add']);
   });
 
-  it('does not let a system_admin Team member write the template', async () => {
-    const { app } = createApp('member');
-    const response = await call(app, 'agent/set-default-template', {
-      team_id: 'team-1',
-      template: { name: 'blocked' },
-    });
+  it.each(['member', 'reviewer'] as const)(
+    'lets an active %s create, edit, list, and delete Team templates',
+    async (role) => {
+      const { app } = createApp(role);
+      const createdResponse = await call(app, 'agent/create-default-template', {
+        team_id: 'team-1',
+        template: { name: `${role}-default`, visibility: 'team' },
+      });
+      expect(createdResponse.status).toBe(200);
+      const created = (await createdResponse.json()) as {
+        data: { template_id: string };
+      };
 
-    expect(response.status).toBe(403);
-    await expect(response.json()).resolves.toMatchObject({ code: 403, message: 'permission_denied' });
+      const updated = await call(app, 'agent/update-default-template', {
+        team_id: 'team-1',
+        template_id: created.data.template_id,
+        template: { name: `${role}-updated`, visibility: 'team' },
+      });
+      await expect(updated.json()).resolves.toMatchObject({
+        code: 0,
+        data: {
+          template_id: created.data.template_id,
+          name: `${role}-updated`,
+          updated_by: 'caller',
+        },
+      });
+
+      const listed = await call(app, 'agent/list-default-templates', {
+        team_id: 'team-1',
+      });
+      await expect(listed.json()).resolves.toMatchObject({
+        code: 0,
+        data: { total: 1, items: [{ name: `${role}-updated` }] },
+      });
+
+      const deleted = await call(app, 'agent/delete-default-template', {
+        team_id: 'team-1',
+        template_id: created.data.template_id,
+      });
+      await expect(deleted.json()).resolves.toMatchObject({
+        code: 0,
+        data: { deleted: true },
+      });
+    },
+  );
+
+  it('allows multiple templates instead of overwriting the Team default', async () => {
+    const admin = createApp('admin');
+    await call(admin.app, 'agent/create-default-template', {
+      team_id: 'team-1',
+      template: { name: 'team-default-a', visibility: 'team' },
+    });
+    await call(admin.app, 'agent/create-default-template', {
+      team_id: 'team-1',
+      template: { name: 'team-default-b', visibility: 'team' },
+    });
+    const listed = await call(admin.app, 'agent/list-default-templates', {
+      team_id: 'team-1',
+    });
+    await expect(listed.json()).resolves.toMatchObject({
+      code: 0,
+      data: {
+        total: 2,
+        items: [{ name: 'team-default-a' }, { name: 'team-default-b' }],
+      },
+    });
   });
 
-  it('allows a real Team admin to write and active members to read', async () => {
-    const admin = createApp('admin');
-    const write = await call(admin.app, 'agent/set-default-template', {
+  it('rejects duplicate template names without overwriting an existing template', async () => {
+    const member = createApp('member');
+    await call(member.app, 'agent/create-default-template', {
       team_id: 'team-1',
-      template: { name: 'team-default', visibility: 'team' },
+      template: { name: 'Shared Template', visibility: 'team' },
     });
-    expect(write.status).toBe(200);
+    const duplicate = await call(member.app, 'agent/create-default-template', {
+      team_id: 'team-1',
+      template: { name: ' shared template ', visibility: 'team' },
+    });
+    expect(duplicate.status).toBe(409);
+    await expect(duplicate.json()).resolves.toMatchObject({ code: 409, message: 'TEMPLATE_NAME_EXISTS' });
+  });
 
-    const read = await call(admin.app, 'agent/get-default-template', { team_id: 'team-1' });
-    await expect(read.json()).resolves.toMatchObject({
+  it('exposes the legacy single template as a stable collection item', async () => {
+    const { app } = createApp('member', true);
+    const response = await call(app, 'agent/list-default-templates', {
+      team_id: 'team-1',
+    });
+    await expect(response.json()).resolves.toMatchObject({
       code: 0,
-      data: { name: 'team-default', visibility: 'team' },
+      data: {
+        total: 1,
+        items: [{ template_id: 'tpl-legacy', name: 'legacy-default' }],
+      },
     });
   });
 
   it('blocks a caller without active Team membership from reading', async () => {
     const { app } = createApp(null);
-    const response = await call(app, 'agent/get-default-template', { team_id: 'team-1' });
+    const response = await call(app, 'agent/get-default-template', {
+      team_id: 'team-1',
+    });
     expect(response.status).toBe(403);
   });
 });

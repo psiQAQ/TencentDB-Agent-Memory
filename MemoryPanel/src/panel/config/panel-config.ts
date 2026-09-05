@@ -30,7 +30,7 @@ export interface PanelConfig {
     sync: boolean;
     proxyBaseUrl: string;
   };
-  /** 默认 Agent 模板文件的本地存储目录根（存 Panel 本地，按 {dir}/{instanceId}/{team_id}/template.json）。 */
+  /** 默认 Agent 模板集合的本地存储目录根（按 {dir}/{instanceId}/{team_id}/templates.json）。 */
   agentTemplateDir: string;
 }
 

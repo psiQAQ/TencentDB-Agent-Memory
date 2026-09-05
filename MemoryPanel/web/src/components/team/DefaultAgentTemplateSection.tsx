@@ -1,19 +1,10 @@
-/**
- * DefaultAgentTemplateSection —— 「默认 Agent 模板」管理区（仅当前 Team owner/admin 可见）。
- *
- * 放置于 Agents 页面的 AgentGrid 上方：
- *   - 未配置：展示「新建默认 Agent」入口；
- *   - 已配置：展示当前模板摘要 + 「修改配置」入口。
- *
- * 数据源：agent/get-default-template；Panel 服务端要求 active membership，写操作
- * agent/set-default-template 还要求真实 Team admin 角色。
- */
-
+/** Team 默认 Agent 模板集合；当前 Team 的所有 active member 都可共同维护和选用。 */
 import { useCallback, useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Button } from 'tea-component';
-import { AddIcon, EditIcon } from 'tea-icons-react';
+import { AddIcon, DeleteIcon, EditIcon } from 'tea-icons-react';
 import { agentsApi, type AgentTemplateConfig } from '@/lib/teamApi';
+import { invalidateBackendCache } from '@/services';
 import { tea } from '@/lib/tea-bridge';
 import { getErrorMessage } from '@/lib/error-message';
 import DefaultAgentTemplateDialog from './DefaultAgentTemplateDialog';
@@ -26,49 +17,89 @@ export default function DefaultAgentTemplateSection({
   teamName: string;
 }) {
   const { t } = useTranslation();
-  const [template, setTemplate] = useState<AgentTemplateConfig | null>(null);
+  const [templates, setTemplates] = useState<AgentTemplateConfig[]>([]);
   const [loading, setLoading] = useState(true);
-  const [showDialog, setShowDialog] = useState(false);
+  const [editing, setEditing] = useState<AgentTemplateConfig | null | undefined>(undefined);
+  const [busyTemplateId, setBusyTemplateId] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     if (!teamId) return;
     setLoading(true);
     try {
-      const data = await agentsApi.getDefaultTemplate(teamId);
-      // 未配置时后端返回 {}；以 name 是否存在判断是否已配置
-      setTemplate(data && data.name ? data : null);
+      setTemplates(await agentsApi.listDefaultTemplates(teamId));
     } catch (err) {
       tea.notify.error(getErrorMessage(err));
-      setTemplate(null);
+      setTemplates([]);
     } finally {
       setLoading(false);
     }
   }, [teamId]);
 
   useEffect(() => {
-    load();
+    void load();
   }, [load]);
 
   function handleSaved(saved: AgentTemplateConfig) {
-    setTemplate(saved);
-    setShowDialog(false);
+    setTemplates((current) => {
+      const exists = current.some((template) => template.template_id === saved.template_id);
+      return exists
+        ? current.map((template) => (template.template_id === saved.template_id ? saved : template))
+        : [...current, saved];
+    });
+    setEditing(undefined);
     tea.notify.success(t('defaultAgent.notify.saved'));
   }
 
-  const hasTemplate = !!template;
-  const actionButton = hasTemplate ? (
-    <Button onClick={() => setShowDialog(true)} title={t('defaultAgent.edit.tooltip')}>
-      <EditIcon size={14} /> {t('defaultAgent.edit')}
-    </Button>
-  ) : (
-    <Button
-      type="primary"
-      onClick={() => setShowDialog(true)}
-      title={t('defaultAgent.create.tooltip')}
-    >
-      <AddIcon size={14} /> {t('defaultAgent.create')}
-    </Button>
-  );
+  async function handleDelete(template: AgentTemplateConfig) {
+    const ok = await tea.confirm({
+      message: t('defaultAgent.delete.confirm', { name: template.name }),
+      description: t('defaultAgent.delete.desc'),
+      okText: t('defaultAgent.delete.action'),
+    });
+    if (!ok) return;
+    setBusyTemplateId(template.template_id);
+    try {
+      await agentsApi.deleteDefaultTemplate(teamId, template.template_id);
+      setTemplates((current) =>
+        current.filter((item) => item.template_id !== template.template_id),
+      );
+      tea.notify.success(t('defaultAgent.delete.success', { name: template.name }));
+    } catch (err) {
+      tea.notify.error(getErrorMessage(err));
+    } finally {
+      setBusyTemplateId(null);
+    }
+  }
+
+  async function handleProvision(template: AgentTemplateConfig) {
+    const ok = await tea.confirm({
+      message: t('agentGrid.defaultCreate.confirm'),
+      description: t('agentGrid.defaultCreate.descTemplate', {
+        name: template.name,
+        skills: template.asset_ids?.skills?.length ?? 0,
+        codeGraphs: template.asset_ids?.code_graphs?.length ?? 0,
+        wikis: template.asset_ids?.wikis?.length ?? 0,
+      }),
+      okText: t('agentGrid.defaultCreate.action'),
+    });
+    if (!ok) return;
+    setBusyTemplateId(template.template_id);
+    try {
+      const result = await agentsApi.createDefault(teamId, template.template_id);
+      invalidateBackendCache();
+      if (result.failed_assets.length > 0) {
+        tea.notify.warning(
+          t('agentGrid.defaultCreate.partial', { count: result.failed_assets.length }),
+        );
+      } else {
+        tea.notify.success(t('agentGrid.defaultCreate.success', { name: result.agent_name }));
+      }
+    } catch (err) {
+      tea.notify.error(getErrorMessage(err));
+    } finally {
+      setBusyTemplateId(null);
+    }
+  }
 
   return (
     <div className="_memory-panel-card _memory-default-agent-section">
@@ -77,35 +108,68 @@ export default function DefaultAgentTemplateSection({
           <div className="_memory-default-agent-title">{t('defaultAgent.title')}</div>
           <div className="_memory-default-agent-desc">{t('defaultAgent.desc')}</div>
         </div>
-        <div className="_memory-default-agent-actions">{actionButton}</div>
+        <div className="_memory-default-agent-actions">
+          <Button type="primary" onClick={() => setEditing(null)}>
+            <AddIcon size={14} /> {t('defaultAgent.create')}
+          </Button>
+        </div>
       </div>
 
       {loading ? (
         <div className="_memory-default-agent-body">
           <span className="_memory-default-agent-placeholder">{t('team.loading')}</span>
         </div>
-      ) : hasTemplate ? (
+      ) : templates.length === 0 ? (
         <div className="_memory-default-agent-body">
-          <div className="_memory-default-agent-name" title={template!.name}>
-            {template!.name}
-          </div>
-          <div className="_memory-default-agent-detail">
-            {template!.description || t('common.noDescription')}
-          </div>
+          <span className="_memory-default-agent-placeholder">{t('defaultAgent.empty')}</span>
         </div>
       ) : (
-        <div className="_memory-default-agent-body">
-          <span className="_memory-default-agent-placeholder">
-            {t('defaultAgent.empty')}
-          </span>
+        <div className="_memory-default-agent-list">
+          {templates.map((template) => (
+            <div className="_memory-default-agent-item" key={template.template_id}>
+              <div className="_memory-default-agent-info">
+                <div className="_memory-default-agent-name" title={template.name}>
+                  {template.name}
+                </div>
+                <div className="_memory-default-agent-detail">
+                  {template.description || t('common.noDescription')}
+                </div>
+                <div className="_memory-default-agent-detail">
+                  {t('defaultAgent.assets.summary', {
+                    skills: template.asset_ids?.skills?.length ?? 0,
+                    codeGraphs: template.asset_ids?.code_graphs?.length ?? 0,
+                    wikis: template.asset_ids?.wikis?.length ?? 0,
+                  })}
+                </div>
+              </div>
+              <div className="_memory-default-agent-item-actions">
+                <Button
+                  disabled={busyTemplateId !== null}
+                  loading={busyTemplateId === template.template_id}
+                  onClick={() => void handleProvision(template)}
+                >
+                  {t('defaultAgent.use')}
+                </Button>
+                <Button disabled={busyTemplateId !== null} onClick={() => setEditing(template)}>
+                  <EditIcon size={14} /> {t('defaultAgent.edit')}
+                </Button>
+                <Button
+                  disabled={busyTemplateId !== null}
+                  onClick={() => void handleDelete(template)}
+                >
+                  <DeleteIcon size={14} /> {t('common.delete')}
+                </Button>
+              </div>
+            </div>
+          ))}
         </div>
       )}
 
-      {showDialog && (
+      {editing !== undefined && (
         <DefaultAgentTemplateDialog
           team={{ team_id: teamId, name: teamName }}
-          initial={template}
-          onClose={() => setShowDialog(false)}
+          initial={editing}
+          onClose={() => setEditing(undefined)}
           onSaved={handleSaved}
         />
       )}

@@ -202,47 +202,6 @@ export default function TeamManagementPanel({
     }
   }
 
-  async function handleCreateDefaultAgent() {
-    if (!activeTeamId) return;
-    let description = t('agentGrid.defaultCreate.descFallback');
-    try {
-      const template = await agentsApi.getDefaultTemplate(activeTeamId);
-      if (template?.name) {
-        description = t('agentGrid.defaultCreate.descTemplate', {
-          name: template.name,
-          skills: template.asset_ids?.skills?.length ?? 0,
-          codeGraphs: template.asset_ids?.code_graphs?.length ?? 0,
-          wikis: template.asset_ids?.wikis?.length ?? 0,
-        });
-      }
-    } catch (err) {
-      tea.notify.error(errMsg(err));
-      return;
-    }
-    const ok = await tea.confirm({
-      message: t('agentGrid.defaultCreate.confirm'),
-      description,
-      okText: t('agentGrid.defaultCreate.action'),
-    });
-    if (!ok) return;
-    setBusy(true);
-    try {
-      const result = await agentsApi.createDefault(activeTeamId);
-      invalidateBackendCache();
-      if (result.failed_assets.length > 0) {
-        tea.notify.warning(
-          t('agentGrid.defaultCreate.partial', { count: result.failed_assets.length }),
-        );
-      } else {
-        tea.notify.success(t('agentGrid.defaultCreate.success', { name: result.agent_name }));
-      }
-    } catch (err) {
-      tea.notify.error(errMsg(err));
-    } finally {
-      setBusy(false);
-    }
-  }
-
   async function handleCreateTeam(input: { name: string; description: string }) {
     setBusy(true);
     try {
@@ -295,54 +254,55 @@ export default function TeamManagementPanel({
           1. 告诉用户「我现在操作的是哪个 team」（name + team_id + 成员数 + 描述）
           2. 提供 team 级的操作（+ 新建 Team / + 新建 Agent）
           3. 当尚未选 team 时，给出引导 */}
-      {teamsLoading ? (
-        <div className="_memory-panel-card">
-          <div className="_memory-team-header-row">
-            <div className="_memory-team-header-info">
-              <div className="_memory-team-header-avatar" style={{ opacity: 0.3 }}>
-                …
-              </div>
-              <div className="_memory-team-header-meta">
-                <div className="_memory-team-header-meta-row">
-                  <span
-                    className="_memory-team-header-name"
-                    style={{ color: 'var(--muted-foreground)' }}
-                  >
-                    {t('team.loading')}
-                  </span>
+      {showMembers &&
+        (teamsLoading ? (
+          <div className="_memory-panel-card">
+            <div className="_memory-team-header-row">
+              <div className="_memory-team-header-info">
+                <div className="_memory-team-header-avatar" style={{ opacity: 0.3 }}>
+                  …
+                </div>
+                <div className="_memory-team-header-meta">
+                  <div className="_memory-team-header-meta-row">
+                    <span
+                      className="_memory-team-header-name"
+                      style={{ color: 'var(--muted-foreground)' }}
+                    >
+                      {t('team.loading')}
+                    </span>
+                  </div>
                 </div>
               </div>
             </div>
           </div>
-        </div>
-      ) : activeTeam ? (
-        <TeamHeaderCard
-          team={activeTeam}
-          ops={
-            <>
-              <Button onClick={() => setShowCreateTeam(true)} title={t('team.createTeam')}>
-                <AddIcon size={14} /> {t('team.createTeam')}
-              </Button>
-              {showMembers && isTeamAdmin(activeTeam, currentUser) && (
-                <Button
-                  onClick={() => {
-                    setShowTeamSettings((value) => !value);
-                    void refreshDeletePreview();
-                  }}
-                >
-                  {t('team.settings')}
+        ) : activeTeam ? (
+          <TeamHeaderCard
+            team={activeTeam}
+            ops={
+              <>
+                <Button onClick={() => setShowCreateTeam(true)} title={t('team.createTeam')}>
+                  <AddIcon size={14} /> {t('team.createTeam')}
                 </Button>
-              )}
-            </>
-          }
-        />
-      ) : (
-        <div className="_memory-panel-card">
-          <div className="_memory-team-header-row">
-            <div className="_memory-team-header-empty-hint">{t('team.empty.hint')}</div>
+                {showMembers && isTeamAdmin(activeTeam, currentUser) && (
+                  <Button
+                    onClick={() => {
+                      setShowTeamSettings((value) => !value);
+                      void refreshDeletePreview();
+                    }}
+                  >
+                    {t('team.settings')}
+                  </Button>
+                )}
+              </>
+            }
+          />
+        ) : (
+          <div className="_memory-panel-card">
+            <div className="_memory-team-header-row">
+              <div className="_memory-team-header-empty-hint">{t('team.empty.hint')}</div>
+            </div>
           </div>
-        </div>
-      )}
+        ))}
 
       {teamsLoading ? (
         <div
@@ -403,8 +363,8 @@ export default function TeamManagementPanel({
             </div>
           )}
 
-          {/* === 默认 Agent 模板（仅当前 Team owner/admin 可见）=== */}
-          {showAgents && isTeamAdmin(activeTeam, currentUser) && (
+          {/* === 默认 Agent 模板（当前 Team 所有 active member 可共同维护）=== */}
+          {showAgents && (
             <DefaultAgentTemplateSection teamId={activeTeam.team_id} teamName={activeTeam.name} />
           )}
 
@@ -419,11 +379,7 @@ export default function TeamManagementPanel({
               currentUser={currentUser}
               canSeeAllAgents={canSeeAllAgents}
               onCreateAgent={() => setShowCreateAgent(true)}
-              onCreateDefaultAgent={
-                !allAgents.some((agent) => agent.owner_user_id === currentUser)
-                  ? handleCreateDefaultAgent
-                  : undefined
-              }
+              onCreateDefaultAgent={undefined}
               onEditAgent={setEditingAgent}
               onArchiveAgent={handleArchiveAgent}
               onRestoreAgent={handleRestoreAgent}

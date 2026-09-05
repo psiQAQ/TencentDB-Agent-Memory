@@ -31,7 +31,12 @@ export { authVerifyApi, environmentBindingsApi, type EnvironmentBinding } from '
 export { teamsApi, membersApi } from './api/teams';
 
 // ── Agents ──
-export { agentsApi, type AgentTemplateConfig, type AgentTemplateAssetIds } from './api/agents';
+export {
+  agentsApi,
+  type AgentTemplateConfig,
+  type AgentTemplateInput,
+  type AgentTemplateAssetIds,
+} from './api/agents';
 
 // ── Tasks + Participation Logs ──
 export {

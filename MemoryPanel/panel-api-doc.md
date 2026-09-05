@@ -176,7 +176,7 @@ caller 的 active membership 与真实 `admin/member/reviewer` 角色决定。
 - 路径最后一段即 action 名（如 `POST /meta/agent/list` → 内核 `agent/list`）。
 - 白名单之外 action 返回 `404 UNKNOWN_META_ACTION`；`agent-fixed-asset/*` 返回 `501 NOT_IN_SCOPE`（该类操作由 Panel 业务路由内部直调，见 §3.4/§3.10）。
 
-**开放 action 清单（54 条）**：
+**开放 action 清单**：
 
 | 实体 | action |
 |---|---|
@@ -184,7 +184,7 @@ caller 的 active membership 与真实 `admin/member/reviewer` 角色决定。
 | user-key | create、list、get、revoke、update |
 | team | create、get、update、delete、list |
 | team-member | add、remove、list、get |
-| agent | create、get、update、delete、list、archive、set-default-template、get-default-template |
+| agent | create、get、update、delete、list、archive、list/create/update/delete-default-template（含旧 get/set 兼容） |
 | task | create、get、update、delete、list、archive |
 | task-agent | link、unlink、list |
 | participation-log | append、list |
@@ -201,8 +201,11 @@ caller 的 active membership 与真实 `admin/member/reviewer` 角色决定。
 | action | 行为 |
 |---|---|
 | `user/create`、`user/create-with-key`、`team/create`、`agent/create`、`task/create` | 先按 name/username/title 查重，重名返回 `409` 中文提示 |
-| `agent/set-default-template` | **不转发内核**，Panel 本地写模板文件；需当前 Team owner/admin（真实 role=`admin`），否则 `403 permission_denied` |
-| `agent/get-default-template` | **不转发内核**，Panel 本地读模板文件；需当前 Team active membership |
+| `agent/list-default-templates` | **不转发内核**，列出 Team 多个默认 Agent 模板；需 active membership |
+| `agent/create-default-template` | 新增模板；所有 Team active member 均可调用 |
+| `agent/update-default-template` | 按 `template_id` 更新模板；所有 Team active member 均可调用 |
+| `agent/delete-default-template` | 按 `template_id` 删除模板；所有 Team active member 均可调用；不影响已生成 Agent |
+| `agent/get-default-template`、`agent/set-default-template` | 旧单模板客户端兼容入口；新客户端应使用上述集合接口 |
 | `team-member/add` | 只创建/恢复 membership，不创建 Agent 或 Asset |
 | `user/list` | 隐藏内部 `knowledge-service` 计费用户 |
 
@@ -772,15 +775,17 @@ L0/L1 列表批量删除。**仅资产 Owner**。
 
 ### POST /agent/create-default
 
-当前认证用户显式确认后，为自己在指定 Team 创建默认 Agent。请求只接受 `team_id`，
+当前认证用户显式确认后，为自己在指定 Team 创建默认 Agent。请求接受 `team_id` 和可选
+`template_id`，
 `owner_user_id` 从 User-Key 派生；caller 必须是 Team active member。
 
-**请求体**：`{ "team_id": "team-xxx" }`。接口不接受任意 `user_id`；确认动作由 Panel
+**请求体**：`{ "team_id": "team-xxx", "template_id": "tpl-xxx" }`。接口不接受任意 `user_id`；确认动作由 Panel
 UI 在发请求前完成。
 
-有 Team 模板时创建同名 Agent 并补齐模板资产；无模板时创建
+指定 Team 模板时创建同名 Agent 并补齐模板资产；无模板时创建
 `default-agent-{username}` 和三个预置 Skill。Agent 带 `panel_provisioning` metadata，
-并按 owner+Team+name 与资产自身查重；重复点击、超时重试只补缺失项。
+其中记录 `template_id`，并按 owner+Team+template 与资产自身查重；重复点击、超时重试
+只补缺失项。Team 有多个模板却未传 `template_id` 时返回 `TEMPLATE_ID_REQUIRED`。
 
 **响应** `data`：`agent_id`、`agent_name`、`agent_created`、`failed_assets`。部分资产
 失败时 Agent 和成功项保留，再次调用可恢复。
@@ -1447,8 +1452,10 @@ Panel 会再次按 Task 可见性过滤 Core 聚合行，Core 即使错误返回
 | 404 | UNKNOWN_META_ACTION | 未知 meta action |
 | 404 | UNKNOWN_SKILL_ACTION | 未知 skill action |
 | 501 | NOT_IN_SCOPE | action 未对面板开放（agent-fixed-asset/*） |
-| 403 | permission_denied | 非当前 Team admin 写默认模板，或非 Team member 读取模板 |
-| 400 | INVALID_PARAM | `agent/set-default-template` 缺 `team_id`/`template` |
+| 403 | permission_denied | caller 不是当前 Team active member |
+| 400 | INVALID_PARAM / INVALID_TEMPLATE_NAME | 模板请求缺必填字段或名称为空 |
+| 404 | TEMPLATE_NOT_FOUND | 指定模板不存在或已删除 |
+| 409 | TEMPLATE_NAME_EXISTS | 当前 Team 已有同名模板（忽略大小写与首尾空白） |
 
 **Chat-Memory**
 

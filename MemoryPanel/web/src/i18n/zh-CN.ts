@@ -1155,27 +1155,32 @@ export const zhCN = {
     'Agent 已就绪，但有 {{count}} 个模板资产创建失败；再次确认会补齐缺失项。',
   'agentGrid.defaultCreate.success': '默认 Agent「{{name}}」创建完成。',
 
-  // ===== DefaultAgentTemplate（默认 Agent 模板，仅 admin 可见）=====
+  // ===== DefaultAgentTemplate（Team active member 共同维护）=====
   'defaultAgent.title': '默认 Agent 模板',
   'defaultAgent.desc':
-    'Team 成员在自己尚无 Agent 时，可查看摘要并显式确认按此模板创建。仅可选用团队公共资产（visibility=team）。',
-  'defaultAgent.empty': '尚未配置 · 成员仍可显式创建预置 default-agent',
-  'defaultAgent.create': '新建默认 Agent',
-  'defaultAgent.create.tooltip': '为当前 team 配置默认 Agent 模板',
+    '当前 Team 的所有 active 成员均可新增、修改、删除并选用模板。模板仅可引用团队公共资产（visibility=team）。',
+  'defaultAgent.empty': '尚无模板；新建后，Team 成员可按需创建自己的 Agent。',
+  'defaultAgent.create': '新建模板',
+  'defaultAgent.create.tooltip': '为当前 Team 新建一个默认 Agent 模板',
   'defaultAgent.create.caption': '新建默认 Agent 模板',
-  'defaultAgent.create.desc':
-    '配置当前 Team 的默认 Agent 模板；成员须在 Agents 管理页面自行确认后才会创建。',
+  'defaultAgent.create.desc': '新增一个 Team 共享的默认 Agent 模板；保存模板不会自动创建 Agent。',
   'defaultAgent.create.submit': '创建',
   'defaultAgent.edit': '修改配置',
-  'defaultAgent.edit.tooltip': '修改当前 team 的默认 Agent 模板',
+  'defaultAgent.edit.tooltip': '修改这个默认 Agent 模板',
   'defaultAgent.edit.caption': '修改默认 Agent 模板',
-  'defaultAgent.edit.desc': '覆盖式更新当前 Team 的默认 Agent 模板；不修改已经生成的 Agent。',
+  'defaultAgent.edit.desc': '更新这个 Team 模板；不修改已经生成的 Agent。',
   'defaultAgent.save': '保存配置',
   'defaultAgent.name': '默认 Agent 名字 *',
   'defaultAgent.name.hint': '成员显式确认模板创建时，将以此名字创建其专属默认 Agent。',
   'defaultAgent.assets.label': '团队公共资产：',
   'defaultAgent.assets.hint': '仅可选团队公共资产（visibility=team）',
   'defaultAgent.notify.saved': '默认 Agent 模板已保存。',
+  'defaultAgent.assets.summary': 'Skill {{skills}} · Code Graph {{codeGraphs}} · Wiki {{wikis}}',
+  'defaultAgent.use': '按模板创建',
+  'defaultAgent.delete.confirm': '删除模板「{{name}}」？',
+  'defaultAgent.delete.desc': '只删除模板，不影响已按该模板创建的 Agent 或资产。',
+  'defaultAgent.delete.action': '删除模板',
+  'defaultAgent.delete.success': '模板「{{name}}」已删除。',
 
   // ===== MemberSection =====
   'member.title': '成员（{{count}}）',

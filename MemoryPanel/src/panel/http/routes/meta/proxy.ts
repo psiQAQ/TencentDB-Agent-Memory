@@ -12,9 +12,13 @@ import { KNOWLEDGE_SERVICE_USERNAME } from '../../../startup/ensure-knowledge-ll
 import { DEFAULT_SKILLS } from './default-skills.js';
 import { extractListItems, isCallerSystemAdmin, resolveCallerUserId } from '../knowledge/common.js';
 import {
-  getAgentTemplate as readTemplateFile,
-  saveAgentTemplate as writeTemplateFile,
+  createAgentTemplate,
+  deleteAgentTemplate,
+  getAgentTemplate,
+  listAgentTemplates,
+  updateAgentTemplate,
   type AgentTemplateConfig,
+  type AgentTemplateInput,
 } from '../../../state/agent-template-store.js';
 
 /**
@@ -56,7 +60,7 @@ async function getCallerActiveTeamRole(
     );
     if (envelope.code !== 0 || !envelope.data) return null;
     const member = envelope.data as { user_id?: string; role?: string; status?: string };
-    if (member.user_id !== userId || member.status === 'removed') return null;
+    if (member.user_id !== userId || member.status !== 'active') return null;
     return member.role === 'admin' || member.role === 'member' || member.role === 'reviewer'
       ? member.role
       : null;
@@ -211,27 +215,84 @@ export function registerMetaProxyRoutes(api: Hono, deps: PanelDeps): void {
       return respondControlError(c, 409, duplicateMsg);
     }
 
-    // ── 默认 Agent 模板读写：Panel 直接读写本地文件（不转发内核）──
-    if (action === 'agent/set-default-template') {
-      const teamId = typeof body.team_id === 'string' ? body.team_id : '';
-      const template = body.template;
-      if (!teamId || !template || typeof template !== 'object') {
-        return respondControlError(c, 400, 'INVALID_PARAM');
-      }
-      if ((await getCallerActiveTeamRole(deps, ctx, teamId)) !== 'admin') {
-        return respondControlError(c, 403, 'permission_denied');
-      }
-      writeTemplateFile(deps.config.agentTemplateDir, ctx.instanceId, teamId, template as AgentTemplateConfig);
-      return respondEnvelope(c, { code: 0, message: 'ok', request_id: ctx.reqId ?? '', data: { ok: true } });
-    }
-    if (action === 'agent/get-default-template') {
+    // ── 默认 Agent 模板集合：Panel 直接读写本地文件（不转发内核）──
+    if (action === 'agent/list-default-templates' || action === 'agent/get-default-template') {
       const teamId = typeof body.team_id === 'string' ? body.team_id : '';
       if (!teamId) return respondControlError(c, 400, 'INVALID_PARAM');
       if (!(await getCallerActiveTeamRole(deps, ctx, teamId))) {
         return respondControlError(c, 403, 'permission_denied');
       }
-      const template = teamId ? readTemplateFile(deps.config.agentTemplateDir, ctx.instanceId, teamId) : null;
-      return respondEnvelope(c, { code: 0, message: 'ok', request_id: ctx.reqId ?? '', data: template ?? {} });
+      const templates = listAgentTemplates(deps.config.agentTemplateDir, ctx.instanceId, teamId);
+      const data =
+        action === 'agent/get-default-template' ? (templates[0] ?? {}) : { items: templates, total: templates.length };
+      return respondEnvelope(c, {
+        code: 0,
+        message: 'ok',
+        request_id: ctx.reqId ?? '',
+        data,
+      });
+    }
+    if (
+      action === 'agent/set-default-template' ||
+      action === 'agent/create-default-template' ||
+      action === 'agent/update-default-template' ||
+      action === 'agent/delete-default-template'
+    ) {
+      const teamId = typeof body.team_id === 'string' ? body.team_id : '';
+      if (!teamId || !(await getCallerActiveTeamRole(deps, ctx, teamId))) {
+        return respondControlError(c, teamId ? 403 : 400, teamId ? 'permission_denied' : 'INVALID_PARAM');
+      }
+      const callerId = await resolveCallerUserId(deps, ctx);
+      if (!callerId) return respondControlError(c, 401, 'INVALID_USER_KEY');
+      const templateId = typeof body.template_id === 'string' ? body.template_id : '';
+      if (action === 'agent/delete-default-template') {
+        if (!templateId) return respondControlError(c, 400, 'INVALID_PARAM');
+        const deleted = deleteAgentTemplate(deps.config.agentTemplateDir, ctx.instanceId, teamId, templateId);
+        return deleted
+          ? respondEnvelope(c, {
+              code: 0,
+              message: 'ok',
+              request_id: ctx.reqId ?? '',
+              data: { deleted: true },
+            })
+          : respondControlError(c, 404, 'TEMPLATE_NOT_FOUND');
+      }
+      const rawTemplate = body.template;
+      if (!rawTemplate || typeof rawTemplate !== 'object') {
+        return respondControlError(c, 400, 'INVALID_PARAM');
+      }
+      const template = rawTemplate as AgentTemplateInput;
+      if (typeof template.name !== 'string' || !template.name.trim()) {
+        return respondControlError(c, 400, 'INVALID_TEMPLATE_NAME');
+      }
+      const legacySetId =
+        action === 'agent/set-default-template'
+          ? ((typeof (rawTemplate as { template_id?: unknown }).template_id === 'string'
+              ? (rawTemplate as { template_id: string }).template_id
+              : listAgentTemplates(deps.config.agentTemplateDir, ctx.instanceId, teamId)[0]?.template_id) ?? '')
+          : '';
+      const existingId = legacySetId || templateId;
+      const duplicateName = listAgentTemplates(
+        deps.config.agentTemplateDir,
+        ctx.instanceId,
+        teamId,
+      ).some(
+        (candidate) =>
+          candidate.template_id !== existingId &&
+          candidate.name.trim().toLocaleLowerCase() === template.name.trim().toLocaleLowerCase(),
+      );
+      if (duplicateName) return respondControlError(c, 409, 'TEMPLATE_NAME_EXISTS');
+      const saved = existingId
+        ? updateAgentTemplate(deps.config.agentTemplateDir, ctx.instanceId, teamId, existingId, template, callerId)
+        : createAgentTemplate(deps.config.agentTemplateDir, ctx.instanceId, teamId, template, callerId);
+      return saved
+        ? respondEnvelope(c, {
+            code: 0,
+            message: 'ok',
+            request_id: ctx.reqId ?? '',
+            data: saved,
+          })
+        : respondControlError(c, 404, 'TEMPLATE_NOT_FOUND');
     }
 
     const envelope = await deps.metaKernel.invoke(action, body, ctx);
@@ -262,7 +323,12 @@ export interface DefaultAgentProvisionResult {
   failed_assets: string[];
 }
 
-function provisioningMetadata(raw: string | undefined, teamId: string, userId: string): string {
+function provisioningMetadata(
+  raw: string | undefined,
+  teamId: string,
+  userId: string,
+  templateId: string | null,
+): string {
   let parsed: Record<string, unknown> = {};
   try {
     const value = JSON.parse(raw ?? '{}') as unknown;
@@ -277,6 +343,7 @@ function provisioningMetadata(raw: string | undefined, teamId: string, userId: s
       schema_version: 1,
       team_id: teamId,
       created_for_user_id: userId,
+      template_id: templateId,
     },
   });
 }
@@ -288,12 +355,19 @@ function provisioningMetadata(raw: string | undefined, teamId: string, userId: s
 export async function provisionDefaultAgentForCaller(
   userId: string,
   teamId: string,
+  templateId: string | null,
   ctx: MetaCallContext,
   deps: PanelDeps,
 ): Promise<DefaultAgentProvisionResult> {
-
   // 1. 读本地模板文件
-  const template = readTemplateFile(deps.config.agentTemplateDir, ctx.instanceId, teamId);
+  const templates = listAgentTemplates(deps.config.agentTemplateDir, ctx.instanceId, teamId);
+  const template = templateId
+    ? getAgentTemplate(deps.config.agentTemplateDir, ctx.instanceId, teamId, templateId)
+    : templates.length === 1
+      ? templates[0]
+      : null;
+  if (templateId && !template) throw new Error('TEMPLATE_NOT_FOUND');
+  if (!templateId && templates.length > 1) throw new Error('TEMPLATE_ID_REQUIRED');
   const hasTemplate = !!template?.name;
 
   // 2. 拿 username（拼 default-agent 名）
@@ -306,25 +380,46 @@ export async function provisionDefaultAgentForCaller(
   const agentName = hasTemplate ? template!.name : defaultAgentName;
 
   // 4. 幂等查重：已存在同名 active agent 则跳过建本体
-  const agentsEnv = await deps.metaKernel.invoke('agent/list', {
-    team_id: teamId,
-    owner_user_id: userId,
-    status: 'active',
-    limit: 50,
-    offset: 0,
-  }, ctx);
+  const agentsEnv = await deps.metaKernel.invoke(
+    'agent/list',
+    {
+      team_id: teamId,
+      owner_user_id: userId,
+      status: 'active',
+      limit: 50,
+      offset: 0,
+    },
+    ctx,
+  );
   if (agentsEnv.code !== 0) throw new Error(agentsEnv.message || 'AGENT_LIST_FAILED');
-  const agents = agentsEnv.code === 0
-    ? ((agentsEnv.data as { items?: Array<{ agent_id: string; name: string; metadata_json?: string }> })?.items ?? [])
-    : [];
+  const agents =
+    agentsEnv.code === 0
+      ? ((
+          agentsEnv.data as {
+            items?: Array<{
+              agent_id: string;
+              name: string;
+              metadata_json?: string;
+            }>;
+          }
+        )?.items ?? [])
+      : [];
   const markedAgent = agents.find((candidate) => {
     try {
       const metadata = JSON.parse(candidate.metadata_json ?? '{}') as {
-        panel_provisioning?: { source?: string; team_id?: string; created_for_user_id?: string };
+        panel_provisioning?: {
+          source?: string;
+          team_id?: string;
+          created_for_user_id?: string;
+          template_id?: string;
+        };
       };
-      return metadata.panel_provisioning?.source === 'default_template'
-        && metadata.panel_provisioning.team_id === teamId
-        && metadata.panel_provisioning.created_for_user_id === userId;
+      return (
+        metadata.panel_provisioning?.source === 'default_template' &&
+        metadata.panel_provisioning.team_id === teamId &&
+        metadata.panel_provisioning.created_for_user_id === userId &&
+        (metadata.panel_provisioning.template_id ?? null) === (template?.template_id ?? null)
+      );
     } catch {
       return false;
     }
@@ -334,24 +429,33 @@ export async function provisionDefaultAgentForCaller(
 
   if (!defaultAgent) {
     // 建本体（owner=新用户；有模板用模板字段，无模板用 default-agent 预置字段）
-    const createEnv = await deps.metaKernel.invoke('agent/create', {
-      team_id: teamId,
-      owner_user_id: userId,
-      name: agentName,
-      description: hasTemplate ? template!.description ?? null : DEFAULT_AGENT_DESCRIPTION,
-      prompt: hasTemplate ? template!.prompt ?? '' : DEFAULT_AGENT_PROMPT,
-      visibility: hasTemplate ? template!.visibility ?? 'team' : 'team',
-      metadata_json: provisioningMetadata(
-        hasTemplate ? template!.metadata_json : JSON.stringify(DEFAULT_AGENT_METADATA),
-        teamId,
-        userId,
-      ),
-      status: 'active',
-    }, ctx);
+    const createEnv = await deps.metaKernel.invoke(
+      'agent/create',
+      {
+        team_id: teamId,
+        owner_user_id: userId,
+        name: agentName,
+        description: hasTemplate ? (template!.description ?? null) : DEFAULT_AGENT_DESCRIPTION,
+        prompt: hasTemplate ? (template!.prompt ?? '') : DEFAULT_AGENT_PROMPT,
+        visibility: hasTemplate ? (template!.visibility ?? 'team') : 'team',
+        metadata_json: provisioningMetadata(
+          hasTemplate ? template!.metadata_json : JSON.stringify(DEFAULT_AGENT_METADATA),
+          teamId,
+          userId,
+          template?.template_id ?? null,
+        ),
+        status: 'active',
+      },
+      ctx,
+    );
     if (createEnv.code !== 0) {
       deps.logger.warn('create default agent failed', {
-        instanceId: ctx.instanceId, userId, teamId, agentName,
-        code: createEnv.code, message: createEnv.message,
+        instanceId: ctx.instanceId,
+        userId,
+        teamId,
+        agentName,
+        code: createEnv.code,
+        message: createEnv.message,
       });
       throw new Error(createEnv.message || 'DEFAULT_AGENT_CREATE_FAILED');
     }
@@ -391,7 +495,9 @@ async function cloneTemplateAssets(
     } catch (err) {
       failed.push(skillId);
       deps.logger.warn('fork template skill failed', {
-        instanceId: ctx.instanceId, skillId, agentId,
+        instanceId: ctx.instanceId,
+        skillId,
+        agentId,
         error: err instanceof Error ? err.message : String(err),
       });
     }
@@ -399,8 +505,14 @@ async function cloneTemplateAssets(
 
   // code_graph / wiki：allocate 引用
   const knowledgeIds: Array<{ assetId: string; assetType: string }> = [
-    ...(template.asset_ids?.code_graphs ?? []).map((assetId) => ({ assetId, assetType: 'code_graph' })),
-    ...(template.asset_ids?.wikis ?? []).map((assetId) => ({ assetId, assetType: 'llm_wiki' })),
+    ...(template.asset_ids?.code_graphs ?? []).map((assetId) => ({
+      assetId,
+      assetType: 'code_graph',
+    })),
+    ...(template.asset_ids?.wikis ?? []).map((assetId) => ({
+      assetId,
+      assetType: 'llm_wiki',
+    })),
   ];
   for (const k of knowledgeIds) {
     try {
@@ -408,7 +520,9 @@ async function cloneTemplateAssets(
     } catch (err) {
       failed.push(k.assetId);
       deps.logger.warn('allocate template knowledge failed', {
-        instanceId: ctx.instanceId, assetId: k.assetId, agentId,
+        instanceId: ctx.instanceId,
+        assetId: k.assetId,
+        agentId,
         error: err instanceof Error ? err.message : String(err),
       });
     }
@@ -425,13 +539,17 @@ async function forkSkillToAgent(
   sourceSkillId: string,
   targetAgentId: string,
 ): Promise<void> {
-  const getEnv = await deps.skillKernel.invoke('get', {
-    user_id: userId,
-    team_id: teamId,
-    skill_id: sourceSkillId,
-    include_content: true,
-    include_manifest: true,
-  }, ctx);
+  const getEnv = await deps.skillKernel.invoke(
+    'get',
+    {
+      user_id: userId,
+      team_id: teamId,
+      skill_id: sourceSkillId,
+      include_content: true,
+      include_manifest: true,
+    },
+    ctx,
+  );
   if (getEnv.code !== 0) throw new Error(`skill get failed: ${getEnv.code}`);
   const detail = getEnv.data as {
     name: string;
@@ -448,14 +566,23 @@ async function forkSkillToAgent(
   }> = [];
   for (const entry of detail.manifest ?? []) {
     try {
-      const fEnv = await deps.skillKernel.invoke('files/read', {
-        user_id: userId,
-        team_id: teamId,
-        skill_id: sourceSkillId,
-        path: entry.path,
-      }, ctx);
+      const fEnv = await deps.skillKernel.invoke(
+        'files/read',
+        {
+          user_id: userId,
+          team_id: teamId,
+          skill_id: sourceSkillId,
+          path: entry.path,
+        },
+        ctx,
+      );
       if (fEnv.code === 0) {
-        const f = fEnv.data as { path: string; content: string; encoding: string; mime_type?: string };
+        const f = fEnv.data as {
+          path: string;
+          content: string;
+          encoding: string;
+          mime_type?: string;
+        };
         resources.push({
           path: f.path,
           content: f.content,
@@ -469,15 +596,19 @@ async function forkSkillToAgent(
     }
   }
 
-  const createEnv = await deps.skillKernel.invoke('create', {
-    user_id: userId,
-    team_id: teamId,
-    agent_id: targetAgentId,
-    name: detail.name,
-    content: detail.content,
-    resources: resources.length ? resources : undefined,
-    metadata: { forked_from: { skill_id: sourceSkillId, name: detail.name } },
-  }, ctx);
+  const createEnv = await deps.skillKernel.invoke(
+    'create',
+    {
+      user_id: userId,
+      team_id: teamId,
+      agent_id: targetAgentId,
+      name: detail.name,
+      content: detail.content,
+      resources: resources.length ? resources : undefined,
+      metadata: { forked_from: { skill_id: sourceSkillId, name: detail.name } },
+    },
+    ctx,
+  );
   if (createEnv.code !== 0 && createEnv.code !== 42201) {
     throw new Error(`skill create failed: ${createEnv.code}`);
   }
@@ -511,9 +642,19 @@ async function allocateKnowledgeToAgent(
       priority: b.priority ?? 50,
       created_by: b.created_by,
     })),
-    { asset_id: assetId, asset_type: assetType, injection_mode: 'tool', priority: 50, created_by: caller },
+    {
+      asset_id: assetId,
+      asset_type: assetType,
+      injection_mode: 'tool',
+      priority: 50,
+      created_by: caller,
+    },
   ];
-  const setEnv = await deps.metaKernel.invoke('agent-fixed-asset/set', { agent_id: agentId, bindings: newBindings }, ctx);
+  const setEnv = await deps.metaKernel.invoke(
+    'agent-fixed-asset/set',
+    { agent_id: agentId, bindings: newBindings },
+    ctx,
+  );
   if (setEnv.code !== 0) {
     throw new Error(`agent-fixed-asset/set failed: ${setEnv.code}`);
   }
@@ -531,13 +672,17 @@ async function importDefaultSkillsForAgent(
   const failed: string[] = [];
   for (const skill of DEFAULT_SKILLS) {
     try {
-      const createEnv = await deps.skillKernel.invoke('create', {
-        user_id: userId,
-        team_id: teamId,
-        agent_id: agentId,
-        name: skill.name,
-        content: skill.content,
-      }, ctx);
+      const createEnv = await deps.skillKernel.invoke(
+        'create',
+        {
+          user_id: userId,
+          team_id: teamId,
+          agent_id: agentId,
+          name: skill.name,
+          content: skill.content,
+        },
+        ctx,
+      );
       if (createEnv.code === 0) {
         deps.logger.info(`default skill "${skill.name}" created`, {
           instanceId: ctx.instanceId,
