@@ -431,7 +431,7 @@ export class MetadataClient {
     let offset = 0;
     let total = 0;
 
-    while (allItems.length < PAGINATION_HARD_LIMIT) {
+    while (offset < PAGINATION_HARD_LIMIT) {
       const resp = await this.fetch<FixedAssetDetailResult>(
         "/v3/meta/agent-fixed-asset/list-with-detail",
         {
@@ -445,19 +445,13 @@ export class MetadataClient {
       total = resp.total;
       const pageItems = resp.items as unknown as FixedAssetItem[];
       allItems.push(...pageItems);
-      // 停止条件（任一命中即停）：
-      //   1. 累计 items 数 ≥ total（正常场景）
-      //   2. 本页返 0 条（apply_visibility_filter 过滤后 items 可能全空，
-      //      但内核 total 仍是过滤前的原始行数 —— 不 break 会永远翻页；
-      //      2026-07-11 修：新加此条防死循环）
-      //   3. 本页返 < FA_PAGE_SIZE（小于一页 → 到底）
-      if (allItems.length >= total) break;
-      if (pageItems.length === 0) break;
-      if (pageItems.length < FA_PAGE_SIZE) break;
+      // Core 先按原始绑定分页，再做 visibility 过滤；空页/短页不代表到底。
+      // 按原始 offset 推进并限制扫描量，兼顾后续可见资产和全空页的终止。
       offset += FA_PAGE_SIZE;
+      if (offset >= total) break;
     }
 
-    if (allItems.length >= PAGINATION_HARD_LIMIT && allItems.length < total) {
+    if (offset >= PAGINATION_HARD_LIMIT && offset < total) {
       console.warn(`${TAG} getAgentFixedAssets truncated at ${PAGINATION_HARD_LIMIT} (total=${total})`);
     }
 
