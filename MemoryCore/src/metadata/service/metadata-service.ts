@@ -1579,9 +1579,12 @@ export class MetadataService {
     });
     if (fast.allowed) return fast;
 
-    // 只有「通过了前置门但角色默认未覆盖」(no_permission) 才需懒加载 ACL 重判
-    if (fast.reason !== "no_permission") return fast;
-    if (membership && roleDefaultCovers(membership.role, action)) return fast;
+    // restricted 对非 admin 跳过角色默认，只接受显式 ACL；空 ACL 的首次
+    // 判定会返回 visibility_restricted，不能把它当成 private 的终局拒绝。
+    const needsRestrictedAcl = asset.visibility === "restricted"
+      && membership?.status === "active" && membership.role !== "admin";
+    if (fast.reason !== "no_permission" && !needsRestrictedAcl) return fast;
+    if (!needsRestrictedAcl && membership && roleDefaultCovers(membership.role, action)) return fast;
 
     const aclRecords = await this.allAclRecords(params.asset_id);
     return checkPermission({
