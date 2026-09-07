@@ -229,6 +229,20 @@ function fetchStub(fetchCategories: string[], upstreamBodies: Record<string, unk
         }],
       });
     }
+    if (url === "https://pi.upstream.invalid/v1/chat/completions") {
+      fetchCategories.push("model-upstream");
+      upstreamBodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+      return Response.json({
+        id: "chatcmpl-pi-test",
+        object: "chat.completion",
+        model: "test-model",
+        choices: [{
+          index: 0,
+          message: { role: "assistant", content: "ok" },
+          finish_reason: "stop",
+        }],
+      });
+    }
     if (url.startsWith("https://core.invalid/")) {
       fetchCategories.push("core-bridge");
       return Response.json({ code: 0, data: { items: [] } });
@@ -267,6 +281,47 @@ describe("session cache identity isolation", () => {
     initAuth(DEFAULT_CONFIG.auth);
     vi.unstubAllGlobals();
     vi.restoreAllMocks();
+  });
+
+  it("does not send an unsupported interactive form to Pi when header identity mismatches", async () => {
+    const config = configForTest();
+    config.upstream.agents!.pi = {
+      url: "https://pi.upstream.invalid/v1",
+      apiKey: "pi-server-key",
+    };
+    const metadataClient = victimMetadata();
+    const fetchCategories: string[] = [];
+    const upstreamBodies: Record<string, unknown>[] = [];
+    setMetadataClient(metadataClient as never);
+    initAuth(config.auth);
+    vi.stubGlobal("fetch", fetchStub(fetchCategories, upstreamBodies));
+    const app = createApp(config);
+
+    const request = mainRequest(VICTIM.key, VICTIM.userId, {
+      teamId: VICTIM.teamId,
+      agentId: OUTSIDER.agentId,
+      taskId: VICTIM.taskId,
+    });
+    const headers = new Headers(request.headers);
+    headers.delete("x-api-key");
+    headers.set("authorization", `Bearer ${VICTIM.key}`);
+    request.headers = headers;
+    const response = await app.request(
+      `http://proxy/pi/${VICTIM.spaceId}/v1/chat/completions`,
+      request,
+    );
+    const text = await response.text();
+
+    expect(response.status).toBe(200);
+    expect(text).not.toContain("ask_followup_question");
+    expect(fetchCategories).toEqual(["auth", "model-upstream"]);
+    expect(upstreamBodies).toHaveLength(1);
+    expect(getSessionStore().get(sessionStoreKey({
+      userId: VICTIM.userId,
+      agentSource: "pi",
+      sessionId: VICTIM.sessionId,
+      spaceId: VICTIM.spaceId,
+    }))?.bypassed).toBe(true);
   });
 
   it.each([

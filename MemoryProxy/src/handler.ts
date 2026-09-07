@@ -729,6 +729,7 @@ export async function handleChatCompletions(
   // 但走独立的 header-driven session-init 分支(见下方 opencode 特化块),
   // 因此不需要走这里的 headless bypass —— opencode 能吃 mem 命令纯文本响应,
   // 也需要 injection / L0 / skill 提取,只是不能弹 form。
+  const _headerOnlyAgents = new Set(["hermes", "openclaw", "pi"]);
   const _dshPolicy = resolveDshHeadlessPolicy(
     agentSource,
     body as { tools?: unknown },
@@ -737,7 +738,23 @@ export async function handleChatCompletions(
   );
   const _dshHeadless = _dshPolicy.noInteractiveForm;
   const _dshMemoryBypass = _dshPolicy.bypassMemory;
-  const _sessionInitConfig = sessionInitConfigForDshHeadless(config.sessionInit, _dshPolicy);
+  const _baseSessionInitConfig = sessionInitConfigForDshHeadless(config.sessionInit, _dshPolicy);
+  const _headerConfig = _baseSessionInitConfig.headerAutoSelect;
+  const _headerOnlyHasCompleteIdentity = Boolean(
+    _headerOnlyAgents.has(agentSource)
+    && _headerConfig?.enabled
+    && lcHeaders[_headerConfig.teamHeader]?.trim()
+    && lcHeaders[_headerConfig.agentHeader]?.trim()
+  );
+  // Pi/OpenClaw/Hermes have no compatible interactive asset-selection tool.
+  // Keep metadata validation, but never fall back to a fake form they cannot
+  // execute when a complete header identity is invalid.
+  const _sessionInitConfig = _headerOnlyHasCompleteIdentity && _headerConfig
+    ? {
+        ..._baseSessionInitConfig,
+        headerAutoSelect: { ..._headerConfig, onMismatch: "bypass" as const },
+      }
+    : _baseSessionInitConfig;
   if (_dshHeadless) {
     console.log(
       `[request-classify] session=${sessionKey} agent=dsh headless/no-preset `
@@ -750,7 +767,6 @@ export async function handleChatCompletions(
   // hermes / openclaw 走 header 预选身份, dsh headless 无 ask_user_question tool —
   // 三者都没有交互式 form UI 可以弹,reset 后 session 会永远卡在 pending_asset_confirm。
   // 直接返回"不支持"文案。
-  const _headerOnlyAgents = new Set(["hermes", "openclaw"]);
   const _noFormAgent = _headerOnlyAgents.has(agentSource) || _dshHeadless;
   if (config.memCommand?.enabled && !isAuxiliary && _noFormAgent) {
     const { isSessionResetCommand } = await import("./mem-command/pre-intercept.js");
