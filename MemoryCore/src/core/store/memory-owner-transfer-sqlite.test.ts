@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 
 import type { MemoryRecord } from "../record/l1-writer.js";
-import { VectorStore } from "./sqlite.js";
+import { VectorStore } from "./sqlite/memory-store.js";
 
 describe("SQLite chat-memory current ownership", () => {
   let store: VectorStore | undefined;

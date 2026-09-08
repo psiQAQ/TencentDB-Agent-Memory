@@ -5,7 +5,7 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import { LocalStorageBackend } from "../core/storage/local-backend.js";
 import { StorageAdapter } from "../core/storage/adapter.js";
-import { VectorStore } from "../core/store/sqlite.js";
+import { VectorStore } from "../core/store/sqlite/memory-store.js";
 import {
   clearChatMemoryContent,
   transferChatMemoryContentOwnership,

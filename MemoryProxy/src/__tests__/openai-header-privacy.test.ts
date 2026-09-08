@@ -1,3 +1,10 @@
+// Keep route/identity assertions independent of instance configuration discovery.
+// The discovery and override paths are covered by instance-upstream-merge.test.ts.
+vi.mock("../instance-upstream-cache.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../instance-upstream-cache.js")>();
+  return { ...actual, getInstanceUpstreamConfigs: async () => [] };
+});
+
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { Hono } from "hono";
@@ -387,7 +394,7 @@ describe("OpenAI upstream header privacy", () => {
     assertSafe(upstreamHeaders[0]!, "Bearer server-global-key");
   });
 
-  it("falls back from a URL-only agent entry to the global server key", async () => {
+  it("passes client credentials for a URL-only agent entry", async () => {
     const value = config();
     value.upstream.agents.codebuddy = { url: `${configuredOrigin}/v1` };
     initAuth(value.auth);
@@ -398,10 +405,13 @@ describe("OpenAI upstream header privacy", () => {
     );
 
     expect(response.status).toBe(200);
-    assertSafe(upstreamHeaders[0]!, "Bearer server-global-key");
+    expect(upstreamHeaders[0]?.get("authorization")).toBe("Bearer private-caller-credential");
+    expect(upstreamHeaders[0]?.get("x-api-key")).toBe("private-memory-credential");
+    expect(upstreamHeaders[0]?.has("cookie")).toBe(false);
+    expect(upstreamHeaders[0]?.has("x-session-id")).toBe(false);
   });
 
-  it("fails closed before fetch when no server key is configured", async () => {
+  it("passes client credentials when no server key is configured", async () => {
     const value = config("");
     initAuth(value.auth);
 
@@ -410,9 +420,10 @@ describe("OpenAI upstream header privacy", () => {
       { method: "POST", headers: privateHeaders(), body: requestBody() },
     );
 
-    expect(response.status).toBe(503);
-    expect(upstreamUrls).toEqual([]);
-    expect(upstreamHeaders).toEqual([]);
+    expect(response.status).toBe(200);
+    expect(upstreamUrls).toHaveLength(1);
+    expect(upstreamHeaders[0]?.get("authorization")).toBe("Bearer private-caller-credential");
+    expect(upstreamHeaders[0]?.has("x-session-id")).toBe(false);
   });
 
   it("allows a same-origin primary target to use the selected server key", async () => {

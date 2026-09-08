@@ -62,13 +62,17 @@ import {
 import type { ProxyConfig } from "./types.js";
 import type { SystemUserMatch } from "./systemUser.js";
 import {
+  getInstanceUpstreamConfigs,
+  resolveUpstreamConfig,
+  shouldOverride,
+} from "./instance-upstream-cache.js";
+import {
   enforceRateLimit,
   isRateLimitExceededError,
   recordInputTokenUsage,
 } from "./rate-limit/guard.js";
 import {
   buildSafeUpstreamHeaders,
-  MissingUpstreamCredentialError,
 } from "./upstream-headers.js";
 
 /** Response headers that would confuse the client if forwarded verbatim. */
@@ -79,22 +83,15 @@ const SKIP_RESPONSE_HEADERS = new Set([
   "connection",
 ]);
 
-/**
- * Build upstream headers from the same protocol allowlist as normal requests.
- *
- * The caller's inbound key (`Authorization` / `x-api-key`) is a proxy-layer
- * auth credential — the sk-mem-xxx that `verifyUserKey` resolves against the
- * auth service. It is NOT a credential TokenHub (`config.upstream.url`) would
- * accept. It is dropped with every internal identity/session header, then the
- * configured upstream key is added in the selected protocol's auth format.
- */
-function buildPassthroughHeaders(c: Context, config: ProxyConfig): Record<string, string> {
+/** Resolve extraction credentials while keeping internal identity headers private. */
+function buildPassthroughHeaders(c: Context, config: ProxyConfig, apiKey?: string): Record<string, string> {
   const protocol = /\/v1\/messages(?:\/count_tokens)?$/.test(c.req.path)
     ? "anthropic"
     : "openai";
   return buildSafeUpstreamHeaders(c.req.raw.headers, {
     protocol,
-    apiKey: config.upstream.apiKey,
+    apiKey: apiKey ?? config.upstream.apiKey,
+    allowClientCredentials: true,
   });
 }
 
@@ -449,8 +446,26 @@ export async function handleSystemUserPassthrough(
   const startTime = new Date().toISOString();
   const traceId = uuidv7();
   const path = c.req.path;
-  const upstreamUrl = joinUrl(config.upstream.url, path);
+  let upstreamUrl = joinUrl(config.upstream.url, path);
   const spaceId = extractSpaceIdFromPath(path) ?? "";
+
+  // ── Instance upstream config: extraction model override ──────────────
+  // System users = internal service (memory/skill extraction). Check if the
+  // instance has a custom extraction model configured. If so, override the
+  // upstream URL and API key. Credit is always reported for internal users.
+  let extractionApiKeyOverride: string | undefined;
+  let extractionModelIdOverride: string | undefined;
+  {
+    const instanceConfigs = await getInstanceUpstreamConfigs(config.coreSkill, spaceId);
+    const extractCfg = resolveUpstreamConfig(instanceConfigs, undefined, "extraction");
+    if (shouldOverride(extractCfg)) {
+      upstreamUrl = joinUrl(extractCfg.base_url, path);
+      extractionApiKeyOverride = extractCfg.mode === "custom_unified" ? extractCfg.api_key : "";
+      if (extractCfg.model_id) {
+        extractionModelIdOverride = extractCfg.model_id;
+      }
+    }
+  }
 
   // Two body-forwarding paths (see file header). We normalise both to
   // `ArrayBuffer` so `fetch({body})` accepts them without a type-union
@@ -459,6 +474,10 @@ export async function handleSystemUserPassthrough(
   let bodyObj: Record<string, unknown> | null;
   let bodyTextForTrace: string;
   if (rewrittenBody) {
+    // Apply extraction model_id override before serializing.
+    if (extractionModelIdOverride && typeof rewrittenBody.model === "string") {
+      rewrittenBody.model = extractionModelIdOverride;
+    }
     // Main-handler path: reuse the already-parsed + alias-resolved body so
     // upstream sees the canonical `model_id`, exactly like external callers.
     bodyTextForTrace = JSON.stringify(rewrittenBody);
@@ -485,15 +504,7 @@ export async function handleSystemUserPassthrough(
     modelConfigured: modelId.length > 0,
   });
 
-  let headers: Record<string, string>;
-  try {
-    headers = buildPassthroughHeaders(c, config);
-  } catch (err: unknown) {
-    if (err instanceof MissingUpstreamCredentialError) {
-      return c.json({ error: err.message }, 503);
-    }
-    throw err;
-  }
+  const headers = buildPassthroughHeaders(c, config, extractionApiKeyOverride);
   const forwardTimeoutMs = config.server.forwardTimeoutMs ?? 600_000;
 
   let upstreamResp: Response;

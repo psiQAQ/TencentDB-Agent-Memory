@@ -28,6 +28,7 @@ import {
   internalSkillTransferOwnerSchema,
   internalListUsersByInstanceSchema,
   initAdminSchema,
+  instanceUpstreamListSchema,
 } from "./v3-meta-schemas.js";
 import {
   createMetaApiTraceContext,
@@ -135,6 +136,10 @@ const routeTable: Record<string, InternalHandler> = {
       await svc.resolveAssetTransferInternal(d);
       return { ok: true };
     },
+  ),
+  [`${V3_INTERNAL_PREFIX}/instance-upstream/list`]: bind(
+    instanceUpstreamListSchema,
+    async (d, svc) => svc.listInstanceUpstreamConfigsInternal(d),
   ),
 };
 

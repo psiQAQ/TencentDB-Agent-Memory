@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { TcvdbMemoryStore } from "./tcvdb.js";
+import { TcvdbMemoryStore } from "./tcvdb/memory-store.js";
 
 function makeStore(query: ReturnType<typeof vi.fn>): TcvdbMemoryStore {
   const store = new TcvdbMemoryStore({

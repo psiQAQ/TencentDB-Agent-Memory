@@ -17,6 +17,7 @@ import {
   privacySafeUsage,
   summarizeTelemetryValue,
 } from "./telemetry-privacy.js";
+import { archiveTrace, archiveSpan } from "./trace-archive.js";
 
 /**
  * Generate a UUID v7 (time-ordered), required by Opik API.
@@ -122,6 +123,17 @@ export function opikCreateTrace(
   config: ProxyConfig,
   input: OpikTraceInput,
 ): string {
+  // 本地 JSONL 归档（独立于 Opik 远程上报，由 traceArchive.enabled 控制）
+  archiveTrace({
+    type: "trace",
+    id: input.traceId,
+    name: privacySafeText(input.name),
+    projectName: privacySafeText(input.projectName),
+    startTime: input.startTime,
+    input: summarizeTelemetryValue(input.input),
+    tags: privacySafeTags(input.tags ?? []),
+  });
+
   if (!config.opik.enabled || !config.opik.url) return "";
 
   const baseUrl = config.opik.url.replace(/\/$/, "");
@@ -225,6 +237,22 @@ export function opikCreateLlmSpan(
   config: ProxyConfig,
   span: OpikLlmSpan,
 ): void {
+  // 本地 JSONL 归档（独立于 Opik 远程上报，由 traceArchive.enabled 控制）
+  archiveSpan({
+    type: "span",
+    id: uuidv7(),
+    traceId: span.traceId,
+    name: privacySafeText(span.name),
+    projectName: privacySafeText(span.projectName),
+    model: privacySafeText(span.model),
+    startTime: span.startTime,
+    endTime: span.endTime,
+    input: summarizeTelemetryValue(span.inputMessages),
+    output: summarizeTelemetryValue(span.outputMessage),
+    usage: privacySafeUsage(span.usage),
+    tags: privacySafeTags(span.tags ?? []),
+  });
+
   if (!config.opik.enabled || !config.opik.url) return;
 
   const baseUrl = config.opik.url.replace(/\/$/, "");

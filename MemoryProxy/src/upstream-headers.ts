@@ -7,6 +7,8 @@ export interface UpstreamHeaderOptions {
   protocol: "anthropic" | "openai";
   apiKey?: string;
   authHeaders?: Record<string, string> | null;
+  /** A configured passthrough route may use the caller's model credentials. */
+  allowClientCredentials?: boolean;
 }
 
 export class MissingUpstreamCredentialError extends Error {
@@ -33,7 +35,7 @@ export function sameOrigin(left: string, right: string): boolean {
   }
 }
 
-/** Build a fail-closed upstream header set from an explicit protocol allowlist. */
+/** Keep identity headers private while resolving server or passthrough credentials. */
 export function buildSafeUpstreamHeaders(
   inbound: Headers,
   options: UpstreamHeaderOptions,
@@ -66,6 +68,13 @@ export function buildSafeUpstreamHeaders(
     } else {
       headers.authorization = `Bearer ${options.apiKey.trim()}`;
     }
+  } else if (options.allowClientCredentials) {
+    // Passthrough is explicit at the selected upstream, never an implicit
+    // fallback for a router-selected destination without credentials.
+    const authorization = inbound.get("authorization");
+    const apiKey = inbound.get("x-api-key");
+    if (authorization) headers.authorization = authorization;
+    if (apiKey) headers["x-api-key"] = apiKey;
   } else {
     throw new MissingUpstreamCredentialError();
   }

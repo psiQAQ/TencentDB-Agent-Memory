@@ -276,6 +276,12 @@ export interface SessionInitConfig {
    * 默认 "default"（开启）。若想关闭，在 YAML 中配为空字符串 `defaultTaskId: ""`。
    */
   defaultTaskId?: string;
+  /**
+   * 跳过 asset_confirm 前置对话框，默认视为用户选了"是，关联团队资产"。
+   * 开启后首轮直接进入 team → agent → task 选择流程（或 auto-select 级联）。
+   * 默认 false（保持原有行为，弹 asset_confirm 对话框）。
+   */
+  skipAssetConfirm?: boolean;
   headerAutoSelect?: {
     /** 是否启用 header 自动预选。默认 true。 */
     enabled: boolean;
@@ -385,9 +391,9 @@ export interface SkillRuntimeConfig {
  *   │ in map, url + apiKey         │ agent.url  │ agent.apiKey            │
  *   └──────────────────────────────┴────────────┴──────────────────────────┘
  *
- * A same-origin URL-only entry inherits the global server credential. A
- * cross-origin entry must provide its own server credential; client
- * credentials are never forwarded upstream.
+ * A URL-only entry selects caller credentials for these chat handlers and
+ * Codex. WorkBuddy retains its upstream global-key fallback; an instance
+ * custom_passthrough entry explicitly selects caller credentials there too.
  *
  * Priority order (high → low):
  *   1. `costGuard`-provided `target.authHeaders`（cheap-model 兜底路由自带凭据）
@@ -503,11 +509,9 @@ export interface ProxyConfig {
   /**
    * `mem:` 特殊命令配置。
    *
-   * 当 enabled=false（默认）时，handler 不会检测 mem: 命令，所有请求走原有链路。
-   * 启用后，handler 在 session init 之后检测最后一条 user message 是否为 mem: 命令，
-   * 命中则执行对应操作并直接返回伪造 LLM 响应（不注入 / 不转发 / 不计费）。
-   *
-   * allowedCommands 为命令白名单，空数组表示全部允许。
+   * enabled 控制命令拦截，allowedCommands 为空时允许全部命令。
+   * handler 在 session init 后执行匹配的命令；session-reset 豁免命令白名单。
+   * taskDraft 可配置独立草稿模型，未配置时采用上游的当前对话模型回退。
    */
   memCommand: MemCommandConfig;
 
@@ -537,6 +541,23 @@ export interface ProxyConfig {
    *   分流已在生产跑通并有日志验证，此开关是"保守回滚"保险而非"灰度上线"开关。
    */
   workbuddyRequestRouting: WorkbuddyRequestRoutingConfig;
+
+  /**
+   * 本地 JSONL trace 归档配置。
+   *
+   * 启用后，每个 trace + span 以 JSONL 行写入本地文件（按日期分文件），
+   * 可配合 crontab 定时压缩上传到 COS/S3 归档存储。
+   *
+   * 默认关闭。启用后不影响 Opik / Langfuse 等远程上报链路。
+   */
+  traceArchive: TraceArchiveConfig;
+}
+
+export interface TraceArchiveConfig {
+  /** 是否启用本地 JSONL trace 归档。默认 false（关闭）。 */
+  enabled: boolean;
+  /** 归档目录（相对于项目根目录或绝对路径）。默认 "logs/traces"。 */
+  dir: string;
 }
 
 export interface CcRequestRoutingConfig {
@@ -550,16 +571,11 @@ export interface WorkbuddyRequestRoutingConfig {
 }
 
 export interface MemCommandConfig {
-  /** 是否启用 mem: 命令拦截。默认 false。 */
   enabled: boolean;
-  /**
-   * 命令白名单。空数组 = 全部允许。
-   * 例如 ["sync", "help"] 表示只允许 mem:sync 和 mem:help，其他命令不识别。
-   */
   allowedCommands: string[];
   /**
    * mem:create-task / mem:update-task 使用的 LLM 草稿生成器配置。可选。
-   * 未配置或 enabled=false 时，task 命令族会返回"未配置 task_draft"错误。
+   * 显式 enabled=false 时关闭草稿生成；未配置时跟随当前对话模型。
    * 结构与 packages/cost-guard 的 LLMInferConfig 保持形状一致。
    */
   taskDraft?: {
@@ -691,6 +707,27 @@ export interface CreditReportConfig {
 }
 
 /** Credit pricing entry for a single model (Credit / 1K Token). */
+/**
+ * 分档定价条目。按 input token 总量 (nonCacheInput + cacheRead) 命中对应档位，
+ * 该请求全部 token 类型都按该档单价计费（整体定档，非分段累进）。
+ *
+ * `tiers` 数组须按 `maxInputTokens` 升序排列，最后一档以 `null` 表示兜底（无上限）。
+ */
+export interface PricingTier {
+  /** 该档 input token 上限（包含）。null = 兜底档（无上限）。 */
+  maxInputTokens: number | null;
+  /** Standard input tokens (non-cache) — credit per 1K tokens. */
+  input: number;
+  /** Output tokens — credit per 1K tokens. */
+  output: number;
+  /** Cache read (cache hit) tokens — credit per 1K tokens. */
+  cacheRead: number;
+  /** Cache write with 5-minute TTL (ephemeral) — credit per 1K tokens. */
+  cacheWrite5m: number;
+  /** Cache write with 1-hour TTL (standard cache creation) — credit per 1K tokens. */
+  cacheWrite1h: number;
+}
+
 export interface CreditPricingEntry {
   /**
    * Model ID for matching (case-insensitive full-word match against usage.model).
@@ -713,6 +750,12 @@ export interface CreditPricingEntry {
   cacheWrite5m: number;
   /** Cache write with 1-hour TTL (standard cache creation). */
   cacheWrite1h: number;
+  /**
+   * 按 input token 总量 (nonCacheInput + cacheRead) 分档定价。
+   * 升序排列，最后一档 maxInputTokens 为 null（兜底）。
+   * 不配置时使用顶层 input/output/cacheRead/cacheWrite5m/cacheWrite1h 单价。
+   */
+  tiers?: PricingTier[];
 }
 
 /** Credit pricing configuration section. */
@@ -813,7 +856,7 @@ export interface RawYamlConfig {
     flushInterval?: number;
   };
   creditReport?: { url?: string; timeoutMs?: number };
-  creditPricing?: { models?: Partial<CreditPricingEntry>[] };
+  creditPricing?: { models?: (Partial<CreditPricingEntry> & { tiers?: Partial<PricingTier>[] })[] };
   /** Opaque private review options, forwarded to the extension untouched. */
   badcaseCollector?: Record<string, unknown>;
   injection?: {
@@ -832,6 +875,7 @@ export interface RawYamlConfig {
   sessionInit?: {
     enabled?: boolean;
     maxRetries?: number;
+    skipAssetConfirm?: boolean;
     injectAgentContext?: boolean;
     injectTaskContext?: boolean;
     defaultTaskId?: string;
@@ -881,7 +925,7 @@ export interface RawYamlConfig {
   };
   /**
    * mem: 命令族配置（含 create-task / update-task 的 LLM 草稿生成器）。
-   * 与 ProxyConfig.memCommand 对应；未配置则命令族按默认禁用行为。
+   * 与 ProxyConfig.memCommand 对应；未配置时命令拦截关闭。
    */
   memCommand?: {
     enabled?: boolean;
@@ -893,6 +937,10 @@ export interface RawYamlConfig {
       apiKey?: unknown;
       timeoutMs?: unknown;
     };
+  };
+  traceArchive?: {
+    enabled?: boolean;
+    dir?: string;
   };
 }
 

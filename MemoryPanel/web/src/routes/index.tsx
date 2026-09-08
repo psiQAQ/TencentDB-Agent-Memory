@@ -94,6 +94,19 @@ export const routes: RouteObject[] = [
         path: 'guide',
         lazy: async () => ({ Component: (await import('@/pages/GuidePage')).GuidePage }),
       },
+      {
+        path: 'analytics',
+        lazy: async () => {
+          const { AnalyticsPage } = await import('@/pages/AnalyticsPage');
+          return {
+            Component: () => (
+              <SystemAdminGuard>
+                <AnalyticsPage />
+              </SystemAdminGuard>
+            ),
+          };
+        },
+      },
     ],
   },
 ];

@@ -4,7 +4,7 @@ import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import type { MemoryRecord } from "../record/l1-writer";
-import { VectorStore } from "./sqlite";
+import { VectorStore } from "./sqlite/memory-store";
 
 function makeRecord(id: string, overrides: Partial<MemoryRecord> = {}): MemoryRecord {
   return {

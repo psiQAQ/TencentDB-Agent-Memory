@@ -42,8 +42,13 @@ import {
 } from "./agent-adapters/index.js";
 import {
   buildSafeUpstreamHeaders,
-  MissingUpstreamCredentialError,
 } from "./upstream-headers.js";
+import {
+  getInstanceUpstreamConfigs,
+  resolveUpstreamConfig,
+  shouldOverride,
+} from "./instance-upstream-cache.js";
+
 
 /** 响应头中不应回传给客户端的头（避免 stream 长度不一致等问题）。 */
 const SKIP_RESPONSE_HEADERS = new Set([
@@ -69,6 +74,7 @@ function buildAuxUpstreamHeaders(
   return buildSafeUpstreamHeaders(c.req.raw.headers, {
     protocol: entry.protocol,
     apiKey: upstreamApiKey,
+    allowClientCredentials: true,
   });
 }
 
@@ -232,19 +238,22 @@ export async function handleAuxiliaryEndpoint(
     ? config.upstream.agents?.[boundAgentSource]
     : undefined;
   const upstreamBaseUrl = agentUpstream?.url ?? config.upstream.url;
-  const upstreamApiKey = agentUpstream?.apiKey?.trim() || config.upstream.apiKey.trim();
-  const upstreamUrl = joinUrl(upstreamBaseUrl, c.req.path);
+  let upstreamApiKey = agentUpstream ? (agentUpstream.apiKey ?? "") : config.upstream.apiKey;
+  let upstreamUrl = joinUrl(upstreamBaseUrl, c.req.path);
 
-  // 4. 构造上游请求头（按端点协议注入鉴权）
-  let upstreamHeaders: Record<string, string>;
-  try {
-    upstreamHeaders = buildAuxUpstreamHeaders(c, upstreamApiKey, entry);
-  } catch (err: unknown) {
-    if (err instanceof MissingUpstreamCredentialError) {
-      return c.json({ error: err.message }, 503);
+  // ── Instance upstream config override (aux requests follow conversation config) ──
+  {
+    const spaceId = extractSpaceIdFromPath(c.req.path) ?? "";
+    const instanceConfigs = await getInstanceUpstreamConfigs(config.coreSkill, spaceId);
+    const agentFromPath = c.req.path.split("/").filter(Boolean)[0] ?? undefined;
+    const convCfg = resolveUpstreamConfig(instanceConfigs, agentFromPath, "conversation");
+    if (shouldOverride(convCfg)) {
+      upstreamUrl = joinUrl(convCfg.base_url, c.req.path);
+      upstreamApiKey = convCfg.mode === "custom_unified" ? convCfg.api_key : "";
     }
-    throw err;
   }
+
+  const upstreamHeaders = buildAuxUpstreamHeaders(c, upstreamApiKey, entry);
 
   // 5. Pipeline log（简化：只发关键事件）
   const pipe = createPipeline(config, traceId, modelId);

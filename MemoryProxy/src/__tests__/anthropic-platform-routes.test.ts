@@ -1,3 +1,10 @@
+// Keep route/identity assertions independent of instance configuration discovery.
+// The discovery and override paths are covered by instance-upstream-merge.test.ts.
+vi.mock("../instance-upstream-cache.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../instance-upstream-cache.js")>();
+  return { ...actual, getInstanceUpstreamConfigs: async () => [] };
+});
+
 import { Hono } from "hono";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -178,7 +185,7 @@ describe("native Anthropic platform routes", () => {
     expect(headers?.get("accept")).toBe("application/json");
   });
 
-  it("falls back to the global server key for a URL-only agent override", async () => {
+  it("passes the client key for a URL-only agent override", async () => {
     const config = configWithAuth();
     config.upstream.apiKey = "global-server-key";
     config.upstream.agents.opencode = { url: "https://opencode.upstream.invalid/anthropic/v1" };
@@ -192,10 +199,10 @@ describe("native Anthropic platform routes", () => {
 
     expect(response.status).toBe(200);
     expect(upstreamHeaders).toHaveLength(1);
-    expect(upstreamHeaders[0]?.get("x-api-key")).toBe("global-server-key");
+    expect(upstreamHeaders[0]?.get("x-api-key")).toBe("memory-user-key");
   });
 
-  it("rejects before upstream fetch when no server key is configured", async () => {
+  it("passes the client key when no server key is configured", async () => {
     const config = configWithAuth();
     config.upstream.apiKey = "";
     config.upstream.agents.pi = { url: "https://pi.upstream.invalid/anthropic/v1" };
@@ -207,9 +214,11 @@ describe("native Anthropic platform routes", () => {
       messagesRequest("ses_missing_server_key"),
     );
 
-    expect(response.status).toBe(503);
-    expect(calls).toEqual(["https://memory-core.invalid/v3/meta/auth/verify"]);
-    expect(upstreamHeaders).toHaveLength(0);
+    expect(response.status).toBe(200);
+    expect(calls).toHaveLength(2);
+    expect(upstreamHeaders).toHaveLength(1);
+    expect(upstreamHeaders[0]?.get("x-api-key")).toBe("memory-user-key");
+    expect(upstreamHeaders[0]?.has("x-session-id")).toBe(false);
   });
 
   it("replaces a system user's caller credential with the global server key", async () => {
@@ -242,7 +251,7 @@ describe("native Anthropic platform routes", () => {
     expect(headers?.has("x-team-id")).toBe(false);
   });
 
-  it("rejects a system-user request when no server key is configured", async () => {
+  it("passes the client key for a system-user request when no server key is configured", async () => {
     const config = configWithAuth();
     config.upstream.apiKey = "";
     initAuth(config.auth);
@@ -254,9 +263,11 @@ describe("native Anthropic platform routes", () => {
       messagesRequest("system_user_missing_key"),
     );
 
-    expect(response.status).toBe(503);
-    expect(calls).toEqual(["https://memory-core.invalid/v3/meta/auth/verify"]);
-    expect(upstreamHeaders).toHaveLength(0);
+    expect(response.status).toBe(200);
+    expect(calls).toHaveLength(2);
+    expect(upstreamHeaders).toHaveLength(1);
+    expect(upstreamHeaders[0]?.get("x-api-key")).toBe("memory-user-key");
+    expect(upstreamHeaders[0]?.has("x-session-id")).toBe(false);
   });
 
   it.each([

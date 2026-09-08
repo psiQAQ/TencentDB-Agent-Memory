@@ -94,6 +94,7 @@ export const DEFAULT_CONFIG: ProxyConfig = {
     injectAgentContext: true,
     injectTaskContext: true,
     defaultTaskId: "default",
+    skipAssetConfirm: false,
     headerAutoSelect: {
       enabled: true,
       teamHeader: "x-team-id",
@@ -147,6 +148,7 @@ export const DEFAULT_CONFIG: ProxyConfig = {
   memCommand: { enabled: false, allowedCommands: [] },
   ccRequestRouting: { enabled: true },
   workbuddyRequestRouting: { enabled: true },
+  traceArchive: { enabled: false, dir: "logs/traces" },
 };
 
 /** Load and parse a YAML config file. Returns empty object on missing file. */
@@ -381,6 +383,18 @@ export function buildConfig(overrides: CliOverrides = {}): ProxyConfig {
         cacheRead: m.cacheRead ?? 0,
         cacheWrite5m: m.cacheWrite5m ?? 0,
         cacheWrite1h: m.cacheWrite1h ?? 0,
+        // 分档定价：按 input token 总量 (nonCacheInput + cacheRead) 分档。
+        // 不配置时 undefined，computeCreditDelta 回落顶层 flat 单价。
+        tiers: Array.isArray(m.tiers)
+          ? m.tiers.map((t) => ({
+              maxInputTokens: typeof t.maxInputTokens === "number" ? t.maxInputTokens : null,
+              input: t.input ?? 0,
+              output: t.output ?? 0,
+              cacheRead: t.cacheRead ?? 0,
+              cacheWrite5m: t.cacheWrite5m ?? 0,
+              cacheWrite1h: t.cacheWrite1h ?? 0,
+            }))
+          : undefined,
       })).filter((m) => m.name !== ""),
     },
     injection: {
@@ -409,6 +423,7 @@ export function buildConfig(overrides: CliOverrides = {}): ProxyConfig {
     defaultTaskId: typeof yaml.sessionInit?.defaultTaskId === "string"
       ? (yaml.sessionInit.defaultTaskId.trim() || undefined)   // empty string → disabled
       : DEFAULT_CONFIG.sessionInit.defaultTaskId,
+    skipAssetConfirm: yaml.sessionInit?.skipAssetConfirm ?? DEFAULT_CONFIG.sessionInit.skipAssetConfirm,
     headerAutoSelect: {
       enabled: yaml.sessionInit?.headerAutoSelect?.enabled ?? DEFAULT_CONFIG.sessionInit.headerAutoSelect!.enabled,
       teamHeader: (yaml.sessionInit?.headerAutoSelect?.teamHeader ?? DEFAULT_CONFIG.sessionInit.headerAutoSelect!.teamHeader).toLowerCase(),
@@ -536,6 +551,10 @@ export function buildConfig(overrides: CliOverrides = {}): ProxyConfig {
       enabled:
         (yaml as { workbuddyRequestRouting?: { enabled?: boolean } }).workbuddyRequestRouting?.enabled
         ?? DEFAULT_CONFIG.workbuddyRequestRouting.enabled,
+    },
+    traceArchive: {
+      enabled: yaml.traceArchive?.enabled ?? DEFAULT_CONFIG.traceArchive.enabled,
+      dir: yaml.traceArchive?.dir ?? DEFAULT_CONFIG.traceArchive.dir,
     },
   };
 }

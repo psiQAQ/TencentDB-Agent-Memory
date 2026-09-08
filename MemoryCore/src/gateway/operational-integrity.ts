@@ -4,7 +4,7 @@ import type { SkillCore } from "../core/skill/skill-core.js";
 import type { Skill } from "../core/skill/types.js";
 import type { IMemoryStore } from "../core/store/types.js";
 import type { StorageAdapter } from "../core/storage/adapter.js";
-import { parseProfileIsolationScope } from "../core/profile/profile-sync.js";
+import { parseProfileIsolationScope } from "../core/profile/profile-scope.js";
 import { MemoryGenerationLogStore } from "../core/memory-generation-log/store.js";
 import type { IMetadataStore } from "../metadata/store/interface.js";
 import type { IntegrityFinding } from "../metadata/types.js";

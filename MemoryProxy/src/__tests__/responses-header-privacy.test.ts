@@ -1,3 +1,10 @@
+// Keep route/identity assertions independent of instance configuration discovery.
+// The discovery and override paths are covered by instance-upstream-merge.test.ts.
+vi.mock("../instance-upstream-cache.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../instance-upstream-cache.js")>();
+  return { ...actual, getInstanceUpstreamConfigs: async () => [] };
+});
+
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { initAuth } from "../auth.js";
@@ -51,7 +58,7 @@ afterEach(() => {
 
 describe("Responses upstream credential boundary", () => {
   it.each(["codex", "workbuddy"] as const)(
-    "%s terminates client credentials and inherits a same-origin server key",
+    "%s uses an explicit server key without forwarding identity headers",
     async (source) => {
       const calls: Array<{ headers: Headers; redirect?: RequestRedirect }> = [];
       vi.stubGlobal("fetch", vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
@@ -59,7 +66,9 @@ describe("Responses upstream credential boundary", () => {
         return Response.json({ id: "response-safe", output: [], usage: {} });
       }));
 
-      const response = await createApp(config(source)).request(...request(source));
+      const value = config(source);
+      value.upstream.agents[source].apiKey = "server-upstream-key";
+      const response = await createApp(value).request(...request(source));
 
       expect(response.status).toBe(200);
       expect(calls).toHaveLength(1);
@@ -74,17 +83,22 @@ describe("Responses upstream credential boundary", () => {
   );
 
   it.each(["codex", "workbuddy"] as const)(
-    "%s rejects a URL-only cross-origin override before fetch",
+    "%s accepts an explicitly configured cross-origin upstream",
     async (source) => {
-      const fetchMock = vi.fn();
+      const fetchMock = vi.fn().mockResolvedValue(Response.json({ id: "response-passthrough", output: [], usage: {} }));
       vi.stubGlobal("fetch", fetchMock);
 
       const response = await createApp(
         config(source, "https://other-upstream.invalid/v1"),
       ).request(...request(source));
 
-      expect(response.status).toBe(503);
-      expect(fetchMock).not.toHaveBeenCalled();
+      expect(response.status).toBe(200);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(String(fetchMock.mock.calls[0][0])).toBe("https://other-upstream.invalid/v1/responses");
+      const headers = new Headers(fetchMock.mock.calls[0][1]?.headers);
+      expect(headers.get("authorization")).toBe(source === "codex"
+        ? "Bearer client-memory-key" : "Bearer server-upstream-key");
+      expect(headers.has("x-session-id")).toBe(false);
     },
   );
 

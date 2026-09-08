@@ -76,6 +76,10 @@ const KNOWN_ERROR_CODES: ReadonlySet<string> = new Set([
   'VALIDATION_ERROR',
   'RATE_LIMITED',
   'INTERNAL_ERROR',
+  // 用自持 user_key 首次登录时建号失败。必须显式登记：否则会落到下面的正则兜底，
+  // 被 unauthorized: invalid_user_key 模式误配成"key 无效"，与真实原因（建号失败）
+  // 完全不符，严重误导排查。
+  'USER_CREATE_FAILED',
 ]);
 
 /**

@@ -1,3 +1,10 @@
+// Keep route/identity assertions independent of instance configuration discovery.
+// The discovery and override paths are covered by instance-upstream-merge.test.ts.
+vi.mock("../instance-upstream-cache.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../instance-upstream-cache.js")>();
+  return { ...actual, getInstanceUpstreamConfigs: async () => [] };
+});
+
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { initAuth } from "../auth.js";

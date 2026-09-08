@@ -1,3 +1,10 @@
+// Keep route/identity assertions independent of instance configuration discovery.
+// The discovery and override paths are covered by instance-upstream-merge.test.ts.
+vi.mock("../instance-upstream-cache.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../instance-upstream-cache.js")>();
+  return { ...actual, getInstanceUpstreamConfigs: async () => [] };
+});
+
 import { Hono } from "hono";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -134,7 +141,7 @@ describe("route-bound Anthropic count_tokens", () => {
     expect(headers.get("accept")).toBe("application/json");
   });
 
-  it("falls back to the global server key for a URL-only agent override", async () => {
+  it("passes the client key for a URL-only agent override", async () => {
     const config = configWithAuth();
     config.upstream.agents.opencode = { url: "https://opencode.upstream.invalid/anthropic/v1" };
     initAuth(config.auth);
@@ -146,10 +153,10 @@ describe("route-bound Anthropic count_tokens", () => {
     );
 
     expect(response.status).toBe(200);
-    expect(calls[1]?.headers.get("x-api-key")).toBe("global-key");
+    expect(calls[1]?.headers.get("x-api-key")).toBe("memory-user-key");
   });
 
-  it("rejects count_tokens before upstream fetch when no server key is configured", async () => {
+  it("passes the client key for count_tokens when no server key is configured", async () => {
     const config = configWithAuth();
     config.upstream.apiKey = "";
     config.upstream.agents.pi = { url: "https://pi.upstream.invalid/anthropic/v1" };
@@ -161,10 +168,9 @@ describe("route-bound Anthropic count_tokens", () => {
       request(),
     );
 
-    expect(response.status).toBe(503);
-    expect(calls.map((call) => call.url)).toEqual([
-      "https://auth.invalid/v3/meta/auth/verify",
-    ]);
+    expect(response.status).toBe(200);
+    expect(calls[1]?.url).toBe("https://pi.upstream.invalid/anthropic/v1/messages/count_tokens");
+    expect(calls[1]?.headers.get("x-api-key")).toBe("memory-user-key");
   });
 
   it("rejects an unknown source before auth, body, upstream, or credit", async () => {

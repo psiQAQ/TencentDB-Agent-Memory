@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
 
-import { VectorStore } from "./sqlite.js";
+import { VectorStore } from "./sqlite/memory-store.js";
 
 describe("SQLite L0 task activity aggregation", () => {
   let store: VectorStore | undefined;

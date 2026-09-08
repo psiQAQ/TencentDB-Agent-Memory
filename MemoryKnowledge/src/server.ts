@@ -35,6 +35,7 @@ import {
   createKnowledgeTelemetry,
   createKnowledgeTelemetryMiddleware,
 } from "./clickhouse-telemetry.js";
+import { createAnalyticsRoutes } from "./analytics-routes.js";
 
 const log = createLogger("server");
 
@@ -110,6 +111,11 @@ export function createApp() {
   api.route("/", createAutoSyncRoutes({
     scheduler: knowledgeModule.autoSyncScheduler,
     config: knowledgeModule.autoSyncConfig,
+  }));
+
+  // analytics — CH telemetry query endpoints (Panel dashboard)
+  api.route("/analytics", createAnalyticsRoutes({
+    clickhouse: config.clickhouse,
   }));
 
   app.route(config.apiPrefix, api);

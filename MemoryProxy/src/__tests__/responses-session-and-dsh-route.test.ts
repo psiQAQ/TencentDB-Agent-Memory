@@ -1,3 +1,10 @@
+// Keep route/identity assertions independent of instance configuration discovery.
+// The discovery and override paths are covered by instance-upstream-merge.test.ts.
+vi.mock("../instance-upstream-cache.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../instance-upstream-cache.js")>();
+  return { ...actual, getInstanceUpstreamConfigs: async () => [] };
+});
+
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { initAuth } from "../auth.js";
@@ -142,7 +149,7 @@ describe("Responses session binding and DSH legacy route", () => {
       (call) => call.url === "https://upstream.invalid/v1/chat/completions",
     );
     expect(upstreamCalls).toHaveLength(1);
-    expect(upstreamCalls[0]?.headers.get("authorization")).toBe("Bearer server-key");
+    expect(upstreamCalls[0]?.headers.get("authorization")).toBe("Bearer client-key");
     expect(upstreamCalls[0]?.headers.get("x-conversation-id")).toBeNull();
     expect(upstreamCalls[0]?.redirect).toBe("manual");
   });

@@ -28,7 +28,8 @@ export type PageId =
   | 'owned_resources'
   | 'user_management'
   | 'zombie_resources'
-  | 'api_keys';
+  | 'api_keys'
+  | 'analytics';
 
 /** 页面元数据 */
 export interface PageMeta {
@@ -132,11 +133,12 @@ export function usePageMeta(): Record<PageId, PageMeta> {
       group: t('menu.group.organization'),
       order: 3,
     },
+    analytics: { id: 'analytics', label: t('menu.analytics'), desc: t('menu.desc.analytics'), group: t('menu.group.observability'), order: 0 },
   };
 }
 
 /** 分组排序顺序 */
-export const GROUP_ORDER_KEYS = ['workbench', 'organization', 'assets', 'system'] as const;
+export const GROUP_ORDER_KEYS = ['workbench', 'observability', 'organization', 'assets', 'system'] as const;
 
 /** 每个页面在侧边栏菜单中的图标（Tea 官方图标，size 16） */
 export const ITEM_ICON: Record<PageId, JSX.Element> = {
@@ -161,6 +163,14 @@ export const ITEM_ICON: Record<PageId, JSX.Element> = {
       <path d="M6.8 10.2 10.2 6.8M13.8 6.8l3.4 3.4M17.2 13.8l-3.4 3.4M10.2 17.2l-3.4-3.4" />
     </svg>
   ),
+  analytics: (
+    <svg width={16} height={16} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+      <line x1="4" y1="20" x2="20" y2="20" />
+      <rect x="6" y="10" width="3" height="6" rx="0.8" />
+      <rect x="10.5" y="6" width="3" height="10" rx="0.8" />
+      <rect x="15" y="13" width="3" height="3" rx="0.8" />
+    </svg>
+  ),
   team_members: <UserIcon size={16} />,
   team_agents: <UsergroupIcon size={16} />,
   owned_resources: <ToolsIcon size={16} />,
@@ -173,7 +183,7 @@ export const ITEM_ICON: Record<PageId, JSX.Element> = {
   chat_memory: <ChatIcon size={16} />,
 };
 
-/** 分组图标（工作台 / 组织与权限 / 资产管理 / 系统管理） */
+/** 分组图标（工作台 / 可观测 / 组织与权限 / 资产管理 / 系统管理） */
 export const GROUP_ICON: Record<string, JSX.Element> = {
   workbench: (
     <svg
@@ -188,6 +198,11 @@ export const GROUP_ICON: Record<string, JSX.Element> = {
       <rect x="14" y="3" width="7" height="7" rx="1.5" />
       <rect x="3" y="14" width="7" height="7" rx="1.5" />
       <rect x="14" y="14" width="7" height="7" rx="1.5" />
+    </svg>
+  ),
+  observability: (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M22 12h-4l-3 9L9 3l-3 9H2" />
     </svg>
   ),
   organization: (
