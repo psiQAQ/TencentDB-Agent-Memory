@@ -56,6 +56,8 @@ export class HttpKnowledgeClient implements KnowledgeClientPort {
     try {
       const headers: Record<string, string> = { 'Content-Type': 'application/json' };
       const lifecyclePath = path === '/v3/wiki/delete'
+        || path === '/v3/wiki/raw/rm'
+        || path === '/v3/wiki/page/rm'
         || path === '/v3/code-graph/delete'
         || path.startsWith('/v3/internal/lifecycle/');
       const authToken = lifecyclePath ? this.cfg.lifecycleAuthToken : this.cfg.authToken;

@@ -158,7 +158,8 @@ memory-core 通过 `MEMORY_PROMPT_MODE` 切换 L1/L2/L3 pipeline 的提示词族
 
 > `KNOWLEDGE_SERVICE_KEY` 首次启动时由脚本生成 `ks-svc-*` 随机值并写回 `.env`；
 > 同一个值分别作为 Knowledge 校验侧的 `KNOWLEDGE_SERVICE_KEY` 和 Panel 一般操作的
-> `KNOWLEDGE_AUTH_TOKEN`。删除和资源归属接口只接受独立的生命周期凭据，
+> `KNOWLEDGE_AUTH_TOKEN`。Wiki、Code Graph 及 Wiki 内源文件和页面的删除接口，
+> 以及资源归属接口只接受独立的生命周期凭据，
 > Panel 在调用这些接口时自动使用 `KNOWLEDGE_LIFECYCLE_AUTH_TOKEN`。
 > 多机部署需向 Panel 和 Knowledge 分发对应凭据，并保持两个值不同。
 

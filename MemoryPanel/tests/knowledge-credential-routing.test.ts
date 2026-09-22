@@ -26,6 +26,8 @@ describe('HttpKnowledgeClient credential routing', () => {
     });
     await client.wikiIngest('wiki-1');
     await client.wikiDelete(['wiki-1']);
+    await client.wikiRawRm('team-1', 'wiki-1', ['source.md']);
+    await client.wikiPageRm('team-1', 'wiki-1', ['page-1']);
     await client.codeGraphDelete(['graph-1']);
     await client.transferOwnership({ resource_type: 'llm_wiki', resource_id: 'wiki-1',
       from_owner_user_id: 'old', to_owner_user_id: 'new' });
@@ -34,6 +36,8 @@ describe('HttpKnowledgeClient credential routing', () => {
     expect(calls).toEqual([
       { path: '/v3/wiki/ingest', authorization: 'Bearer service-key' },
       { path: '/v3/wiki/delete', authorization: 'Bearer lifecycle-key' },
+      { path: '/v3/wiki/raw/rm', authorization: 'Bearer lifecycle-key' },
+      { path: '/v3/wiki/page/rm', authorization: 'Bearer lifecycle-key' },
       { path: '/v3/code-graph/delete', authorization: 'Bearer lifecycle-key' },
       { path: '/v3/internal/lifecycle/ownership/transfer', authorization: 'Bearer lifecycle-key' },
       { path: '/v3/internal/lifecycle/integrity/inventory', authorization: 'Bearer lifecycle-key' },

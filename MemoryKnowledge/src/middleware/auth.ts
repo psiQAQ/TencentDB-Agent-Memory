@@ -79,6 +79,8 @@ const READONLY_GET_PREFIXES: readonly string[] = ["/source-provider"];
 
 const LIFECYCLE_POST_PATHS: ReadonlySet<string> = new Set([
   "/wiki/delete",
+  "/wiki/raw/rm",
+  "/wiki/page/rm",
   "/code-graph/delete",
 ]);
 

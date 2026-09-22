@@ -76,9 +76,11 @@ export function createApp() {
     }
     await next();
   };
-  // Backing deletion is a lifecycle finalizer. Direct calls cannot establish
-  // resource ownership and therefore must not bypass the Panel/Core journal.
+  // Panel checks caller permissions before deletion; direct Knowledge calls
+  // require the separate lifecycle credential.
   api.use("/wiki/delete", lifecycleDeleteAuth);
+  api.use("/wiki/raw/rm", lifecycleDeleteAuth);
+  api.use("/wiki/page/rm", lifecycleDeleteAuth);
   api.use("/code-graph/delete", lifecycleDeleteAuth);
   // Only Agent tool executions are usage telemetry; health/admin/ingest remain excluded.
   api.use("/tools/call", createKnowledgeTelemetryMiddleware(knowledgeTelemetry));

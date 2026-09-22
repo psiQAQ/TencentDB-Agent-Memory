@@ -284,6 +284,8 @@ paths:
       tags: [LLM-Wiki]
       summary: Batch delete raw source files + cascade
       operationId: rawRmWiki
+      security:
+        - LifecycleBearer: []
       requestBody:
         required: true
         content:
@@ -372,6 +374,8 @@ paths:
       tags: [LLM-Wiki]
       summary: Batch delete wiki pages + cascade
       operationId: pageRmWiki
+      security:
+        - LifecycleBearer: []
       requestBody:
         required: true
         content:
