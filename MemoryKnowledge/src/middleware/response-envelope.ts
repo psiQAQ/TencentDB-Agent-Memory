@@ -37,15 +37,12 @@ export function accessLog(): MiddlewareHandler {
     const requestId = c.req.header("x-request-id") || crypto.randomUUID();
     c.set("requestId", requestId);
 
-    // 缓存 request body（body 只能读一次，失败时用于日志）
-    // Hono 当前版本的 bodyCache 存已解析值；后续 c.req.json()/text() 会复用它。
+    // 读取请求体以便记录失败日志；Hono 的 text() 会自行缓存 Promise，供后续 json() 复用。
     let reqBody: unknown = undefined;
     if (c.req.method === 'POST' || c.req.method === 'PUT') {
       try {
         const raw = await c.req.text();
         reqBody = raw ? JSON.parse(raw) : undefined;
-        c.req.bodyCache.text = raw;
-        if (reqBody) c.req.bodyCache.json = reqBody;
       } catch {
         // 非 JSON body，忽略
       }
