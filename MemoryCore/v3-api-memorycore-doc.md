@@ -1000,10 +1000,10 @@ inactive Agent 不可转移 ownership；`agent/update` 由 owner 将 status 恢�
 | 接口 | 说明 |
 |---|---|
 | `POST /asset/create` | 登记资产（asset_id 由调用方提供） |
-| `POST /asset/get` | 所属 Team active member 按 asset_id 查 |
+| `POST /asset/get` | 有效 Team 成员按资产可见性和 ACL 读取；无权时返回 404；`system_admin` 可跨 Team 读取 |
 | `POST /asset/update` | 更新 |
 | `POST /asset/delete` | 批量删除 |
-| `POST /asset/list` | active member 按 Team 列表 |
+| `POST /asset/list` | 有效 Team 成员仅列出可读资产；`system_admin` 可列出 Team 全部资产 |
 | `POST /asset/list-accessible` | caller 本人按 visibility/ACL 列出可访问资产 |
 | `POST /asset/touch-usage` | 触碰使用（更新 last_used_at） |
 
@@ -1013,6 +1013,9 @@ delete 返回 `managed_resource_requires_lifecycle`，必须先走 backing-first
 **list 请求体**：`team_id`、`asset_type?`、`status?`、`owner_user_id?`、`visibility?` + 分页。
 **list-accessible 请求体**：`user_id`/`user_key`(二选一) + `team_id?`、`action?`、`asset_type?`、`agent_id?`、`visibility?`(单值或数组) + 分页。
 请求身份必须解析为 caller；显式 `team_id` 时 caller 还必须是该 Team 的 active member。
+`asset/get` 和 `asset/list` 对普通调用者要求有效 Team 成员身份：`private` 仅所有者可见，
+`restricted` 需显式 ACL 授权，`team` 对有效成员可见。所有者退出 Team 后也不能通过这两个接口读取；
+`system_admin` 在这两个接口保留跨 Team 管理视角，包括其他人的 `private` 资产。
 
 **AssetEntity 响应**：`{ asset_id, team_id, asset_type, name, description?, owner_user_id, source_type, source_ref?, version, visibility, status, confidence?, expires_at?, last_used_at?, usage_count, content_ref?, created_at, updated_at, metadata_json }`。
 

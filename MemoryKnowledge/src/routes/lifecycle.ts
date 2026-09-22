@@ -19,7 +19,7 @@ function tokenMatches(header: string | undefined, expected: string): boolean {
 /**
  * Trusted lifecycle coordination endpoint. It is intentionally separate from
  * user-facing Wiki/Code Graph routes: only the Panel control plane receives
- * KNOWLEDGE_AUTH_TOKEN, and the update remains compare-and-swap on from_owner.
+ * KNOWLEDGE_LIFECYCLE_AUTH_TOKEN, and the update remains compare-and-swap on from_owner.
  */
 export function createLifecycleRoutes(deps: LifecycleRouteDeps): Hono {
   const app = new Hono();

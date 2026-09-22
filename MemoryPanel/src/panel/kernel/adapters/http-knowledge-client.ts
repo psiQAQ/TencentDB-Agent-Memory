@@ -35,6 +35,7 @@ import type {
 export interface KnowledgeClientConfig {
   baseUrl: string;
   authToken: string;
+  lifecycleAuthToken: string;
   serviceId?: string;
   timeoutMs?: number;
 }
@@ -54,7 +55,11 @@ export class HttpKnowledgeClient implements KnowledgeClientPort {
     const timer = setTimeout(() => ctrl.abort(), this.cfg.timeoutMs ?? 15_000);
     try {
       const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-      if (this.cfg.authToken) headers.Authorization = `Bearer ${this.cfg.authToken}`;
+      const lifecyclePath = path === '/v3/wiki/delete'
+        || path === '/v3/code-graph/delete'
+        || path.startsWith('/v3/internal/lifecycle/');
+      const authToken = lifecyclePath ? this.cfg.lifecycleAuthToken : this.cfg.authToken;
+      if (authToken) headers.Authorization = `Bearer ${authToken}`;
       if (this.cfg.serviceId) headers['x-tdai-service-id'] = this.cfg.serviceId;
       const resp = await fetch(`${this.cfg.baseUrl}${path}`, {
         method: 'POST',

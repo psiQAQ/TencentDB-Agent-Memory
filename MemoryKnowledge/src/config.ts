@@ -59,6 +59,14 @@ export interface ClickHouseTelemetryConfig {
 export interface ServiceConfig {
   /** HTTP server port. */
   port: number;
+  /**
+   * Service-to-service auth.
+   * serviceKey 为空 = 不启用鉴权（向后兼容本地/开发部署）；
+   * 非空 = /v3 下除只读白名单外的端点均要求 `Authorization: Bearer <serviceKey>`。
+   */
+  auth: {
+    serviceKey: string;
+  };
   /** Data root directory for knowledge assets (git clones, wiki dirs, SQLite). */
   dataDir: string;
   /** SQLite database file path. */
@@ -73,7 +81,7 @@ export interface ServiceConfig {
   publicBaseUrl: string;
   /** TMC callback URL for status notifications (empty = no callback). */
   tmcCallbackUrl: string;
-  /** Shared control-plane token required by /v3/internal/lifecycle/*. */
+  /** Credential required by deletion and /v3/internal/lifecycle/*. */
   internalAuthToken: string;
   /** Optional ClickHouse request telemetry. Disabled by default. */
   clickhouse: ClickHouseTelemetryConfig;
@@ -139,6 +147,11 @@ function validateClickHouseConfig(config: ClickHouseTelemetryConfig): void {
  * Load service configuration from environment variables.
  */
 export function loadConfig(): ServiceConfig {
+  const serviceKey = env("KNOWLEDGE_SERVICE_KEY", "");
+  const lifecycleAuthToken = env("KNOWLEDGE_LIFECYCLE_AUTH_TOKEN", "");
+  if (serviceKey && serviceKey === lifecycleAuthToken) {
+    throw new Error("KNOWLEDGE_SERVICE_KEY and KNOWLEDGE_LIFECYCLE_AUTH_TOKEN must be different");
+  }
   const clickhouse: ClickHouseTelemetryConfig = {
     enabled: envBool("KNOWLEDGE_CLICKHOUSE_ENABLED", false),
     url: env("KNOWLEDGE_CLICKHOUSE_URL", ""),
@@ -155,13 +168,16 @@ export function loadConfig(): ServiceConfig {
 
   return {
     port: envInt("PORT", 8421),
+    auth: {
+      serviceKey,
+    },
     dataDir: expandHome(env("KNOWLEDGE_DATA_DIR", "./data")),
     dbPath: expandHome(env("KNOWLEDGE_DB_PATH", "./data/knowledge.db")),
     logLevel: env("LOG_LEVEL", "debug"),
     apiPrefix: env("API_PREFIX", "/v3"),
     publicBaseUrl: env("KNOWLEDGE_PUBLIC_BASE_URL", ""),
     tmcCallbackUrl: env("TMC_CALLBACK_URL", ""),
-    internalAuthToken: env("KNOWLEDGE_AUTH_TOKEN", ""),
+    internalAuthToken: lifecycleAuthToken,
     clickhouse,
     llm: {
       mode: env("LLM_MODE", "proxy") === "custom" ? "custom" : "proxy",

@@ -75,7 +75,7 @@ describe("MetadataService caller-scoped personnel and Team authorization", () =>
     await expect(service.getTeamForCaller(team.team_id, ctx(outsider.user_id))).rejects.toMatchObject({ code: "permission_denied" });
     await expect(service.getAgentForCaller(agent.agent_id, ctx(admin.user_id, true))).rejects.toMatchObject({ code: "permission_denied" });
     await expect(service.listTasksByTeamForCaller(team.team_id, ctx(outsider.user_id))).rejects.toMatchObject({ code: "permission_denied" });
-    await expect(service.getAssetForCaller(asset.asset_id, ctx(outsider.user_id))).rejects.toMatchObject({ code: "permission_denied" });
+    await expect(service.getAssetForCaller(asset.asset_id, ctx(outsider.user_id))).rejects.toMatchObject({ code: "asset_not_found" });
     await expect(service.listAgentsByOwnerForCaller(owner.user_id, ctx(outsider.user_id))).rejects.toMatchObject({ code: "permission_denied" });
     await expect(service.listAccessibleAssetsForCaller(
       { user_id: owner.user_id, team_id: team.team_id },
@@ -86,6 +86,50 @@ describe("MetadataService caller-scoped personnel and Team authorization", () =>
     await expect(service.getAgentForCaller(agent.agent_id, ctx(admin.user_id, true))).resolves.toMatchObject({ agent_id: agent.agent_id });
     await expect(service.getTaskForCaller(task.task_id, ctx(admin.user_id, true))).resolves.toMatchObject({ task_id: task.task_id });
     await expect(service.listAssetsByTeamForCaller(team.team_id, ctx(admin.user_id, true))).resolves.toMatchObject({ total: 2 });
+  });
+
+  it("filters asset reads by visibility and membership while allowing system_admin inspection", async () => {
+    const owner = await user("asset-owner");
+    const reader = await user("asset-reader");
+    const admin = await user("asset-admin", "system_admin");
+    const team = await service.createTeam({ name: "asset-team", owner_user_id: owner.user_id });
+    await service.addTeamMember({ team_id: team.team_id, user_id: reader.user_id, role: "member" });
+    const create = async (id: string, visibility: "private" | "restricted" | "team") =>
+      service.createAsset({ asset_id: id, team_id: team.team_id, asset_type: "skill", name: id,
+        owner_user_id: owner.user_id, source_type: "manual", visibility, status: "approved" });
+    await create("private-asset", "private");
+    await create("restricted-asset", "restricted");
+    await create("team-asset", "team");
+
+    const list = (userId: string, isSystemAdmin = false) =>
+      service.listAssetsForCaller({ team_id: team.team_id, limit: 20 }, ctx(userId, isSystemAdmin));
+    expect((await list(reader.user_id)).items.map((item) => item.asset_id)).toEqual(["team-asset"]);
+    await expect(service.getAssetForCaller("private-asset", ctx(reader.user_id)))
+      .rejects.toMatchObject({ code: "asset_not_found" });
+    await expect(service.getAssetForCaller("restricted-asset", ctx(reader.user_id)))
+      .rejects.toMatchObject({ code: "asset_not_found" });
+
+    await service.grantAcl({ asset_id: "restricted-asset", subject_type: "user", subject_id: reader.user_id,
+      permission: "read", granted_by: owner.user_id });
+    expect((await list(reader.user_id)).items.map((item) => item.asset_id)).toEqual(["restricted-asset", "team-asset"]);
+    await expect(service.getAssetForCaller("restricted-asset", ctx(reader.user_id)))
+      .resolves.toMatchObject({ asset_id: "restricted-asset" });
+
+    expect((await list(admin.user_id, true)).items).toHaveLength(3);
+    await expect(service.getAssetForCaller("private-asset", ctx(admin.user_id, true)))
+      .resolves.toMatchObject({ asset_id: "private-asset" });
+    await expect(service.listAccessibleAssetsForCaller({ user_id: owner.user_id, team_id: team.team_id }, ctx(reader.user_id)))
+      .rejects.toMatchObject({ code: "permission_denied" });
+
+    await store.removeTeamMember(team.team_id, reader.user_id);
+    expect((await list(reader.user_id)).items).toEqual([]);
+    await expect(service.getAssetForCaller("restricted-asset", ctx(reader.user_id)))
+      .rejects.toMatchObject({ code: "asset_not_found" });
+    await store.removeTeamMember(team.team_id, owner.user_id);
+    expect((await list(owner.user_id)).items).toEqual([]);
+    await expect(service.getAssetForCaller("private-asset", ctx(owner.user_id)))
+      .rejects.toMatchObject({ code: "asset_not_found" });
+    expect((await list(admin.user_id, true)).items).toHaveLength(3);
   });
 
   it("lets system_admin inspect cross-Team personnel relations without granting business reads", async () => {

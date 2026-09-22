@@ -45,8 +45,8 @@ KS 走 **内网信任模型**，与 MemoryCore 的 user-key 体系不同：
 | 项 | 说明 |
 |---|---|
 | 唯一必填 Header | `x-tdai-service-id`（租户/service 标识，即内核路由键） |
-| 其他鉴权 | **无**（无 Bearer、无 user-key；service_id 自报，内网信任） |
-| 例外 | `POST /v3/internal/llm-binding/list` 不需要 `x-tdai-service-id` 头（返回全部 binding，供 Panel 启动缓存）；`/v3/auto-sync/*` 无鉴权 |
+| 其他鉴权 | `KNOWLEDGE_SERVICE_KEY` 非空时，一般写入和管理端点需 `Authorization: Bearer <key>`（含 `internal/llm-binding/*` 全部）；只读白名单保持开放。删除和 `internal/lifecycle/*` 只接受独立的 `KNOWLEDGE_LIFECYCLE_AUTH_TOKEN`；为空时这些操作不可用。 |
+| 例外 | `POST /v3/internal/llm-binding/list` 不需要 `x-tdai-service-id` 头（返回全部 binding，供 Panel 启动缓存；key 启用时仍需 Bearer） |
 
 > `service_id` / `team_id` / 资源 ID 统一做**路径分段白名单校验**（`^[A-Za-z0-9_-]+$`、长度 ≤200），防止路径穿越。
 
@@ -637,7 +637,7 @@ upsert binding（`proxy`\|`byo`）。**幂等**：重复 set 覆盖。
 ## 3.6 Internal Lifecycle（2）
 
 > `/v3/internal/lifecycle/*` 仅供 Panel control plane。必须同时提供
-> `Authorization: Bearer <KNOWLEDGE_AUTH_TOKEN>` 与有效 `x-tdai-service-id`；token 未配置时
+> `Authorization: Bearer <KNOWLEDGE_LIFECYCLE_AUTH_TOKEN>` 与有效 `x-tdai-service-id`；token 未配置时
 > fail closed 返回 503。接口不返回正文、prompt、描述、content_ref 或凭证。
 
 ### POST /v3/internal/lifecycle/ownership/transfer
@@ -662,7 +662,7 @@ upsert binding（`proxy`\|`byo`）。**幂等**：重复 set 覆盖。
 返回当前实例 Wiki/Code Graph 的 content-free inventory，供 system_admin 僵尸扫描与 Core
 metadata 对账。字段限定为 resource type/ID、Team、owner、name、status 和时间戳。
 
-`/v3/wiki/delete` 与 `/v3/code-graph/delete` 同样要求该 Bearer token。普通调用方必须
+`/v3/wiki/delete` 与 `/v3/code-graph/delete` 同样要求生命周期 Bearer token。普通调用方必须
 通过 Panel 的 owner-only lifecycle 入口删除，不能直连绕过 ownership journal。
 
 ---

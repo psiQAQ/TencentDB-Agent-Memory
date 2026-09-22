@@ -153,6 +153,14 @@ memory-core 通过 `MEMORY_PROMPT_MODE` 切换 L1/L2/L3 pipeline 的提示词族
 | `MEMORY_CORE_GATEWAY_API_KEY` | 必填 | memory-hub / proxy → memory-core 的 Bearer |
 | `MEMORY_CORE_ADMIN_USERNAME` | `admin` | 初始化的 system_admin 用户名 |
 | admin user key | 首启随机生成 | 客户端登录 key，保存到 `.admin-key` |
+| `KNOWLEDGE_SERVICE_KEY` | 首启随机生成 | Panel → Knowledge 的一般写入和管理操作；保存到 `.env` |
+| `KNOWLEDGE_LIFECYCLE_AUTH_TOKEN` | 使用 Core 服务凭据 | Panel → Knowledge 的删除和资源归属操作；由启动脚本注入 |
+
+> `KNOWLEDGE_SERVICE_KEY` 首次启动时由脚本生成 `ks-svc-*` 随机值并写回 `.env`；
+> 同一个值分别作为 Knowledge 校验侧的 `KNOWLEDGE_SERVICE_KEY` 和 Panel 一般操作的
+> `KNOWLEDGE_AUTH_TOKEN`。删除和资源归属接口只接受独立的生命周期凭据，
+> Panel 在调用这些接口时自动使用 `KNOWLEDGE_LIFECYCLE_AUTH_TOKEN`。
+> 多机部署需向 Panel 和 Knowledge 分发对应凭据，并保持两个值不同。
 
 > 请为 `MEMORY_CORE_GATEWAY_API_KEY` 使用 32-byte 随机值。Proxy 的
 > `auth.serviceToken`、TDAI、Skill 和 Knowledge 内部客户端均使用该服务凭据；

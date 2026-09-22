@@ -277,10 +277,7 @@ const routeTable: Record<string, Handler> = {
     return s.updateAssetForCaller(asset_id, patch, c);
   }),
   [`${V3_PREFIX}/asset/delete`]: bind(S.assetDeleteSchema, (d, c, s) => s.deleteAssetsForCaller(d.asset_ids, c)),
-  [`${V3_PREFIX}/asset/list`]: bind(S.assetListSchema, (d, c, s) => {
-    const { team_id, limit, offset, ...filter } = d;
-    return s.listAssetsByTeamForCaller(team_id, c, resolvePagination({ limit, offset }), filter);
-  }),
+  [`${V3_PREFIX}/asset/list`]: bind(S.assetListSchema, (d, c, s) => s.listAssetsForCaller(d, c)),
   [`${V3_PREFIX}/asset/list-accessible`]: bind(S.assetListAccessibleSchema, (d, c, s) =>
     s.listAccessibleAssetsForCaller(d, c)),
 

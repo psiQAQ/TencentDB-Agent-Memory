@@ -54,6 +54,7 @@ export function buildPanelDeps(config: PanelConfig): PanelDeps {
     new HttpKnowledgeClient({
       baseUrl: config.knowledge.baseUrl,
       authToken: config.knowledge.authToken,
+      lifecycleAuthToken: config.knowledge.lifecycleAuthToken,
       serviceId: instanceId,
       timeoutMs: config.knowledge.timeoutMs,
     });

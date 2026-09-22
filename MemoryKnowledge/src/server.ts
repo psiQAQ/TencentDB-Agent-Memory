@@ -30,6 +30,7 @@ import { createAutoSyncRoutes } from "./routes/auto-sync.js";
 import { createLifecycleRoutes } from "./routes/lifecycle.js";
 import { accessLog } from "./middleware/response-envelope.js";
 import { errorHandler } from "./middleware/error-handler.js";
+import { createServiceAuthMiddleware } from "./middleware/auth.js";
 import { createLogger } from "./logger.js";
 import {
   createKnowledgeTelemetry,
@@ -64,6 +65,8 @@ export function createApp() {
 
   // /v3 prefix applied once here — routes define paths without prefix
   const api = new Hono();
+  // Service writes and lifecycle finalizers use different credentials.
+  api.use("*", createServiceAuthMiddleware(config.auth, config.apiPrefix));
   const lifecycleDeleteAuth = async (c: Context, next: Next) => {
     const header = c.req.header("authorization") as string | undefined;
     const actual = header?.startsWith("Bearer ") ? Buffer.from(header.slice(7), "utf8") : Buffer.alloc(0);
@@ -147,6 +150,15 @@ async function startServer(): Promise<void> {
   log.info(`DB path: ${config.dbPath}`);
   log.info(`API prefix: ${config.apiPrefix}`);
   log.info(`ClickHouse telemetry: ${config.clickhouse.enabled ? "enabled" : "disabled"}`);
+  // General writes may be open in local development; lifecycle routes stay protected.
+  if (config.auth.serviceKey) {
+    log.info("Service auth: enabled (KNOWLEDGE_SERVICE_KEY) — write/admin endpoints require Bearer");
+  } else {
+    log.warn(
+      "Service auth: DISABLED — KNOWLEDGE_SERVICE_KEY is empty, general write/admin endpoints are open. " +
+        "Lifecycle endpoints still require KNOWLEDGE_LIFECYCLE_AUTH_TOKEN.",
+    );
+  }
 
   const server = serve({ fetch: app.fetch, port: config.port }, (info) => {
     log.info(`Knowledge service listening on http://localhost:${info.port}`);

@@ -765,7 +765,7 @@ components:
     LifecycleBearer:
       type: http
       scheme: bearer
-      description: KNOWLEDGE_AUTH_TOKEN for Panel control-plane calls only.
+      description: KNOWLEDGE_LIFECYCLE_AUTH_TOKEN for Panel lifecycle calls only.
   parameters:
     ServiceIdHeader:
       name: x-tdai-service-id

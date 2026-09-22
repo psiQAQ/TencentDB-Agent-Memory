@@ -92,7 +92,7 @@ export interface PanelConfig {
   ui: { distDir: string };
   log: { level: LogLevel; format: 'json' | 'pretty' };
   /** Knowledge Service (KS :8421) 连接配置。serviceId 按请求 instanceId 注入。 */
-  knowledge: { baseUrl: string; authToken: string; timeoutMs: number };
+  knowledge: { baseUrl: string; authToken: string; lifecycleAuthToken: string; timeoutMs: number };
   /**
    * 启动时为每个实例确保 knowledge-service LLM 绑定（走 proxy 记账）。
    * sync=false 时完全跳过（不改变现有部署行为）。
@@ -222,6 +222,7 @@ export function loadPanelConfig(): PanelConfig {
     knowledge: {
       baseUrl: env('KNOWLEDGE_SERVICE_URL', 'http://127.0.0.1:8421'),
       authToken: env('KNOWLEDGE_AUTH_TOKEN', ''),
+      lifecycleAuthToken: env('KNOWLEDGE_LIFECYCLE_AUTH_TOKEN', ''),
       timeoutMs: envInt('KNOWLEDGE_TIMEOUT_MS', 15_000),
     },
     knowledgeLlmBinding: {

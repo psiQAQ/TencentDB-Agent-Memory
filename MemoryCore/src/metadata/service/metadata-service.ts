@@ -1242,6 +1242,66 @@ export class MetadataService {
     return formatListResult({ items, total: page.total }, pagination);
   }
 
+  /** Return an asset only when the caller may read it; hide denied IDs as not found. */
+  async getAssetForCaller(assetId: string, ctx: V3AuthContext): Promise<AssetEntity> {
+    const asset = await this.getAssetById(assetId);
+    if (!asset) throw new MetadataError("asset_not_found", `asset not found: ${assetId}`);
+    if (ctx.isSystemAdmin) return asset;
+    const userId = ctx.userId;
+    if (!userId) throw new MetadataError("asset_not_found", `asset not found: ${assetId}`);
+    const member = await this.store.getTeamMember(asset.team_id, userId);
+    if (!member || member.status !== "active") {
+      throw new MetadataError("asset_not_found", `asset not found: ${assetId}`);
+    }
+    if (asset.owner_user_id === userId) return asset;
+    const perm = await this.checkAssetPermission({ user_id: userId, asset_id: assetId, action: "read" });
+    if (!perm.allowed) throw new MetadataError("asset_not_found", `asset not found: ${assetId}`);
+    return asset;
+  }
+
+  /**
+   * asset/list 的调用者视角读（水平越权修复）：
+   *   - system_admin：管理面全量（原 listAssetsByTeam 语义保留）；
+   *   - 有效团队成员：owner 资产可见，其余逐条 checkAssetPermission；
+   *   - 非团队成员 / 未解析调用者：空页（不报错，避免泄露 team 信息）。
+   * 权限过滤在分页前完成，保证 total 准确。
+   */
+  async listAssetsForCaller(
+    params: { team_id: string } & AssetFilter & PaginationParams,
+    ctx: V3AuthContext,
+  ): Promise<PaginatedResult<AssetEntity>> {
+    const pagination = this.pag(params);
+    const { team_id, limit: _limit, offset: _offset, ...filter } = params;
+    if (ctx.isSystemAdmin) {
+      return this.listAssetsByTeam(team_id, pagination, filter);
+    }
+    if (!ctx.userId) return paginateArray([], pagination);
+    const member = await this.store.getTeamMember(team_id, ctx.userId);
+    if (!member || member.status !== "active") return paginateArray([], pagination);
+
+    const result: AssetEntity[] = [];
+    let offset = 0;
+    const limit = 100;
+    while (true) {
+      const page = await this.store.listAssetsByTeam(team_id, { limit, offset }, filter);
+      for (const asset of page.items) {
+        if (asset.owner_user_id === ctx.userId) {
+          result.push(asset);
+          continue;
+        }
+        const perm = await this.checkAssetPermission({
+          user_id: ctx.userId,
+          asset_id: asset.asset_id,
+          action: "read",
+        });
+        if (perm.allowed) result.push(asset);
+      }
+      if (offset + page.items.length >= page.total) break;
+      offset += limit;
+    }
+    return paginateArray(result, pagination);
+  }
+
   async touchAssetUsage(assetId: string): Promise<void> {
     if (!(await this.getAssetById(assetId))) throw new MetadataError("asset_not_found", `asset not found: ${assetId}`);
     await this.store.touchAssetUsage(assetId);
@@ -1932,13 +1992,6 @@ export class MetadataService {
   ): Promise<PaginatedResult<TaskAgentEntity>> {
     await this.getTaskForCaller(taskId, ctx);
     return this.listTaskAgents(taskId, pagination);
-  }
-
-  async getAssetForCaller(assetId: string, ctx: V3AuthContext): Promise<AssetEntity> {
-    const asset = await this.getAssetById(assetId);
-    if (!asset) throw new MetadataError("asset_not_found", `asset not found: ${assetId}`);
-    await this.requireActiveTeamMember(ctx, asset.team_id);
-    return asset;
   }
 
   async listAssetsByTeamForCaller(
