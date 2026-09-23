@@ -663,6 +663,12 @@ export const zhCN = {
   // ===== Skills =====
   'skills.title': 'Skill 资产管理',
   'skills.scope.team': '团队资产',
+  'skills.lock.showLocked': '显示锁定 Skill',
+  'skills.lock.showUnlocked': '显示未锁定 Skill',
+  'skills.lock.locked': '已锁定',
+  'skills.lock.lock': '锁定',
+  'skills.lock.unlock': '解锁',
+  'skills.lock.bound': '已被 Agent 模板引用，请先从所有模板解绑',
   'skills.scope.fixed': 'Agent 资产',
   'skills.scope.personal': '我的资产分配',
   'skills.empty.fixed.noAgent': '请选择一个 agent。',
@@ -670,6 +676,7 @@ export const zhCN = {
     'Agent "{{agent}}" 暂无固定 skill。点击右上「导入 Skill」直接导入，或在「团队」视图选中一条 skill 后通过「Fork」分发。',
   'skills.empty.team':
     '团队里还没有任何"共享"skill。skill 新建时默认私密，只有 owner 自己能看到；如需让整个团队看到，需要 owner 在「我的资产分配」tab 里点共享按钮。',
+  'skills.empty.team.filtered': '当前筛选下没有 Skill。勾选“显示锁定 Skill”可查看模板使用的团队资产。',
   'skills.count': '{{count}} 条',
   'skills.noAgent': '无可选 Agent',
   'skills.fork': 'Fork（可写）',
@@ -1190,7 +1197,7 @@ export const zhCN = {
   // ===== DefaultAgentTemplate（Team active member 共同维护）=====
   'defaultAgent.title': '默认 Agent 模板',
   'defaultAgent.desc':
-    '当前 Team 的所有 active 成员均可新增、修改、删除并选用模板。模板仅可引用团队公共资产（visibility=team）。',
+    '当前 Team 的所有 active 成员均可新增、修改、删除并选用模板。Skill 仅可引用已锁定的团队公共资产。',
   'defaultAgent.empty': '尚无模板；新建后，Team 成员可按需创建自己的 Agent。',
   'defaultAgent.create': '新建模板',
   'defaultAgent.create.tooltip': '为当前 Team 新建一个默认 Agent 模板',
@@ -1205,7 +1212,8 @@ export const zhCN = {
   'defaultAgent.name': '默认 Agent 名字 *',
   'defaultAgent.name.hint': '成员显式确认模板创建时，将以此名字创建其专属默认 Agent。',
   'defaultAgent.assets.label': '团队公共资产：',
-  'defaultAgent.assets.hint': '仅可选团队公共资产（visibility=team）',
+  'defaultAgent.assets.hint': 'Skill 仅可选已锁定的团队公共资产',
+  'defaultAgent.assets.unavailableSkills': '{{count}} 个已选 Skill 已失效或未锁定，请清除并重新选择',
   'defaultAgent.notify.saved': '默认 Agent 模板已保存。',
   'defaultAgent.assets.summary': 'Skill {{skills}} · Code Graph {{codeGraphs}} · Wiki {{wikis}}',
   'defaultAgent.use': '按模板创建',

@@ -2706,6 +2706,15 @@ export class MetadataService {
     await this.assertTeamExists(input.team_id);
     await this.requireActiveTeamMember(ctx, input.team_id);
     this.assertCallerIsResourceOwner(ctx, input.owner_user_id);
+    if (input.asset_type === "skill" && input.metadata_json) {
+      try {
+        if (Object.hasOwn(JSON.parse(input.metadata_json), "skill_lock")) {
+          throw new MetadataError("skill_lock_requires_internal", "use the Team Skill lock action");
+        }
+      } catch (err) {
+        if (err instanceof MetadataError) throw err;
+      }
+    }
     try { return await this.createAsset(input); }
     catch (err) {
       if (err instanceof LifecycleTransactionsRequiredError) {
@@ -2721,7 +2730,46 @@ export class MetadataService {
     ctx: V3AuthContext,
   ): Promise<AssetEntity> {
     await this.assertCallerIsAssetOwner(ctx, assetId);
+    const existing = await this.getAssetById(assetId);
+    if (existing?.asset_type === "skill") {
+      let locked = false;
+      try {
+        locked = (JSON.parse(existing.metadata_json) as { skill_lock?: { locked?: unknown } }).skill_lock?.locked === true;
+      } catch { /* legacy metadata is treated as unlocked */ }
+      if (locked) {
+        throw new MetadataError("skill_locked", `skill ${assetId} is locked`);
+      }
+      if (typeof patch.metadata_json === "string") {
+        try {
+          if (Object.hasOwn(JSON.parse(patch.metadata_json), "skill_lock")) {
+            throw new MetadataError("skill_lock_requires_internal", "use the Team Skill lock action");
+          }
+        } catch (err) {
+          if (err instanceof MetadataError) throw err;
+        }
+      }
+    }
     return this.updateAsset(assetId, patch);
+  }
+
+  async setSkillLockInternal(assetId: string, expectedOwnerUserId: string, locked: boolean): Promise<AssetEntity> {
+    const asset = await this.getAssetById(assetId);
+    if (!asset) throw new MetadataError("asset_not_found", `asset not found: ${assetId}`);
+    if (asset.owner_user_id !== expectedOwnerUserId) {
+      throw new MetadataError("stale_lifecycle_operation", "Skill owner changed before lock update");
+    }
+    if (asset.asset_type !== "skill" || asset.visibility !== "team" || asset.status !== "active") {
+      throw new MetadataError("team_skill_required", `active Team Skill required: ${assetId}`);
+    }
+    let metadata: Record<string, unknown>;
+    try {
+      metadata = JSON.parse(asset.metadata_json || "{}") as Record<string, unknown>;
+      if (!metadata || Array.isArray(metadata) || typeof metadata !== "object") throw new Error("invalid metadata");
+    } catch {
+      throw new MetadataError("invalid_asset_metadata", `invalid Skill metadata: ${assetId}`);
+    }
+    metadata.skill_lock = { locked };
+    return this.updateAsset(assetId, { metadata_json: JSON.stringify(metadata) });
   }
 
   async deleteAssetsForCaller(assetIds: string[], ctx: V3AuthContext): Promise<BatchDeleteResult> {

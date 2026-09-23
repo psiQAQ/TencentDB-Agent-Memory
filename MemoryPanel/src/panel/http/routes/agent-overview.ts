@@ -1,6 +1,7 @@
 import type { Hono } from "hono";
 import type { PanelDeps } from "../../panel-deps.js";
 import type { MetaCallContext } from "../../kernel/types.js";
+import { isSkillLocked } from "./meta/skill-lock.js";
 import { validatePanelMetaHeaders } from "../middleware/validate-panel-headers.js";
 import { respondControlError, respondEnvelope } from "../envelope.js";
 import {
@@ -30,6 +31,7 @@ interface MetaAssetRaw {
   created_at: string;
   updated_at: string;
   version?: number;
+  metadata_json?: string;
 }
 
 interface AgentRaw {
@@ -337,7 +339,7 @@ export function registerAgentOverviewRoutes(api: Hono, deps: PanelDeps): void {
       c,
       okEnvelope(c, {
         assets: {
-          skills: skillAssets.map((s) =>
+          skills: skillAssets.filter((s) => isSkillLocked(s.metadata_json)).map((s) =>
             toMountable({ id: s.asset_id, title: s.name, group: "SKILL" }),
           ),
           codeGraphs: codeItems.map((item) =>

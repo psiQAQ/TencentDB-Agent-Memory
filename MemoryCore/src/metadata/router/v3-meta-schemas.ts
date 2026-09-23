@@ -468,6 +468,12 @@ export const internalAssetFinalizeDeleteSchema = z.object({
 
 export const internalAssetGetSchema = z.object({ asset_id: nonEmpty });
 
+export const internalSkillSetLockSchema = z.object({
+  asset_id: nonEmpty,
+  expected_owner_user_id: nonEmpty,
+  locked: z.boolean(),
+});
+
 export const internalAssetFinalizeTransferSchema = z.object({
   team_id: nonEmpty,
   asset_id: nonEmpty,

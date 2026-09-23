@@ -404,6 +404,8 @@ function mapErrorCode(code: string): number {
     case "team_not_ready_for_deletion":
     case "team_name_confirmation_mismatch":
     case "managed_resource_requires_lifecycle":
+    case "skill_locked":
+    case "skill_lock_requires_internal":
     case "target_not_active_member":
     case "team_owner_target_must_be_admin":
     case "member_already_exists":

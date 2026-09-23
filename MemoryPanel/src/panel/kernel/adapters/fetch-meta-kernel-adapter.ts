@@ -22,8 +22,13 @@ export class FetchMetaKernelAdapter implements MetaKernelPort {
 
   invoke(action: string, body: Record<string, unknown>, ctx: MetaCallContext) {
     const payload = sanitizeBody(action, body);
-    const omitUserKey = OMIT_USER_KEY_ACTIONS.has(action);
+    const internalSkillLock = action === 'skill/set-lock-internal';
+    const omitUserKey = internalSkillLock || OMIT_USER_KEY_ACTIONS.has(action);
     const cred = toKernelCredentials(ctx, { timeoutMs: this.timeoutMs }, { omitUserKey });
-    return this.http.postEnvelope(`/v3/meta/${action}`, payload, cred);
+    return this.http.postEnvelope(
+      internalSkillLock ? '/v3/internal/meta/skill/set-lock' : `/v3/meta/${action}`,
+      payload,
+      cred,
+    );
   }
 }

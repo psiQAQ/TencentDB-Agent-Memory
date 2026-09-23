@@ -4,6 +4,14 @@
 import { metaPost, metaListAll, getCurrentUser } from './base';
 import type { Asset, AssetType, AssetStatus } from './types';
 
+export function isSkillLocked(asset: Pick<Asset, 'metadata_json'>): boolean {
+  try {
+    return (JSON.parse(asset.metadata_json) as { skill_lock?: { locked?: unknown } }).skill_lock?.locked === true;
+  } catch {
+    return false;
+  }
+}
+
 function newExternalAssetId(assetType: AssetType): string {
   const prefix = { skill: 'skl', llm_wiki: 'wiki', code_graph: 'cg', chat_memory: 'mem' }[assetType];
   const suffix = crypto.randomUUID().replace(/-/g, '').slice(0, 12);
@@ -61,6 +69,9 @@ export const assetsApi = {
     assetId: string,
     data: Partial<{ name: string; description: string; status: AssetStatus; visibility: string }>
   ) => metaPost<Asset>('asset/update', { asset_id: assetId, ...data }),
+
+  setSkillLock: (assetId: string, locked: boolean) =>
+    metaPost<Asset>('asset/set-skill-lock', { asset_id: assetId, locked }),
 
   /** 删除资产（meta asset/delete → 物理删除行） */
   delete: async (assetId: string) => {

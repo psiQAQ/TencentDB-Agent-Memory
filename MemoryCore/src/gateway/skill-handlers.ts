@@ -59,6 +59,30 @@ import { obsLogger } from "../core/report/obs-logger.js";
 
 const TAG = "[skill-handlers]";
 
+async function rejectLockedSkill(
+  skillId: string,
+  auth: V2AuthContext,
+  requestId: string,
+  deps: SkillRouterDeps,
+): Promise<ApiResponseEnvelope | null> {
+  if (!deps.getMetadataService) return null;
+  let asset;
+  try {
+    asset = await (await deps.getMetadataService(auth.serviceId)).getAssetById(skillId);
+  } catch {
+    return errorEnvelope(50301, "SKILL_LOCK_CHECK_FAILED", requestId);
+  }
+  if (!asset || asset.asset_type !== "skill") return null;
+  try {
+    const metadata = JSON.parse(asset.metadata_json) as { skill_lock?: { locked?: unknown } };
+    return metadata.skill_lock?.locked === true
+      ? errorEnvelope(42301, "SKILL_LOCKED", requestId)
+      : null;
+  } catch {
+    return null;
+  }
+}
+
 // [obs] 观测埋点全部走 obsLogger 底座（`src/core/report/obs-logger.ts`）；
 // 事件名 `skill.<xxx>.done` / `skill.<xxx>.<phase>` 直接字面量写，字段直接
 // inline 字典。undefined 值直接传，不加过滤 —— 跟仓库其他模块（e.g.
@@ -336,6 +360,8 @@ export async function handleUpdate(body: unknown, auth: V2AuthContext, requestId
   const t0 = Date.now();
   const pre = await precheckWrite(updateRequestSchema, body, auth, deps, requestId);
   if (!pre.ok) { obsLogger.warn("skill.handleUpdate.done", { req_id: requestId, code: pre.envelope.code, dur_ms: Date.now() - t0, reason: "precheck" }); return pre.envelope; }
+  const locked = await rejectLockedSkill(pre.data.skill_id, auth, requestId, deps);
+  if (locked) return locked;
 
   if (deps.quotaManager) {
     const check = await deps.quotaManager.checkMemoryQuota(auth.serviceId, 1);
@@ -360,6 +386,8 @@ export async function handlePatch(body: unknown, auth: V2AuthContext, requestId:
   const t0 = Date.now();
   const pre = await precheckWrite(patchRequestSchema, body, auth, deps, requestId);
   if (!pre.ok) { obsLogger.warn("skill.handlePatch.done", { req_id: requestId, code: pre.envelope.code, dur_ms: Date.now() - t0, reason: "precheck" }); return pre.envelope; }
+  const locked = await rejectLockedSkill(pre.data.skill_id, auth, requestId, deps);
+  if (locked) return locked;
 
   if (deps.quotaManager) {
     const check = await deps.quotaManager.checkMemoryQuota(auth.serviceId, 1);
@@ -384,6 +412,8 @@ export async function handleDelete(body: unknown, _auth: V2AuthContext, requestI
   const t0 = Date.now();
   const pre = await precheck(deleteRequestSchema, body, _auth, deps, requestId);
   if (!pre.ok) { obsLogger.warn("skill.handleDelete.done", { req_id: requestId, code: pre.envelope.code, dur_ms: Date.now() - t0, reason: "precheck" }); return pre.envelope; }
+  const locked = await rejectLockedSkill(pre.data.skill_id, _auth, requestId, deps);
+  if (locked) return locked;
   try {
     const r = await pre.core.delete(pre.data);
 
@@ -587,6 +617,8 @@ export async function handleFilesWrite(body: unknown, auth: V2AuthContext, reque
   const t0 = Date.now();
   const pre = await precheckWrite(filesWriteRequestSchema, body, auth, deps, requestId);
   if (!pre.ok) { obsLogger.warn("skill.handleFilesWrite.done", { req_id: requestId, code: pre.envelope.code, dur_ms: Date.now() - t0, reason: "precheck" }); return pre.envelope; }
+  const locked = await rejectLockedSkill(pre.data.skill_id, auth, requestId, deps);
+  if (locked) return locked;
 
   if (deps.quotaManager) {
     const check = await deps.quotaManager.checkMemoryQuota(auth.serviceId, 1);
@@ -610,6 +642,8 @@ export async function handleFilesRemove(body: unknown, auth: V2AuthContext, requ
   const t0 = Date.now();
   const pre = await precheckWrite(filesRemoveRequestSchema, body, auth, deps, requestId);
   if (!pre.ok) { obsLogger.warn("skill.handleFilesRemove.done", { req_id: requestId, code: pre.envelope.code, dur_ms: Date.now() - t0, reason: "precheck" }); return pre.envelope; }
+  const locked = await rejectLockedSkill(pre.data.skill_id, auth, requestId, deps);
+  if (locked) return locked;
 
   if (deps.quotaManager) {
     const check = await deps.quotaManager.checkMemoryQuota(auth.serviceId, 1);

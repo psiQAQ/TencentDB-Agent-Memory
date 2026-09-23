@@ -77,6 +77,8 @@ export default function DefaultAgentTemplateDialog({
   const assets = useTeamAssets(team.team_id);
 
   const canSubmit = name.trim().length > 0 && !busy;
+  const selectableSkills = new Set(selectableAssetKeys(assets.skills));
+  const unavailableSkills = skills.filter((id) => !selectableSkills.has(id));
   const totalSelected = skills.length + codeGraphs.length + llmWikis.length;
 
   function toggle(list: string[], setList: (v: string[]) => void, key: string) {
@@ -84,7 +86,7 @@ export default function DefaultAgentTemplateDialog({
   }
 
   async function handleSave() {
-    if (!canSubmit) return;
+    if (!canSubmit || assets.loading || unavailableSkills.length > 0) return;
     setBusy(true);
     try {
       const metadataJson = writeAgentUiMeta(undefined, {
@@ -251,13 +253,18 @@ export default function DefaultAgentTemplateDialog({
                   checkedKeys={skills}
                   onToggle={(k) => toggle(skills, setSkills, k)}
                 />
+                {unavailableSkills.length > 0 && (
+                  <div role="alert" className="_memory-field-hint">
+                    {t('defaultAgent.assets.unavailableSkills', { count: unavailableSkills.length })}
+                  </div>
+                )}
               </CollapseGroup>
             </>
           )}
         </div>
       </Modal.Body>
       <Modal.Footer>
-        <Button type="primary" disabled={!canSubmit} loading={busy} onClick={handleSave}>
+        <Button type="primary" disabled={!canSubmit || assets.loading || unavailableSkills.length > 0} loading={busy} onClick={handleSave}>
           {initial ? t('defaultAgent.save') : t('defaultAgent.create.submit')}
         </Button>
         <Button onClick={onClose} disabled={busy}>

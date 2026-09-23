@@ -24,7 +24,7 @@
  *
  */
 import { useTranslation } from 'react-i18next';
-import { Button, Select, Segment, Tag, Tooltip } from 'tea-component';
+import { Button, Checkbox, Select, Segment, Tag, Tooltip } from 'tea-component';
 import { DeleteIcon } from 'tea-icons-react';
 import { tea } from '@/lib/tea-bridge';
 import { AssetPageHeader } from '@/components/asset/AssetPageHeader';
@@ -76,6 +76,12 @@ export default function SkillsPanel({
     deleteLoading,
     exportLoading,
     visibilityMap,
+    lockedMap,
+    boundSkillIds,
+    showLocked,
+    setShowLocked,
+    showUnlocked,
+    setShowUnlocked,
     skills,
     // cache
     skillsWithCache,
@@ -84,6 +90,7 @@ export default function SkillsPanel({
     handleDelete,
     handleExport,
     handleToggleVisibility,
+    handleSetLock,
     selectedSkill,
   } = store;
 
@@ -183,6 +190,12 @@ export default function SkillsPanel({
                     · {agentNameMap[selectedAgent] ?? selectedAgent}
                   </span>
                 )}
+                {tab === 'team' && (
+                  <span style={{ display: 'inline-flex', gap: 12, marginLeft: 12 }}>
+                    <label><Checkbox value={showLocked} onChange={() => setShowLocked(!showLocked)} />{t('skills.lock.showLocked')}</label>
+                    <label><Checkbox value={showUnlocked} onChange={() => setShowUnlocked(!showUnlocked)} />{t('skills.lock.showUnlocked')}</label>
+                  </span>
+                )}
               </>
             }
             count={t('skills.count', { count: skillsWithCache.length })}
@@ -196,12 +209,13 @@ export default function SkillsPanel({
                 ? t('skills.empty.fixed.noAgent')
                 : tab === 'fixed'
                   ? t('skills.empty.fixed.hasAgent', { agent: selectedAgent })
-                  : t('skills.empty.team')
+                  : skills.length > 0 ? t('skills.empty.team.filtered') : t('skills.empty.team')
             }
             renderItem={(s) => {
               const ownerIsMe = !!myUserId && s.owner_user_id === myUserId;
               const canManage = ownerIsMe;
               const vis = visibilityMap[s.skill_id];
+              const locked = lockedMap[s.skill_id] === true;
               return (
                 <>
                   <AssetItemHeader>
@@ -218,7 +232,18 @@ export default function SkillsPanel({
                       </Tooltip>
                     )}
                     <AssetItemName title={s.name}>{s.name}</AssetItemName>
-                    {canManage && (
+                    {locked && <Tag size="sm">{t('skills.lock.locked')}</Tag>}
+                    {tab === 'team' && canManage && (
+                      <Button
+                        type="text"
+                        disabled={locked && boundSkillIds.has(s.skill_id)}
+                        tooltip={locked && boundSkillIds.has(s.skill_id) ? t('skills.lock.bound') : undefined}
+                        onClick={(e: any) => { e?.stopPropagation(); void handleSetLock(s, !locked); }}
+                      >
+                        {locked ? t('skills.lock.unlock') : t('skills.lock.lock')}
+                      </Button>
+                    )}
+                    {canManage && !locked && (
                       <Button
                         type="text"
                         tooltip={ownerIsMe ? t('skills.delete.own') : t('skills.delete.admin')}
@@ -263,7 +288,7 @@ export default function SkillsPanel({
                       仅 owner 可切；owner 视角 getAssets 已关闭 visibility 过滤，
                       private skill 也能拿到 vis。即便 vis 偶发缺失也按 private 兜底渲染，
                       避免 skill 被切成 private 后切换按钮消失、无法再切回 team。 */}
-                  {tab === 'fixed' && ownerIsMe && (
+                  {tab === 'fixed' && ownerIsMe && !locked && (
                     <div style={{ marginTop: 6 }} onClick={(e) => e.stopPropagation()}>
                       <Segment
                         value={vis === 'team' ? 'team' : 'private'}
@@ -289,7 +314,7 @@ export default function SkillsPanel({
             teamId={activeTeamId ?? undefined}
             userId={myUserId}
             // 编辑权限与删除一致：仅 skill 的 owner（owner_user_id === 当前用户）可编辑
-            canEdit={!!myUserId && selectedSkill?.owner_user_id === myUserId}
+            canEdit={!!myUserId && selectedSkill?.owner_user_id === myUserId && !lockedMap[selectedSkill.skill_id]}
             onChanged={() => void refresh()}
           />
         }

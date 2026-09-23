@@ -77,6 +77,7 @@ export const META_ACTIONS = [
   'asset/create',
   'asset/get',
   'asset/update',
+  'asset/set-skill-lock',
   'asset/delete',
   'asset/list',
   'asset/list-accessible',

@@ -5,6 +5,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { assetsApi, agentsApi, type Asset } from '@/lib/teamApi';
+import { isSkillLocked } from '@/lib/api/assets';
 import {
   listSkills,
   getSkill,
@@ -32,6 +33,10 @@ export function useSkillsPanel() {
   const myUserId = getPanelSession()?.user?.user_id ?? '';
   const [selectedAgent, setSelectedAgent] = useState<string>('');
   const [skills, setSkills] = useState<SkillSummary[]>([]);
+  const [showLocked, setShowLocked] = useState(false);
+  const [showUnlocked, setShowUnlocked] = useState(true);
+  const [lockedMap, setLockedMap] = useState<Record<string, boolean>>({});
+  const [boundSkillIds, setBoundSkillIds] = useState<Set<string>>(new Set());
 
   // team 内 agent 数据 —— 一次全量拉取，前端派生两份，避免之前分别为
   // 「name 映射（全量）」和「我 owner 的 agent（fixed 下拉）」发两次 agent/list：
@@ -104,8 +109,9 @@ export function useSkillsPanel() {
 
   // 对 skills 列表应用缓存：已拉过的 skill 更新为真实 version / owner_agent_id。
   const skillsWithCache = useMemo(
-    () => skills.map((s) => applyCachedDetail(s)),
-    [skills, cacheVersion],
+    () => skills.filter((s) => tab !== 'team' || (lockedMap[s.skill_id] ? showLocked : showUnlocked))
+      .map((s) => applyCachedDetail(s)),
+    [skills, cacheVersion, tab, lockedMap, showLocked, showUnlocked],
   );
 
   // 选中某条 skill 时按需预拉其数据面详情（幂等，已缓存则跳过）。
@@ -131,6 +137,8 @@ export function useSkillsPanel() {
     if (!activeTeamId) {
       setSkills([]);
       setVisibilityMap({});
+      setLockedMap({});
+      setBoundSkillIds(new Set());
       return;
     }
     const seq = ++refreshSeqRef.current;
@@ -165,14 +173,17 @@ export function useSkillsPanel() {
         //   getSkill()（N+1），用户还没点开任何一条就把全部详情拉回来。
         //   现在先用 asset 默认值渲染，version/owner_agent_id 等用户选中
         //   后才由 useSkillDetailCache 按需拉取并写入缓存。
-        const accessible = await assetsApi.listAccessible(activeTeamId, {
-          asset_type: 'skill',
-          action: 'read',
-          visibility: 'team',
-        });
+        const [accessible, templates] = await Promise.all([
+          assetsApi.listAccessible(activeTeamId, {
+            asset_type: 'skill', action: 'read', visibility: 'team',
+          }),
+          agentsApi.listDefaultTemplates(activeTeamId),
+        ]);
         if (seq !== refreshSeqRef.current) return; // 已被后续请求取代
         const visMap: Record<string, Asset['visibility']> = {};
+        const nextLocked: Record<string, boolean> = {};
         for (const a of accessible) visMap[a.asset_id] = a.visibility;
+        for (const a of accessible) nextLocked[a.asset_id] = isSkillLocked(a);
         const toMs = (iso: string): number => new Date(iso).getTime();
         const items: SkillSummary[] = accessible.map((a) => ({
           skill_id: a.asset_id,
@@ -191,6 +202,8 @@ export function useSkillsPanel() {
         // 不再额外等待；直接用 asset 默认值渲染，缓存命中后自动更新。
         setSkills(items);
         setVisibilityMap(visMap);
+        setLockedMap(nextLocked);
+        setBoundSkillIds(new Set(templates.flatMap((template) => template.asset_ids?.skills ?? [])));
       } else {
         // 固定资产 = 指定 agent 拥有（owner）的 skill；这一 tab 侧重"某 agent 装备了什么"，
         // 由 owner 权限判定即可，不再叠加 visibility 过滤（agent owner 一定能看到自己的 skill）。
@@ -231,9 +244,12 @@ export function useSkillsPanel() {
           ]);
           if (seq !== refreshSeqRef.current) return; // 已被后续请求取代
           const vm: Record<string, Asset['visibility']> = {};
+          const nextLocked: Record<string, boolean> = {};
           for (const a of ownedAssets) vm[a.asset_id] = a.visibility;
+          for (const a of ownedAssets) nextLocked[a.asset_id] = isSkillLocked(a);
           setSkills(listRes.items);
           setVisibilityMap(vm);
+          setLockedMap(nextLocked);
         }
       }
     } catch (err) {
@@ -241,6 +257,7 @@ export function useSkillsPanel() {
       tea.notify.error(err);
       setSkills([]);
       setVisibilityMap({});
+      setLockedMap({});
     } finally {
       if (seq === refreshSeqRef.current) setLoading(false);
     }
@@ -403,6 +420,16 @@ export function useSkillsPanel() {
     [visibilityMap],
   );
 
+  const handleSetLock = useCallback(async (skill: SkillSummary, locked: boolean) => {
+    try {
+      await assetsApi.setSkillLock(skill.skill_id, locked);
+      setLockedMap((current) => ({ ...current, [skill.skill_id]: locked }));
+      void refresh();
+    } catch (err) {
+      tea.notify.error(err);
+    }
+  }, [refresh]);
+
   // 列表加载态（供左侧 AssetListPanel 使用）。
   // fixed tab 依赖 agent，需覆盖三段"数据未就绪"期，否则会先闪空态：
   //   1) agentsLoading：agent 列表请求中
@@ -437,6 +464,12 @@ export function useSkillsPanel() {
     deleteLoading,
     exportLoading,
     visibilityMap,
+    lockedMap,
+    boundSkillIds,
+    showLocked,
+    setShowLocked,
+    showUnlocked,
+    setShowUnlocked,
     // cache
     skillsWithCache,
     preloadSkillDetail,
@@ -447,6 +480,7 @@ export function useSkillsPanel() {
     handleDelete,
     handleExport,
     handleToggleVisibility,
+    handleSetLock,
     selectedSkill,
   };
 }

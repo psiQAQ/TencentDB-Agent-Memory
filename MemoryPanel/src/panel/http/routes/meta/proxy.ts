@@ -10,7 +10,8 @@ import { respondControlError, respondEnvelope } from '../../envelope.js';
 import type { MetaCallContext } from '../../../kernel/types.js';
 import { KNOWLEDGE_SERVICE_USERNAME } from '../../../startup/ensure-knowledge-llm-binding.js';
 import { DEFAULT_SKILLS } from './default-skills.js';
-import { extractListItems, isCallerSystemAdmin, resolveCallerUserId } from '../knowledge/common.js';
+import { extractListItems, fetchAllMetaListItems, isActiveMetaAsset, isCallerSystemAdmin, resolveCallerUserId } from '../knowledge/common.js';
+import { isSkillLocked, templatesUsingSkill } from './skill-lock.js';
 import {
   createAgentTemplate,
   deleteAgentTemplate,
@@ -216,6 +217,53 @@ export function registerMetaProxyRoutes(api: Hono, deps: PanelDeps): void {
       return respondControlError(c, 409, duplicateMsg);
     }
 
+    if (action === 'asset/set-skill-lock') {
+      const assetId = typeof body.asset_id === 'string' ? body.asset_id : '';
+      if (!assetId || typeof body.locked !== 'boolean') return respondControlError(c, 400, 'INVALID_PARAM');
+      const found = await deps.metaKernel.invoke('asset/get', { asset_id: assetId }, ctx);
+      if (found.code !== 0) return respondEnvelope(c, found);
+      const asset = found.data as { asset_type: string; team_id: string; owner_user_id: string; visibility: string };
+      if (asset.asset_type !== 'skill' || asset.visibility !== 'team') {
+        return respondControlError(c, 400, 'TEAM_SKILL_REQUIRED');
+      }
+      if (!(await getCallerActiveTeamRole(deps, ctx, asset.team_id))) {
+        return respondControlError(c, 403, 'permission_denied');
+      }
+      const callerId = await resolveCallerUserId(deps, ctx);
+      if (asset.owner_user_id !== callerId) return respondControlError(c, 403, 'permission_denied');
+      if (!body.locked && templatesUsingSkill(
+        listAgentTemplates(deps.config.agentTemplateDir, ctx.instanceId, asset.team_id), assetId,
+      ).length > 0) {
+        return respondControlError(c, 409, 'SKILL_BOUND_TO_TEMPLATE');
+      }
+      return respondEnvelope(c, await deps.metaKernel.invoke('skill/set-lock-internal', {
+        asset_id: assetId, expected_owner_user_id: callerId, locked: body.locked,
+      }, ctx));
+    }
+
+    if (action === 'asset/create' && body.asset_type === 'skill' &&
+      isSkillLocked(typeof body.metadata_json === 'string' ? body.metadata_json : undefined)) {
+      return respondControlError(c, 409, 'USE_SKILL_LOCK_ACTION');
+    }
+
+    if ((action === 'asset/update' || action === 'asset/delete') &&
+      (action === 'asset/update' ? typeof body.asset_id === 'string' : Array.isArray(body.asset_ids))) {
+      const ids = action === 'asset/update' ? [body.asset_id as string] : body.asset_ids as string[];
+      for (const assetId of ids) {
+        const found = await deps.metaKernel.invoke('asset/get', { asset_id: assetId }, ctx);
+        if (found.code !== 0) continue;
+        const asset = found.data as { asset_type: string; metadata_json?: string };
+        if (asset.asset_type !== 'skill') continue;
+        if (isSkillLocked(asset.metadata_json)) {
+          return respondControlError(c, 423, 'SKILL_LOCKED');
+        }
+        if (action === 'asset/update' && typeof body.metadata_json === 'string' &&
+          isSkillLocked(body.metadata_json)) {
+          return respondControlError(c, 409, 'USE_SKILL_LOCK_ACTION');
+        }
+      }
+    }
+
     // ── 默认 Agent 模板集合：Panel 直接读写本地文件（不转发内核）──
     if (action === 'agent/list-default-templates' || action === 'agent/get-default-template') {
       const teamId = typeof body.team_id === 'string' ? body.team_id : '';
@@ -265,6 +313,24 @@ export function registerMetaProxyRoutes(api: Hono, deps: PanelDeps): void {
       const template = rawTemplate as AgentTemplateInput;
       if (typeof template.name !== 'string' || !template.name.trim()) {
         return respondControlError(c, 400, 'INVALID_TEMPLATE_NAME');
+      }
+      const skillIds = template.asset_ids?.skills ?? [];
+      if (!Array.isArray(skillIds) || skillIds.some((id) => typeof id !== 'string')) {
+        return respondControlError(c, 400, 'INVALID_TEMPLATE_SKILLS');
+      }
+      if (skillIds.length > 0) {
+        const available = await fetchAllMetaListItems<{
+          asset_id: string; status: string; metadata_json?: string;
+        }>(deps, ctx, 'asset/list-accessible', {
+          user_id: callerId, team_id: teamId, asset_type: 'skill',
+          visibility: 'team', action: 'read',
+        });
+        const selectable = new Set(available.filter((asset) =>
+          isActiveMetaAsset(asset.status) && isSkillLocked(asset.metadata_json),
+        ).map((asset) => asset.asset_id));
+        if (skillIds.some((id) => !selectable.has(id))) {
+          return respondControlError(c, 409, 'TEMPLATE_SKILL_MUST_BE_LOCKED');
+        }
       }
       const legacySetId =
         action === 'agent/set-default-template'

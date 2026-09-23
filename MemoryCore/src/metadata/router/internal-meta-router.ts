@@ -20,6 +20,7 @@ import {
   internalAssetFinalizeDeleteSchema,
   internalAssetFinalizeTransferSchema,
   internalAssetGetSchema,
+  internalSkillSetLockSchema,
   internalAssetPrepareTransferSchema,
   internalAssetResolveTransferSchema,
   internalBoundAssetFinalizeTransferSchema,
@@ -97,6 +98,10 @@ const routeTable: Record<string, InternalHandler> = {
       return asset;
     },
   ),
+  [`${V3_INTERNAL_PREFIX}/skill/set-lock`]: bind(
+    internalSkillSetLockSchema,
+    (d, svc) => svc.setSkillLockInternal(d.asset_id, d.expected_owner_user_id, d.locked),
+  ),
   [`${V3_INTERNAL_PREFIX}/asset/finalize-transfer`]: bind(
     internalAssetFinalizeTransferSchema,
     (d, svc) => svc.finalizeAssetTransferInternal(d),
@@ -150,7 +155,8 @@ function mapErrorCode(code: string): number {
   if (code === "permission_denied") return 403;
   if (code === "missing_instance_id" || code === "invalid_instance_id") return 400;
   if (code === "already_initialized" || code === "last_system_admin" || code === "member_already_exists"
-    || code === "stale_lifecycle_operation" || code === "target_not_active_member") return 409;
+    || code === "stale_lifecycle_operation" || code === "target_not_active_member"
+    || code === "team_skill_required" || code === "invalid_asset_metadata") return 409;
   if (code === "user_limit_exceeded" || code === "team_limit_exceeded") return 409;
   return 400;
 }

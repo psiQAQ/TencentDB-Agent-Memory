@@ -680,6 +680,12 @@ export const enUS = {
   // ===== Skills =====
   'skills.title': 'Skill Asset Management',
   'skills.scope.team': 'Team Assets',
+  'skills.lock.showLocked': 'Show locked Skills',
+  'skills.lock.showUnlocked': 'Show unlocked Skills',
+  'skills.lock.locked': 'Locked',
+  'skills.lock.lock': 'Lock',
+  'skills.lock.unlock': 'Unlock',
+  'skills.lock.bound': 'Referenced by Agent templates. Remove all template bindings first.',
   'skills.scope.fixed': 'Agent Assets',
   'skills.scope.personal': 'My Assets',
   'skills.empty.fixed.noAgent': 'Please select an agent.',
@@ -687,6 +693,7 @@ export const enUS = {
     'Agent "{{agent}}" has no fixed skills. Click "Import Skill" above to import directly, or select a skill in the "Team" view and use "Fork" to distribute it.',
   'skills.empty.team':
     'No "shared" skills in the team yet. New skills are private by default — only the owner can see them. To make them visible to the whole team, the owner needs to toggle "Share" in the "My Assets" tab.',
+  'skills.empty.team.filtered': 'No Skills match this filter. Select "Show locked Skills" to view template assets.',
   'skills.count': '{{count}} items',
   'skills.noAgent': 'No Agent Available',
   'skills.fork': 'Fork (writable)',
@@ -1215,7 +1222,7 @@ export const enUS = {
   // ===== DefaultAgentTemplate (shared by active Team members) =====
   'defaultAgent.title': 'Default Agent Templates',
   'defaultAgent.desc':
-    'Every active Team member can create, edit, delete, and use templates. Templates can reference only team-public assets (visibility=team).',
+    'Every active Team member can create, edit, delete, and use templates. Skills must be locked team-public assets.',
   'defaultAgent.empty':
     'No templates yet. Add one so Team members can create their own Agents from it.',
   'defaultAgent.create': 'New Template',
@@ -1233,7 +1240,8 @@ export const enUS = {
   'defaultAgent.name.hint':
     'A member who confirms template creation gets a dedicated Agent with this name.',
   'defaultAgent.assets.label': 'Team-public assets: ',
-  'defaultAgent.assets.hint': 'Only team-public assets (visibility=team) are selectable',
+  'defaultAgent.assets.hint': 'Only locked team-public Skills are selectable',
+  'defaultAgent.assets.unavailableSkills': '{{count}} selected Skills are unavailable or unlocked. Clear and reselect them.',
   'defaultAgent.notify.saved': 'Default Agent template saved.',
   'defaultAgent.assets.summary': 'Skills {{skills}} · Code Graphs {{codeGraphs}} · Wikis {{wikis}}',
   'defaultAgent.use': 'Create from template',

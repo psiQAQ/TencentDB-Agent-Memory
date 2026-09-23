@@ -25,7 +25,8 @@ function createApp(role: 'admin' | 'member' | 'reviewer' | null, setupLegacy = f
       'utf8',
     );
   }
-  const invoke = vi.fn(async (action: string) => {
+  const assets = new Map<string, { asset_id: string; asset_type: string; team_id: string; owner_user_id: string; visibility: string; status: string; metadata_json: string }>();
+  const invoke = vi.fn(async (action: string, body: Record<string, unknown>) => {
     if (action === 'auth/verify') {
       return {
         code: 0,
@@ -55,6 +56,28 @@ function createApp(role: 'admin' | 'member' | 'reviewer' | null, setupLegacy = f
     if (action === 'team-member/add') {
       return { code: 0, message: 'ok', request_id: 'r', data: { ok: true } };
     }
+    if (action === 'asset/get') {
+      const asset = assets.get(body.asset_id as string);
+      return { code: asset ? 0 : 404, message: asset ? 'ok' : 'asset_not_found', request_id: 'r', data: asset ?? null };
+    }
+    if (action === 'asset/update') {
+      const asset = assets.get(body.asset_id as string);
+      if (!asset) return { code: 404, message: 'asset_not_found', request_id: 'r', data: null };
+      Object.assign(asset, body);
+      return { code: 0, message: 'ok', request_id: 'r', data: asset };
+    }
+    if (action === 'skill/set-lock-internal') {
+      const asset = assets.get(body.asset_id as string);
+      if (!asset || asset.owner_user_id !== body.expected_owner_user_id) {
+        return { code: 409, message: 'stale_lifecycle_operation', request_id: 'r', data: null };
+      }
+      asset.metadata_json = JSON.stringify({ skill_lock: { locked: body.locked } });
+      return { code: 0, message: 'ok', request_id: 'r', data: asset };
+    }
+    if (action === 'asset/list-accessible') {
+      const items = [...assets.values()].filter((asset) => asset.visibility === body.visibility);
+      return { code: 0, message: 'ok', request_id: 'r', data: { items, total: items.length } };
+    }
     throw new Error(`unexpected meta action: ${action}`);
   });
   const deps = {
@@ -70,7 +93,7 @@ function createApp(role: 'admin' | 'member' | 'reviewer' | null, setupLegacy = f
   } as never;
   const app = new Hono();
   registerMetaProxyRoutes(app, deps);
-  return { app, invoke };
+  return { app, invoke, assets };
 }
 
 function call(app: Hono, action: string, body: Record<string, unknown>) {
@@ -200,5 +223,59 @@ describe('default Agent template Team-role authorization', () => {
       team_id: 'team-1',
     });
     expect(response.status).toBe(403);
+  });
+
+  it('only binds locked team Skills and refuses to unlock one used by a template', async () => {
+    const { app, assets } = createApp('admin');
+    assets.set('skl-1', {
+      asset_id: 'skl-1', asset_type: 'skill', team_id: 'team-1',
+      owner_user_id: 'caller',
+      visibility: 'team', status: 'active', metadata_json: '{}',
+    });
+    const input = { team_id: 'team-1', template: {
+      name: 'lead', visibility: 'team', asset_ids: { skills: ['skl-1'] },
+    } };
+    const rejected = await call(app, 'agent/create-default-template', input);
+    expect(rejected.status).toBe(409);
+    await expect(rejected.json()).resolves.toMatchObject({ message: 'TEMPLATE_SKILL_MUST_BE_LOCKED' });
+
+    const locked = await call(app, 'asset/set-skill-lock', { asset_id: 'skl-1', locked: true });
+    await expect(locked.json()).resolves.toMatchObject({ code: 0 });
+    const created = await call(app, 'agent/create-default-template', input);
+    const createdData = await created.json() as { code: number; data: { template_id: string } };
+    expect(createdData.code).toBe(0);
+
+    const blockedEdit = await call(app, 'asset/update', { asset_id: 'skl-1', name: 'changed' });
+    expect(blockedEdit.status).toBe(423);
+    const blockedUnlock = await call(app, 'asset/set-skill-lock', { asset_id: 'skl-1', locked: false });
+    expect(blockedUnlock.status).toBe(409);
+    await expect(blockedUnlock.json()).resolves.toMatchObject({ message: 'SKILL_BOUND_TO_TEMPLATE' });
+
+    await call(app, 'agent/delete-default-template', {
+      team_id: 'team-1', template_id: createdData.data.template_id,
+    });
+    const unlocked = await call(app, 'asset/set-skill-lock', { asset_id: 'skl-1', locked: false });
+    await expect(unlocked.json()).resolves.toMatchObject({ code: 0 });
+    const editable = await call(app, 'asset/update', { asset_id: 'skl-1', name: 'changed' });
+    await expect(editable.json()).resolves.toMatchObject({ code: 0, data: { name: 'changed' } });
+  });
+
+  it('reserves Skill locking for the dedicated Team action', async () => {
+    const { app, assets } = createApp('admin');
+    assets.set('skl-private', {
+      asset_id: 'skl-private', asset_type: 'skill', team_id: 'team-1',
+      owner_user_id: 'caller',
+      visibility: 'private', status: 'active', metadata_json: '{}',
+    });
+    const direct = await call(app, 'asset/update', {
+      asset_id: 'skl-private', metadata_json: '{"skill_lock":{"locked":true}}',
+    });
+    expect(direct.status).toBe(409);
+    await expect(direct.json()).resolves.toMatchObject({ message: 'USE_SKILL_LOCK_ACTION' });
+    const dedicated = await call(app, 'asset/set-skill-lock', {
+      asset_id: 'skl-private', locked: true,
+    });
+    expect(dedicated.status).toBe(400);
+    await expect(dedicated.json()).resolves.toMatchObject({ message: 'TEAM_SKILL_REQUIRED' });
   });
 });
