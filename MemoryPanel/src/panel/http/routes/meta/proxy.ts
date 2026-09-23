@@ -177,6 +177,7 @@ async function checkDuplicate(
 export function registerMetaProxyRoutes(api: Hono, deps: PanelDeps): void {
   api.post('/meta/*', validatePanelMetaHeaders(deps), async (c) => {
     const action = readAction(c.req.path);
+    if (action === 'user-key/reveal') c.header('Cache-Control', 'no-store');
     if (!action) {
       return respondControlError(c, 404, 'UNKNOWN_META_ACTION');
     }

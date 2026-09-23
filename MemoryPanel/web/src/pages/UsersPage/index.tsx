@@ -6,7 +6,6 @@ import {
   Alert,
   Button,
   Card,
-  Copy,
   DatePicker,
   Form,
   H3,
@@ -35,7 +34,6 @@ import {
 import { useAuthStore } from '@/stores/auth';
 import { tea } from '@/lib/tea-bridge';
 import { getErrorMessage } from '@/lib/error-message';
-import { CreatedUserKeyModal } from '@/components/team/MemberSection';
 import {
   filterApiKeySubjects,
   getKeyRevokeBlockReason,
@@ -61,6 +59,7 @@ export function UsersPage() {
   const [users, setUsers] = useState<PublicUser[]>([]);
   const [subjects, setSubjects] = useState<ApiKeySubject[]>([]);
   const [keys, setKeys] = useState<ManagedUserKey[]>([]);
+  const [copyingKeyId, setCopyingKeyId] = useState<string | null>(null);
   const [keyword, setKeyword] = useState('');
   const [filterTeamId, setFilterTeamId] = useState('*');
   const [expandedUserIds, setExpandedUserIds] = useState<string[]>([]);
@@ -70,13 +69,6 @@ export function UsersPage() {
   const [detail, setDetail] = useState<{ user: PublicUser; dependencies: UserDependencies } | null>(
     null,
   );
-  const [fresh, setFresh] = useState<{ username: string; userId: string; keyValue: string } | null>(
-    null,
-  );
-  const [freshManagedKey, setFreshManagedKey] = useState<{
-    user: PublicUser;
-    keyValue: string;
-  } | null>(null);
 
   const refresh = useCallback(async () => {
     if (!auth?.user_id) return;
@@ -228,6 +220,25 @@ export function UsersPage() {
     }
   }
 
+  async function copyKey(key: ManagedUserKey) {
+    setCopyingKeyId(key.key_id);
+    try {
+      const revealed = await userKeysApi.reveal(key.key_id);
+      if (revealed.key_id !== key.key_id || !revealed.key_value) {
+        throw new Error(t('apiKey.copy.invalidResponse'));
+      }
+      if (!navigator.clipboard?.writeText) {
+        throw new Error(t('apiKey.copy.unavailable'));
+      }
+      await navigator.clipboard.writeText(revealed.key_value);
+      tea.notify.success(t('apiKey.copy.success'));
+    } catch (err) {
+      tea.notify.error(getErrorMessage(err));
+    } finally {
+      setCopyingKeyId(null);
+    }
+  }
+
   return (
     <div className="_memory-users-page">
       <Justify
@@ -301,6 +312,8 @@ export function UsersPage() {
                     keys={keys.filter((key) => key.ownerUserId === user.user_id)}
                     allKeys={keys}
                     onCreate={() => setCreateKeyFor(user)}
+                    onCopy={(key) => void copyKey(key)}
+                    copyingKeyId={copyingKeyId}
                     onRevoke={(key) => void revokeKey(key)}
                   />
                 ),
@@ -390,27 +403,21 @@ export function UsersPage() {
           onClose={() => setCreateOpen(false)}
           onCreated={(info) => {
             setCreateOpen(false);
-            setFresh(info);
+            setExpandedUserIds((current) => [...new Set([...current, info.userId])]);
+            tea.notify.success(t('users.create.success', { username: info.username }));
             void refresh();
           }}
-        />
-      )}
-      {fresh && <CreatedUserKeyModal info={fresh} onClose={() => setFresh(null)} />}
-      {freshManagedKey && (
-        <CreatedManagedKeyModal
-          user={freshManagedKey.user}
-          keyValue={freshManagedKey.keyValue}
-          onClose={() => setFreshManagedKey(null)}
         />
       )}
       {createKeyFor && (
         <CreateManagedKeyDialog
           user={createKeyFor}
           onClose={() => setCreateKeyFor(null)}
-          onCreated={(keyValue) => {
+          onCreated={() => {
             const user = createKeyFor;
             setCreateKeyFor(null);
-            setFreshManagedKey({ user, keyValue });
+            setExpandedUserIds((current) => [...new Set([...current, user.user_id])]);
+            tea.notify.success(t('users.keys.createdSuccess', { username: user.username, userId: user.user_id }));
             void refresh();
           }}
         />
@@ -426,59 +433,21 @@ export function UsersPage() {
   );
 }
 
-function CreatedManagedKeyModal({
-  user,
-  keyValue,
-  onClose,
-}: {
-  user: PublicUser;
-  keyValue: string;
-  onClose: () => void;
-}) {
-  const { t } = useTranslation();
-  const [copied, setCopied] = useState(false);
-  return (
-    <Modal visible caption={t('users.keys.createdCaption')} size="m" onClose={onClose}>
-      <Modal.Body>
-        <Alert type="success">
-          {t('users.keys.createdSuccess', { username: user.username, userId: user.user_id })}
-        </Alert>
-        <Alert type="warning" style={{ marginTop: 12 }}>
-          {t('createdUserKey.warning')}
-        </Alert>
-        <Form style={{ marginTop: 12 }}>
-          <Form.Item label={t('createdUserKey.keyLabel')}>
-            <div className="_memory-users-fresh-key">
-              <code>{keyValue}</code>
-              <Copy text={keyValue}>
-                <Button onClick={() => setCopied(true)}>
-                  {copied ? t('createdUserKey.copied') : t('createdUserKey.copy')}
-                </Button>
-              </Copy>
-            </div>
-          </Form.Item>
-        </Form>
-      </Modal.Body>
-      <Modal.Footer>
-        <Button type="primary" onClick={onClose}>
-          {t('createdUserKey.close')}
-        </Button>
-      </Modal.Footer>
-    </Modal>
-  );
-}
-
 function UserKeysTable({
   user,
   keys,
   allKeys,
   onCreate,
+  onCopy,
+  copyingKeyId,
   onRevoke,
 }: {
   user: PublicUser;
   keys: ManagedUserKey[];
   allKeys: ManagedUserKey[];
   onCreate: () => void;
+  onCopy: (key: ManagedUserKey) => void;
+  copyingKeyId: string | null;
   onRevoke: (key: ManagedUserKey) => void;
 }) {
   const { t } = useTranslation();
@@ -522,7 +491,7 @@ function UserKeysTable({
             {
               key: 'key_prefix',
               header: t('apiKey.table.keyPrefix'),
-              width: '20%',
+              width: '15%',
               render: (key: ManagedUserKey) => <code>{key.key_prefix || '—'}</code>,
             },
             {
@@ -545,19 +514,26 @@ function UserKeysTable({
             {
               key: 'actions',
               header: t('apiKey.table.actions'),
-              width: '11%',
+              width: '16%',
               align: 'right',
               render: (key: ManagedUserKey) => {
                 const blockReason = getKeyRevokeBlockReason(key, allKeys, {
                   callerIsSystemAdmin: true,
                 });
                 return (
-                  <span
-                    title={blockReason ? t(`apiKey.revoke.disabled.${blockReason}`) : undefined}
-                  >
-                    <Button type="text" disabled={!!blockReason} onClick={() => onRevoke(key)}>
-                      {t('apiKey.revoke')}
+                  <span className="_memory-users-key-actions">
+                    <Button
+                      type="text"
+                      disabled={copyingKeyId === key.key_id}
+                      onClick={() => onCopy(key)}
+                    >
+                      {t('createdUserKey.copy')}
                     </Button>
+                    <span title={blockReason ? t(`apiKey.revoke.disabled.${blockReason}`) : undefined}>
+                      <Button type="text" disabled={!!blockReason} onClick={() => onRevoke(key)}>
+                        {t('apiKey.revoke')}
+                      </Button>
+                    </span>
                   </span>
                 );
               },
@@ -577,7 +553,7 @@ function CreateManagedKeyDialog({
 }: {
   user: PublicUser;
   onClose: () => void;
-  onCreated: (keyValue: string) => void;
+  onCreated: () => void;
 }) {
   const { t } = useTranslation();
   const [name, setName] = useState('');
@@ -589,13 +565,13 @@ function CreateManagedKeyDialog({
     setSubmitting(true);
     setError(null);
     try {
-      const key = await userKeysApi.create({
+      await userKeysApi.create({
         user_id: user.user_id,
         name: name.trim() || undefined,
         expires_at: expiresAt ? expiresAt.endOf('day').toISOString() : undefined,
+        return_key_value: false,
       });
-      if (!key.key_value) throw new Error(t('users.keys.missingSecret'));
-      onCreated(key.key_value);
+      onCreated();
     } catch (err) {
       setError(getErrorMessage(err));
     } finally {
@@ -664,7 +640,7 @@ function CreateUserDialog({
   onCreated,
 }: {
   onClose: () => void;
-  onCreated: (info: { username: string; userId: string; keyValue: string }) => void;
+  onCreated: (info: { username: string; userId: string }) => void;
 }) {
   const { t } = useTranslation();
   const [username, setUsername] = useState('');
@@ -688,9 +664,9 @@ function CreateUserDialog({
     setError(null);
     try {
       const created = customKeyEnabled
-        ? await usersApi.createWithKey({ username: name, user_key: customKey.trim() })
-        : await usersApi.create({ username: name, auth_provider: 'api_key', external_id: name });
-      onCreated({ username: name, userId: created.user_id, keyValue: created.default_user_key });
+        ? await usersApi.createWithKey({ username: name, user_key: customKey.trim(), return_key_value: false })
+        : await usersApi.create({ username: name, auth_provider: 'api_key', external_id: name, return_key_value: false });
+      onCreated({ username: name, userId: created.user_id });
     } catch (err) {
       setError(getErrorMessage(err));
     } finally {

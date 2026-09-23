@@ -33,6 +33,7 @@ export const META_ACTIONS = [
   'user-key/create',
   'user-key/list',
   'user-key/get',
+  'user-key/reveal',
   'user-key/revoke',
   'user-key/update',
   'team/create',

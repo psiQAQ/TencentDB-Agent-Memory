@@ -5,13 +5,13 @@ import { getPanelSession } from '../panelSession';
 import { ApiError, metaPost, metaListAll, getCurrentUser, dedupeInFlight, request } from './base';
 import type { MetaEnvelope, PublicUser } from './types';
 
-/** 内核 user/create 响应（CreateUserResult） — 不含 username，含一次性密钥 */
+/** 内核 user/create 响应（CreateUserResult） — 不含 username，可省略明文密钥。 */
 export interface CreateUserResult {
   user_id: string;
   user_type: 'normal' | 'system_admin';
   created_at: string;
-  /** 默认 API 密钥明文，仅此次响应返回 */
-  default_user_key: string;
+  /** 仅 return_key_value 未设为 false 时返回。 */
+  default_user_key?: string;
 }
 
 export type OwnedResourceType = 'team' | 'agent' | 'task' | 'asset';
@@ -187,8 +187,7 @@ export const usersApi = {
   /**
    * 新建用户（透明代理至后端 user/create）。
    *
-   * 响应为 CreateUserResult：含 user_id / user_type / created_at / default_user_key。
-   * default_user_key 为一次性明文密钥，仅此次响应返回。
+   * 响应为 CreateUserResult；return_key_value=false 时省略 default_user_key。
    *
    * ⚠️ 权限：须当前用户持有 system_admin 权限；普通用户 → 403。
    */
@@ -198,6 +197,7 @@ export const usersApi = {
     external_id: string;
     display_name?: string;
     email?: string;
+    return_key_value?: boolean;
   }) => metaPost<CreateUserResult>('user/create', data),
 
   /**
@@ -216,6 +216,7 @@ export const usersApi = {
     auth_provider?: string;
     display_name?: string;
     email?: string;
+    return_key_value?: boolean;
   }) => metaPost<CreateUserResult>('user/create-with-key', data),
 
   /**
@@ -240,9 +241,9 @@ export interface UserKey {
   name?: string;
   /** init-admin 创建的默认 Key 为 true；system_admin 的该 Key 对应部署 `.admin-key`。 */
   is_default?: boolean;
-  /** key 的可展示前缀（如 `sk-mem-ab12****`），内核 list/get 返回，用于免密识别具体是哪把 key */
+  /** 脱敏展示值（如 `sk-mem-****ab12`），内核 list/get 返回。 */
   key_prefix?: string;
-  /** 明文 key —— 仅创建响应里出现这一次，之后（list/get）内核不会再回传，安全设计如此 */
+  /** 明文 key：仅创建响应或 system_admin 主动 reveal 单条 Key 时返回。 */
   key_value?: string;
   created_at?: string;
   expires_at?: string;
@@ -259,9 +260,13 @@ export const userKeysApi = {
       metaListAll<UserKey>('user-key/list', userId ? { user_id: userId } : {}),
     ),
 
-  /** 创建一把新 Key；返回值里的 key_value 明文只展示这一次，调用方需立即展示给用户 */
-  create: (data: { name?: string; expires_at?: string; user_id?: string }) =>
+  /** 创建一把新 Key；return_key_value=false 时响应中省略明文。 */
+  create: (data: { name?: string; expires_at?: string; user_id?: string; return_key_value?: boolean }) =>
     metaPost<UserKey>('user-key/create', data),
+
+  /** system_admin 点击复制时按 key_id 单条读取明文；列表始终脱敏。 */
+  reveal: (keyId: string) =>
+    metaPost<{ key_id: string; key_value: string }>('user-key/reveal', { key_id: keyId }),
 
   /** 吊销一把 Key */
   revoke: (keyId: string) => metaPost<{ ok: boolean }>('user-key/revoke', { key_id: keyId }),

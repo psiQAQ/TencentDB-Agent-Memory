@@ -70,22 +70,11 @@
   font-size: 12px;
 }
 
-._memory-users-fresh-key {
-  display: flex;
+._memory-users-key-actions {
+  display: inline-flex;
   align-items: center;
-  gap: 8px;
-}
-
-._memory-users-fresh-key code {
-  flex: 1;
-  min-width: 0;
-  padding: 8px 12px;
-  overflow-wrap: anywhere;
-  border: 1px solid var(--tea-color-border-success-default);
-  border-radius: 4px;
-  background: var(--tea-color-bg-primary-default);
-  color: var(--tea-color-text-success-default);
-  user-select: all;
+  gap: 4px;
+  white-space: nowrap;
 }
 
 @media (max-width: 720px) {
