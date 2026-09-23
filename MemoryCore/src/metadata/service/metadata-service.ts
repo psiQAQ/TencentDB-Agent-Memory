@@ -878,6 +878,19 @@ export class MetadataService {
     return this.toPublicUserKey(entity);
   }
 
+  /** Only a system_admin may retrieve one stored User Key value on demand. */
+  async revealUserKeyForSystemAdmin(
+    keyId: string,
+    ctx: V3AuthContext,
+  ): Promise<{ key_id: string; key_value: string }> {
+    this.assertCanManageUsers(ctx);
+    const entity = await this.store.getUserKeyById(keyId);
+    if (!entity || entity.status !== "active" || !await this.getUserById(entity.user_id)) {
+      throw new MetadataError("user_key_not_found", `user key not found: ${keyId}`);
+    }
+    return { key_id: entity.key_id, key_value: entity.key_value };
+  }
+
   async revokeUserKeyForCaller(keyId: string, ctx: V3AuthContext): Promise<void> {
     const entity = await this.store.getUserKeyById(keyId);
     if (!entity) throw new MetadataError("user_key_not_found", `user key not found: ${keyId}`);

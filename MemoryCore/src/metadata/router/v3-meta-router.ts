@@ -78,13 +78,23 @@ const routeTable: Record<string, Handler> = {
   // User
   [`${V3_PREFIX}/user/create`]: bind(S.userCreateSchema, async (d, c, s) => {
     s.assertCanManageUsers(c);
-    return s.createNormalUser(d);
+    const created = await s.createNormalUser(d);
+    if (d.return_key_value === false) {
+      const { default_user_key, ...publicResult } = created;
+      return publicResult;
+    }
+    return created;
   }),
   // 姊妹接口：允许 system_admin 建号时显式指定 user_key。鉴权与 /user/create 完全对称。
   // Zod 只校验 username + user_key 非空，user_id 若被传入会被 zod strip 忽略。
   [`${V3_PREFIX}/user/create-with-key`]: bind(S.userCreateWithKeySchema, async (d, c, s) => {
     s.assertCanManageUsers(c);
-    return s.createNormalUserWithKey(d);
+    const created = await s.createNormalUserWithKey(d);
+    if (d.return_key_value === false) {
+      const { default_user_key, ...publicResult } = created;
+      return publicResult;
+    }
+    return created;
   }),
   // 外部认证（如 WOA）登录后判断是否初次：按 (auth_provider, external_id) 查 user。
   // 查 core 既有的 meta_users.external_id；无匹配=初次。
@@ -122,7 +132,12 @@ const routeTable: Record<string, Handler> = {
     const userId = d.user_id ?? c.userId;
     if (!userId) throw new MetadataError("permission_denied", "user_id required for admin bootstrap");
     s.assertUserScope(userId, c.userId, c.isAdmin, c.isSystemAdmin);
-    return s.createUserKey(userId, { name: d.name, expires_at: d.expires_at });
+    const created = await s.createUserKey(userId, { name: d.name, expires_at: d.expires_at });
+    if (d.return_key_value === false) {
+      const { key_value, ...publicResult } = created;
+      return publicResult;
+    }
+    return created;
   }),
   [`${V3_PREFIX}/user-key/list`]: bind(S.userKeyListSchema, async (d, c, s) => {
     const userId = d.user_id ?? c.userId;
@@ -132,6 +147,9 @@ const routeTable: Record<string, Handler> = {
   }),
   [`${V3_PREFIX}/user-key/get`]: bind(S.userKeyGetSchema, async (d, c, s) =>
     s.getUserKeyForCaller(d.key_id, c.userId, c.isAdmin, c.isSystemAdmin),
+  ),
+  [`${V3_PREFIX}/user-key/reveal`]: bind(S.userKeyRevealSchema, (d, c, s) =>
+    s.revealUserKeyForSystemAdmin(d.key_id, c),
   ),
   [`${V3_PREFIX}/user-key/revoke`]: bind(S.userKeyRevokeSchema, async (d, c, s) => {
     await s.revokeUserKeyForCaller(d.key_id, c);

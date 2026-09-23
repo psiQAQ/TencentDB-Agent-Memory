@@ -62,6 +62,7 @@ export const userBindExternalSchema = z.object({
 
 export const userCreateSchema = z.object({
   username: nonEmpty,
+  return_key_value: z.boolean().optional(),
   // 可选：管控/内部侧建"服务账号"时指定确定性 user_id（如 knowledge-service），
   // 便于 proxy systemUsers 白名单按稳定 user_id 命中；不传则内核随机生成 usr-xxx。
   // 仅 system_admin 可调用本接口（见 v3-meta-router assertCanManageUsers）。
@@ -84,6 +85,7 @@ export const userCreateSchema = z.object({
 export const userCreateWithKeySchema = z.object({
   username: nonEmpty,
   user_key: nonEmpty,
+  return_key_value: z.boolean().optional(),
   // 可选：外部认证体系（如 WOA）的唯一标识（工号），语义同 userCreateSchema.external_id。
   external_id: z.string().min(1).optional(),
   // 可选：外部认证体系标识（如 woa）/ 展示名 / 邮箱，语义同 userCreateSchema 同名可选字段。
@@ -116,11 +118,13 @@ export const userKeyCreateSchema = z.object({
   user_id: z.string().min(1).optional(),
   name: z.string().min(1).max(128).optional(),
   expires_at: z.string().datetime().optional(),
+  return_key_value: z.boolean().optional(),
 });
 export const userKeyListSchema = z.object({
   user_id: z.string().min(1).optional(),
 }).merge(paginationInputSchema);
 export const userKeyGetSchema = z.object({ key_id: nonEmpty });
+export const userKeyRevealSchema = z.object({ key_id: nonEmpty });
 export const userKeyRevokeSchema = z.object({ key_id: nonEmpty });
 export const userKeyUpdateSchema = z.object({
   key_id: nonEmpty,
@@ -552,6 +556,7 @@ export const V3_SCHEMAS = {
   "/v3/meta/user-key/create": userKeyCreateSchema,
   "/v3/meta/user-key/list": userKeyListSchema,
   "/v3/meta/user-key/get": userKeyGetSchema,
+  "/v3/meta/user-key/reveal": userKeyRevealSchema,
   "/v3/meta/user-key/revoke": userKeyRevokeSchema,
   "/v3/meta/user-key/update": userKeyUpdateSchema,
   "/v3/meta/team/create": teamCreateSchema,

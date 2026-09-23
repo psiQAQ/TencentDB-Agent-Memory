@@ -47,6 +47,28 @@ describe("MetadataService caller-scoped personnel and Team authorization", () =>
     expect((await service.listUsersForCaller({}, ctx(admin.user_id, true), { limit: 20, offset: 0 })).total).toBe(2);
   });
 
+  it("reveals one active Key only to system_admin while ordinary reads stay masked", async () => {
+    const admin = await user("key-admin", "system_admin");
+    const owner = await user("key-owner");
+    const another = await user("key-peer");
+    const key = await store.getDefaultUserKey(owner.user_id);
+    expect(key).not.toBeNull();
+
+    const publicKey = await service.getUserKeyForCaller(key!.key_id, owner.user_id);
+    expect(publicKey.key_prefix).toContain("****");
+    expect(publicKey).not.toHaveProperty("key_value");
+    await expect(service.revealUserKeyForSystemAdmin(key!.key_id, ctx(owner.user_id)))
+      .rejects.toMatchObject({ code: "permission_denied" });
+    await expect(service.revealUserKeyForSystemAdmin(key!.key_id, ctx(another.user_id)))
+      .rejects.toMatchObject({ code: "permission_denied" });
+    await expect(service.revealUserKeyForSystemAdmin(key!.key_id, ctx(admin.user_id, true)))
+      .resolves.toEqual({ key_id: key!.key_id, key_value: key!.key_value });
+
+    await store.revokeUserKey(key!.key_id);
+    await expect(service.revealUserKeyForSystemAdmin(key!.key_id, ctx(admin.user_id, true)))
+      .rejects.toMatchObject({ code: "user_key_not_found" });
+  });
+
   it("rejects public attempts to add a member with status=removed", () => {
     expect(teamMemberAddSchema.safeParse({
       team_id: "team-1",
