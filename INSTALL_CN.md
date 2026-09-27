@@ -153,7 +153,7 @@ Teamless 用户也会出现在 `system_admin` 的“用户管理”清单中。�
 
 ### 第 2 步：用 normal 用户在面板里建 Team / Agent / Task
 
-Coding agent 用记忆必须落到具体 `team / agent / task` 三元组上：
+Coding agent 使用记忆需要选定 Team 和 Agent；Task 可选：
 
 1. **Team**（团队）：点击顶栏左侧 TeamSwitcher → “新建团队”
    - 一个 Team 是一组资产的归属容器（memory、skill、knowledge 都归 Team）
@@ -166,7 +166,9 @@ Coding agent 用记忆必须落到具体 `team / agent / task` 三元组上：
    - 每个模板按 `template_id` 幂等创建；重复点击/超时重试不会重复创建，部分失败时再次确认只补缺失项
 3. **Task**（任务，可选）：左侧“任务看板”→“新建 Task”
    - Task 是**这一次工作的抓手**，比如「修复登录页 XSS」「上线 v1.4 灰度」
-   - 记忆会关联到 Task；不建 Task 也能用，但 L2/L3 会缺 Task 维度
+   - Task 维度可选，但交互式 session-init 在 Team 为 0 Task 且未配置
+     `sessionInit.defaultTaskId` 时会进入 bypass；如需“本次不关联任务”入口，
+     请按后文配置 `defaultTaskId`
 
 先建**至少 1 个 Team + 1 个 Agent**，可选建 Task。
 
