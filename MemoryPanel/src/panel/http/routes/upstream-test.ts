@@ -12,7 +12,10 @@ const input = z.object({
   model_id: z.string().trim().min(1).max(200),
   credential_ref: z.literal('deployment_default'),
 });
-const refreshInput = input.extend({ credential_ref: z.enum(['deployment_default', 'none']) });
+const refreshInput = input.extend({
+  model_id: z.string().max(200),
+  credential_ref: z.enum(['deployment_default', 'none']),
+}).refine((value) => value.credential_ref === 'none' || value.model_id.trim().length > 0);
 
 interface ProbeResult { protocol: string; status: string; httpStatus?: number }
 

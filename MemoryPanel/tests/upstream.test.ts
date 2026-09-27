@@ -62,6 +62,15 @@ it('requests an authenticated Proxy refresh and relays the adoption result', asy
   expect((await response.json()).data.adopted).toBe(true);
 });
 
+it('allows a reset refresh with no model or endpoint', async () => {
+  proxyFetch.mockResolvedValueOnce(Response.json({ adopted: true }));
+  const response = await call({
+    agent_source: 'default', type: 'extraction', base_url: '', model_id: '', credential_ref: 'none',
+  }, 'refresh');
+  expect(response.status).toBe(200);
+  expect((await response.json()).data.adopted).toBe(true);
+});
+
 it('blocks a non-admin caller before making a Proxy request', async () => {
   invoke.mockResolvedValue({ code: 0, data: { valid: true, user: { user_type: 'normal' } } });
   expect((await call()).status).toBe(403);
