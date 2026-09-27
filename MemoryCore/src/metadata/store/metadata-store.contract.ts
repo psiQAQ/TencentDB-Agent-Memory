@@ -1013,6 +1013,22 @@ export function runMetadataStoreContract(
     // ── InstanceUpstreamConfig ──────────────────────────────────────────────
 
     describe("InstanceUpstreamConfig", () => {
+      it("persists deployment credential reference without a raw key", async () => {
+        await store.upsertInstanceUpstreamConfig({
+          agent_source: "default",
+          type: "extraction",
+          mode: "custom_unified",
+          base_url: "https://api.deepseek.com",
+          credential_ref: "deployment_default",
+          api_key: "",
+          model_id: "deepseek-v4-flash",
+        });
+
+        const found = await store.getInstanceUpstreamConfig("default", "extraction");
+        expect(found?.credential_ref).toBe("deployment_default");
+        expect(found?.api_key).toBe("");
+      });
+
       it("upsert inserts new row, get retrieves it", async () => {
         const entity = await store.upsertInstanceUpstreamConfig({
           agent_source: "default",

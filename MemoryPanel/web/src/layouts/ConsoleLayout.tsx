@@ -26,6 +26,7 @@ const PATH_TO_PAGE: Record<string, PageId> = {
   '/skills': 'skills',
   '/memory': 'chat_memory',
   '/analytics': 'analytics',
+  '/models': 'upstream',
   '/team/members': 'team_members',
   '/team/agents': 'team_agents',
   '/account/resources': 'owned_resources',
@@ -153,6 +154,7 @@ export function ConsoleLayout() {
     const byGroup = new Map<string, (typeof PAGE_META)[PageId][]>();
 
     for (const meta of Object.values(PAGE_META)) {
+      if (meta.id === 'upstream' && !auth?.isAdmin) continue;
       if (userRole === 'reviewer' && meta.id === 'team_members') continue;
       if ((meta.id === 'user_management' || meta.id === 'zombie_resources') && !auth?.isAdmin)
         continue;

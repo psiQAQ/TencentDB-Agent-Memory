@@ -29,6 +29,7 @@ export type PageId =
   | 'user_management'
   | 'zombie_resources'
   | 'api_keys'
+  | 'upstream'
   | 'analytics';
 
 /** 页面元数据 */
@@ -133,12 +134,18 @@ export function usePageMeta(): Record<PageId, PageMeta> {
       group: t('menu.group.organization'),
       order: 3,
     },
+    upstream: {
+      id: 'upstream',
+      label: t('upstream.title'),
+      group: t('menu.group.models'),
+      order: 0,
+    },
     analytics: { id: 'analytics', label: t('menu.analytics'), desc: t('menu.desc.analytics'), group: t('menu.group.observability'), order: 0 },
   };
 }
 
 /** 分组排序顺序 */
-export const GROUP_ORDER_KEYS = ['workbench', 'observability', 'organization', 'assets', 'system'] as const;
+export const GROUP_ORDER_KEYS = ['workbench', 'observability', 'organization', 'models', 'assets', 'system'] as const;
 
 /** 每个页面在侧边栏菜单中的图标（Tea 官方图标，size 16） */
 export const ITEM_ICON: Record<PageId, JSX.Element> = {
@@ -177,6 +184,7 @@ export const ITEM_ICON: Record<PageId, JSX.Element> = {
   user_management: <UserIcon size={16} />,
   zombie_resources: <ToolsIcon size={16} />,
   api_keys: <LockOnIcon size={16} />,
+  upstream: <ToolsIcon size={16} />,
   wiki: <BooksIcon size={16} />,
   code: <CodeIcon size={16} />,
   skills: <ToolsIcon size={16} />,
@@ -185,6 +193,7 @@ export const ITEM_ICON: Record<PageId, JSX.Element> = {
 
 /** 分组图标（工作台 / 可观测 / 组织与权限 / 资产管理 / 系统管理） */
 export const GROUP_ICON: Record<string, JSX.Element> = {
+  models: <ToolsIcon size={16} />,
   workbench: (
     <svg
       viewBox="0 0 24 24"

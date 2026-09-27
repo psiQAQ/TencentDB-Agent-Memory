@@ -7,6 +7,7 @@ import { handleAuxiliaryEndpoint } from "./auxiliaryHandler.js";
 import { handleDirectPassthrough } from "./directHandler.js";
 import { handleCodexEndpoint } from "./codexHandler.js";
 import { handleWorkbuddyEndpoint } from "./workbuddyHandler.js";
+import { handleUpstreamProbe, handleUpstreamRefresh } from "./upstream-probe.js";
 import { apiKeyToKeyId, extractBearerToken } from "./opik.js";
 import { createSkillBridgeHandler } from "./skill/skill-bridge.js";
 import { createMemoryBridgeHandler } from "./memory/memory-bridge.js";
@@ -47,6 +48,9 @@ function bindAuxSpaceRoute(
 
 export function createApp(config: ProxyConfig): Hono {
   const app = new Hono();
+
+  app.post("/internal/upstream/test", (c) => handleUpstreamProbe(c, config));
+  app.post("/internal/upstream/refresh", (c) => handleUpstreamRefresh(c, config));
 
   // Eagerly activate storage/bindingRepo so bridge-only requests (no main
   // /v1/messages hits yet) can still recover session state via L2 fallthrough

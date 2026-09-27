@@ -36,6 +36,8 @@ import { tryReportCreditFromPath, extractSpaceIdFromPath } from "./credit-report
 import {
   getInstanceUpstreamConfigs,
   resolveUpstreamConfig,
+  resolveInstanceCredential,
+  resolveInstanceTargetUrl,
   shouldOverride,
 } from "./instance-upstream-cache.js";
 import { resolveModelId, isModelInPricing } from "./pricing.js";
@@ -1333,16 +1335,18 @@ export async function handleAnthropicMessages(
     const routedToCheapModel = target.routedFrom !== "";
     const convCfg = _earlyConvCfg;
     if (!routedToCheapModel && shouldOverride(convCfg)) {
-      target.url = `${convCfg.base_url.replace(/\/+$/, "")}${forwardEndpoint}`;
+      const resolvedKey = resolveInstanceCredential(convCfg, config, agentFromPath);
+      if (resolvedKey === null) return c.json({ error: "upstream_credential_unavailable" }, 502);
+      target.url = resolveInstanceTargetUrl(convCfg, `${convCfg.base_url.replace(/\/+$/, "")}${forwardEndpoint}`);
       credentialOrigin = convCfg.base_url;
       effectiveApiKey = convCfg.mode === "custom_unified"
-        ? convCfg.api_key
+        ? resolvedKey
         : apiKey; // custom_passthrough
       if (convCfg.model_id) {
         body.model = convCfg.model_id;
         modelId = convCfg.model_id;
       }
-      skipCreditReport = true;
+      skipCreditReport = convCfg.credential_ref !== "deployment_default";
     }
   }
 

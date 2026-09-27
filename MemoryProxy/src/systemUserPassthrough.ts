@@ -64,6 +64,8 @@ import type { SystemUserMatch } from "./systemUser.js";
 import {
   getInstanceUpstreamConfigs,
   resolveUpstreamConfig,
+  resolveInstanceCredential,
+  resolveInstanceTargetUrl,
   shouldOverride,
 } from "./instance-upstream-cache.js";
 import {
@@ -459,8 +461,10 @@ export async function handleSystemUserPassthrough(
     const instanceConfigs = await getInstanceUpstreamConfigs(config.coreSkill, spaceId);
     const extractCfg = resolveUpstreamConfig(instanceConfigs, undefined, "extraction");
     if (shouldOverride(extractCfg)) {
-      upstreamUrl = joinUrl(extractCfg.base_url, path);
-      extractionApiKeyOverride = extractCfg.mode === "custom_unified" ? extractCfg.api_key : "";
+      const resolvedKey = resolveInstanceCredential(extractCfg, config);
+      if (resolvedKey === null) return c.json({ error: "upstream_credential_unavailable" }, 502);
+      upstreamUrl = resolveInstanceTargetUrl(extractCfg, joinUrl(extractCfg.base_url, path));
+      extractionApiKeyOverride = resolvedKey;
       if (extractCfg.model_id) {
         extractionModelIdOverride = extractCfg.model_id;
       }

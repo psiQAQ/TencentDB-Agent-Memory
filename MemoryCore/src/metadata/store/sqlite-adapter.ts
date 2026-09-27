@@ -375,6 +375,7 @@ export class SqliteMetadataStore implements IMetadataStore {
         mode TEXT NOT NULL DEFAULT 'official' CHECK (mode IN ('official', 'custom_unified', 'custom_passthrough')),
         base_url TEXT NOT NULL DEFAULT '',
         api_key TEXT NOT NULL DEFAULT '',
+        credential_ref TEXT NOT NULL DEFAULT '',
         model_id TEXT NOT NULL DEFAULT '',
         description TEXT NOT NULL DEFAULT '',
         created_at TEXT NOT NULL,
@@ -383,6 +384,11 @@ export class SqliteMetadataStore implements IMetadataStore {
       CREATE UNIQUE INDEX IF NOT EXISTS ux_meta_iuc_agent_type
         ON meta_instance_upstream_config(agent_source, type);
     `);
+    try {
+      this.db.exec("ALTER TABLE meta_instance_upstream_config ADD COLUMN credential_ref TEXT NOT NULL DEFAULT ''");
+    } catch (err) {
+      if (!String(err).includes("duplicate column name")) throw err;
+    }
     // v3.2: creator_user_id 只保留创建事实，owner_user_id 承载可变 ownership。
     try {
       this.db.exec("ALTER TABLE meta_tasks ADD COLUMN owner_user_id TEXT");
@@ -2583,12 +2589,13 @@ export class SqliteMetadataStore implements IMetadataStore {
     const type = input.type ?? "conversation";
     this.run(
       `INSERT INTO meta_instance_upstream_config
-        (agent_source, type, mode, base_url, api_key, model_id, description, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        (agent_source, type, mode, base_url, api_key, credential_ref, model_id, description, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(agent_source, type) DO UPDATE SET
         mode = excluded.mode,
         base_url = excluded.base_url,
         api_key = excluded.api_key,
+        credential_ref = excluded.credential_ref,
         model_id = excluded.model_id,
         description = excluded.description,
         updated_at = excluded.updated_at`,
@@ -2597,6 +2604,7 @@ export class SqliteMetadataStore implements IMetadataStore {
       input.mode,
       input.base_url ?? "",
       input.api_key ?? "",
+      input.credential_ref ?? "",
       input.model_id ?? "",
       input.description ?? "",
       now,
@@ -2649,6 +2657,7 @@ export class SqliteMetadataStore implements IMetadataStore {
       mode: String(r.mode) as InstanceUpstreamConfigEntity["mode"],
       base_url: String(r.base_url),
       api_key: String(r.api_key),
+      credential_ref: String(r.credential_ref ?? ""),
       model_id: String(r.model_id),
       description: String(r.description),
       created_at: String(r.created_at),

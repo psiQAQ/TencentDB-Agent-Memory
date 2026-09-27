@@ -38,6 +38,13 @@ export const routes: RouteObject[] = [
         lazy: async () => ({ Component: (await import('@/pages/ChatMemoryPage')).ChatMemoryPage }),
       },
       {
+        path: 'models',
+        lazy: async () => {
+          const { UpstreamPage } = await import('@/components/UpstreamSettings');
+          return { Component: () => <SystemAdminGuard><UpstreamPage /></SystemAdminGuard> };
+        },
+      },
+      {
         path: 'team/members',
         lazy: async () => {
           const { MembersPage } = await import('@/pages/MembersPage');

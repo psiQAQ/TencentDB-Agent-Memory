@@ -73,6 +73,13 @@ PROXY_ENABLE_SESSION_INIT="${PROXY_ENABLE_SESSION_INIT:-0}"
 PROXY_ENABLE_KNOWLEDGE="${PROXY_ENABLE_KNOWLEDGE:-0}"
 PROXY_OPENAI_UPSTREAM_URL="${PROXY_OPENAI_UPSTREAM_URL:-$PROXY_UPSTREAM_URL}"
 PROXY_ANTHROPIC_UPSTREAM_URL="${PROXY_ANTHROPIC_UPSTREAM_URL:-$PROXY_UPSTREAM_URL}"
+PROXY_SYSTEM_USERS_YAML=""
+if [[ "${MEMORY_MODEL_ROUTING_VIA_PROXY:-0}" == "1" ]]; then
+  PROXY_SYSTEM_USERS_YAML="systemUsers:
+  - name: memory
+    userId: usr-sys-memory
+    displayName: Internal extraction"
+fi
 
 # sessionInit 依赖 auth 拿 user_id；开 sessionInit 时自动补 auth
 if [[ "$PROXY_ENABLE_SESSION_INIT" == "1" && "$PROXY_ENABLE_AUTH" != "1" ]]; then
@@ -109,6 +116,8 @@ upstream:
     claude-code:
       url: "${PROXY_ANTHROPIC_UPSTREAM_URL}"
       apiKey: "${PROXY_UPSTREAM_API_KEY}"
+
+${PROXY_SYSTEM_USERS_YAML}
 
 log:
   file: ""

@@ -2152,6 +2152,7 @@ export class MongoMetadataStore implements IMetadataStore {
           mode: input.mode,
           base_url: input.base_url ?? "",
           api_key: input.api_key ?? "",
+          credential_ref: input.credential_ref ?? "",
           model_id: input.model_id ?? "",
           description: input.description ?? "",
           updated_at: now,

@@ -3135,6 +3135,25 @@ export class MetadataService {
     return this.toPublicInstanceUpstreamConfig(entity);
   }
 
+  /** Only the explicit editor fetch includes the path needed to edit an endpoint. */
+  async getInstanceUpstreamConfigForEdit(
+    agentSource: string,
+    type: UpstreamConfigType,
+  ): Promise<Record<string, unknown>> {
+    const entity = await this.store.getInstanceUpstreamConfig(agentSource, type);
+    if (!entity) return { ...(await this.getInstanceUpstreamConfig(agentSource, type)), base_url: "" };
+    let editableUrl = "";
+    try {
+      const url = new URL(entity.base_url);
+      url.username = "";
+      url.password = "";
+      url.search = "";
+      url.hash = "";
+      editableUrl = url.toString().replace(/\/$/, entity.base_url.endsWith("/") ? "/" : "");
+    } catch { /* Invalid legacy URLs require re-entry. */ }
+    return { ...this.toPublicInstanceUpstreamConfig(entity), base_url: editableUrl };
+  }
+
   /**
    * 写入/覆盖实例上游配置。
    * 校验：
@@ -3159,12 +3178,40 @@ export class MetadataService {
         "base_url is required when mode is custom_unified or custom_passthrough",
       );
     }
-    if (mode === "custom_unified" && !input.api_key?.trim()) {
+    if (input.api_key && input.credential_ref) {
+      throw new MetadataError("invalid_input", "api_key and credential_ref are mutually exclusive");
+    }
+    if (mode === "custom_unified" && input.api_key === undefined && input.credential_ref === undefined) {
+      const previous = await this.store.getInstanceUpstreamConfig(input.agent_source ?? "default", type);
+      // A saved supplier credential must never be silently sent to a different host.
+      const sameOrigin = (a: string, b: string): boolean => {
+        try { return new URL(a).origin === new URL(b).origin; } catch { return false; }
+      };
+      if (previous?.mode === "custom_unified" && sameOrigin(previous.base_url, input.base_url ?? "")) {
+        input = {
+          ...input,
+          api_key: previous.api_key || undefined,
+          credential_ref: previous.credential_ref === "deployment_default" ? "deployment_default" : undefined,
+        };
+      }
+    }
+    if (input.credential_ref) {
+      let url: URL;
+      try { url = new URL(input.base_url ?? ""); } catch {
+        throw new MetadataError("invalid_input", "credential_ref requires an HTTPS endpoint");
+      }
+      if (url.protocol !== "https:" || url.username || url.password || url.search || url.hash) {
+        throw new MetadataError("invalid_input", "credential_ref requires an HTTPS endpoint without URL credentials or query");
+      }
+    }
+    if (mode === "custom_unified" && !input.api_key?.trim() && !input.credential_ref) {
       throw new MetadataError(
         "invalid_input",
-        "api_key is required when mode is custom_unified",
+        "api_key or credential_ref is required when mode is custom_unified",
       );
     }
+    if (mode !== "custom_unified") input = { ...input, api_key: "", credential_ref: undefined };
+    if (input.credential_ref) input = { ...input, api_key: "" };
     const entity = await this.store.upsertInstanceUpstreamConfig(input);
     return this.toPublicInstanceUpstreamConfig(entity);
   }
@@ -3200,6 +3247,7 @@ export class MetadataService {
         mode: "official",
         base_url: "",
         api_key: "",
+        credential_ref: undefined,
         model_id: "",
         description: "",
       });
@@ -3213,12 +3261,23 @@ export class MetadataService {
   private toPublicInstanceUpstreamConfig(
     entity: InstanceUpstreamConfigEntity,
   ): Record<string, unknown> {
+    let endpoint = { protocol: "", host: "", port: "" };
+    let publicBaseUrl = "";
+    try {
+      if (entity.base_url) {
+        const url = new URL(entity.base_url);
+        endpoint = { protocol: url.protocol.replace(/:$/, ""), host: url.hostname, port: url.port };
+        publicBaseUrl = url.origin;
+      }
+    } catch { /* An invalid legacy URL must not be reflected to the reader. */ }
     return {
       agent_source: entity.agent_source,
       type: entity.type,
       mode: entity.mode,
-      base_url: entity.base_url,
+      base_url: publicBaseUrl,
+      endpoint,
       api_key_masked: entity.api_key ? maskKeyValue(entity.api_key) : "",
+      credential_status: entity.credential_ref === "deployment_default" ? "deployment_default" : entity.api_key ? "configured" : "missing",
       model_id: entity.model_id,
       description: entity.description,
       created_at: entity.created_at,

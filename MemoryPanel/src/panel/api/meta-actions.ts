@@ -23,6 +23,10 @@ export const META_LIST_ACTIONS = new Set([
 ]);
 
 export const META_ACTIONS = [
+  'instance-upstream/list',
+  'instance-upstream/get-for-edit',
+  'instance-upstream/set',
+  'instance-upstream/reset',
   'user/create',
   // 姊妹接口：system_admin 建号时显式指定 user_key，其他行为与 user/create 完全对称。
   'user/create-with-key',

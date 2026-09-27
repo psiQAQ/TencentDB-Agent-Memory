@@ -13,6 +13,7 @@
  */
 
 import type { CoreSkillConfig } from "./types.js";
+import type { ProxyConfig } from "./types.js";
 
 const TAG = "[instance-upstream-cache]";
 const DEFAULT_TTL_MS = 5 * 60 * 1000; // 5 minutes
@@ -30,6 +31,7 @@ export interface InstanceUpstreamConfigEntry {
   mode: UpstreamConfigMode;
   base_url: string;
   api_key: string;
+  credential_ref?: string;
   model_id: string;
 }
 
@@ -70,6 +72,18 @@ async function fetchFromCore(
     throw new Error(`${TAG} envelope error code=${env.code}`);
   }
   return env.data?.items ?? [];
+}
+
+/** Force a fresh Core read after a Panel save; failed reads leave the prior cache intact. */
+export async function refreshInstanceUpstreamConfigs(
+  config: Pick<CoreSkillConfig, "endpoint" | "serviceToken" | "timeoutMs">,
+  spaceId: string,
+): Promise<InstanceUpstreamConfigEntry[]> {
+  const fresh = await fetchFromCore(config, spaceId);
+  evictIfNeeded();
+  cache.set(spaceId, { items: fresh, expiresAt: Date.now() + DEFAULT_TTL_MS });
+  lastGood.set(spaceId, fresh);
+  return fresh;
 }
 
 // ── Public API ───────────────────────────────────────────────────────────────
@@ -157,6 +171,42 @@ export function resolveUpstreamConfig(
  */
 export function shouldOverride(cfg: InstanceUpstreamConfigEntry | null): cfg is InstanceUpstreamConfigEntry {
   return cfg !== null && cfg.mode !== "official" && cfg.base_url !== "";
+}
+
+/** Resolve a deployment key only for the same HTTPS supplier origin. */
+export function resolveInstanceCredential(
+  cfg: InstanceUpstreamConfigEntry,
+  proxy: ProxyConfig,
+  agentSource?: string,
+): string | null {
+  if (cfg.mode !== "custom_unified") return "";
+  if (!cfg.credential_ref) return cfg.api_key || null;
+  if (cfg.credential_ref !== "deployment_default") return null;
+  const deployed = (agentSource ? proxy.upstream.agents?.[agentSource] : undefined);
+  const deployedUrl = deployed?.url || proxy.upstream.url;
+  const deployedKey = deployed?.apiKey || proxy.upstream.apiKey;
+  try {
+    const target = new URL(cfg.base_url);
+    const expected = new URL(deployedUrl);
+    if (target.protocol !== "https:" || target.origin !== expected.origin ||
+        target.username || target.password || target.search || target.hash) return null;
+    return deployedKey || null;
+  } catch {
+    return null;
+  }
+}
+
+/** DeepSeek has distinct Anthropic and Responses prefixes behind one supplier host. */
+export function resolveInstanceTargetUrl(cfg: InstanceUpstreamConfigEntry, original: string): string {
+  if (cfg.credential_ref !== "deployment_default") return original;
+  try {
+    const base = new URL(cfg.base_url);
+    if (base.hostname !== "api.deepseek.com") return original;
+    if (/\/messages$/.test(original)) return `${base.origin}/anthropic/v1/messages`;
+    if (/\/responses$/.test(original)) return `${base.origin}/responses`;
+    if (/\/chat\/completions$/.test(original)) return `${base.origin}/chat/completions`;
+  } catch { /* Invalid endpoints are rejected by credential resolution. */ }
+  return original;
 }
 
 // ── Internals ────────────────────────────────────────────────────────────────

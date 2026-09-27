@@ -65,6 +65,8 @@ import {
 import {
   getInstanceUpstreamConfigs,
   resolveUpstreamConfig,
+  resolveInstanceCredential,
+  resolveInstanceTargetUrl,
   shouldOverride,
 } from "./instance-upstream-cache.js";
 
@@ -1121,8 +1123,10 @@ async function forwardToUpstream(
     const instanceConfigs = await getInstanceUpstreamConfigs(config.coreSkill, spaceId);
     const convCfg = resolveUpstreamConfig(instanceConfigs, "codex", "conversation");
     if (shouldOverride(convCfg)) {
-      upstreamUrl = joinUrl(convCfg.base_url, c.req.path);
-      upstreamApiKey = convCfg.mode === "custom_unified" ? convCfg.api_key : "";
+      const resolvedKey = resolveInstanceCredential(convCfg, config, "codex");
+      if (resolvedKey === null) return c.json({ error: "upstream_credential_unavailable" }, 502);
+      upstreamUrl = resolveInstanceTargetUrl(convCfg, joinUrl(convCfg.base_url, c.req.path));
+      upstreamApiKey = resolvedKey;
       if (convCfg.model_id && typeof body.model === "string") {
         body.model = convCfg.model_id;
       }

@@ -696,6 +696,8 @@ export interface InstanceUpstreamConfigEntity {
   base_url: string;
   /** API Key（明文存储）。仅 custom_unified 模式有意义。 */
   api_key: string;
+  /** 使用部署提供的供应商凭据；为空时使用 api_key。 */
+  credential_ref: string;
   /** 可选：强制覆盖请求中的 model_id；空串 = 透传。 */
   model_id: string;
   /** 管理备注。 */
@@ -711,6 +713,7 @@ export interface UpsertInstanceUpstreamConfigInput {
   mode: UpstreamConfigMode;
   base_url?: string;
   api_key?: string;
+  credential_ref?: "deployment_default";
   model_id?: string;
   description?: string;
 }

@@ -19,6 +19,8 @@ import { registerAccountOwnedResourceRoutes } from './routes/account-owned-resou
 import { registerAdminOrphanRoutes } from './routes/admin-orphans.js';
 import { registerAuthRoutes, registerWoaIngressRoutes } from './routes/auth.js';
 
+import { registerUpstreamTestRoute } from './routes/upstream-test.js';
+
 const API_PREFIX = '/api/v1';
 
 export function buildPanelApp(deps: PanelDeps): Hono {
@@ -34,6 +36,7 @@ export function buildPanelApp(deps: PanelDeps): Hono {
   api.use('*', apiCallTelemetryMiddleware(deps.apiCallTelemetry, deps.userIdResolver));
   registerMetaInstanceRoutes(api, deps);
   registerAuthRoutes(api, deps);
+  registerUpstreamTestRoute(api, deps);
   registerMetaProxyRoutes(api, deps);
   // Skill 数据面透明代理：/api/v1/skill/* → 内核 /v3/skill/*
   registerSkillProxyRoutes(api, deps);

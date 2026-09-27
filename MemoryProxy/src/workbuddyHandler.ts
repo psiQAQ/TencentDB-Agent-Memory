@@ -25,6 +25,8 @@ import { extractSpaceIdFromPath } from "./credit-reporter.js";
 import {
   getInstanceUpstreamConfigs,
   resolveUpstreamConfig,
+  resolveInstanceCredential,
+  resolveInstanceTargetUrl,
   shouldOverride,
 } from "./instance-upstream-cache.js";
 import { joinUrl } from "./guard-adapter.js";
@@ -515,8 +517,10 @@ async function forwardToUpstream(
     const instanceConfigs = await getInstanceUpstreamConfigs(config.coreSkill, spaceId);
     const convCfg = resolveUpstreamConfig(instanceConfigs, "workbuddy", "conversation");
     if (shouldOverride(convCfg)) {
-      upstreamUrl = joinUrl(convCfg.base_url, upstreamPath);
-      upstreamApiKey = convCfg.mode === "custom_unified" ? convCfg.api_key : "";
+      const resolvedKey = resolveInstanceCredential(convCfg, config, "workbuddy");
+      if (resolvedKey === null) return c.json({ error: "upstream_credential_unavailable" }, 502);
+      upstreamUrl = resolveInstanceTargetUrl(convCfg, joinUrl(convCfg.base_url, upstreamPath));
+      upstreamApiKey = resolvedKey;
       if (convCfg.model_id && typeof body.model === "string") {
         body.model = convCfg.model_id;
       }

@@ -99,11 +99,23 @@ if ! $DOCKER ps --format '{{.Names}}' 2>/dev/null | grep -qx "tdai-memory-core";
   warn "建议先 ./start-memory-core.sh 再来这里，或直接 ./start-all.sh"
 fi
 
+HUB_LLM_MODE=custom
+HUB_LLM_API_KEY="$MEMORY_LLM_API_KEY"
+HUB_LLM_BASE_URL="$MEMORY_LLM_BASE_URL"
+HUB_EXTRA_ENV=()
+if [[ "${MEMORY_MODEL_ROUTING_VIA_PROXY:-0}" == "1" ]]; then
+  MEMORY_SYSTEM_USER_KEY_FILE="${MEMORY_CORE_CONFIG_DIR:-$SCRIPT_DIR/.memory-core-config}/memory-system-user.key"
+  [[ -s "$MEMORY_SYSTEM_USER_KEY_FILE" ]] || die "缺少 memory system user key，无法配置 Knowledge 抽取路由"
+  MEMORY_SYSTEM_USER_KEY=$(cat "$MEMORY_SYSTEM_USER_KEY_FILE")
+  HUB_LLM_MODE=proxy
+  HUB_LLM_API_KEY=""
+  HUB_LLM_BASE_URL=""
+  HUB_EXTRA_ENV=( -e KNOWLEDGE_LLM_BINDING_SYNC=0 -e MODEL_PROBE_PROXY_URL=http://proxy:8096 )
+fi
+
 pull_image "$MEMORY_HUB_IMAGE"
 rm_container_if_exists "$CONTAINER"
 
-# 内部 knowledge 通过 upstream memory 调 LLM 走 custom 模式，直接指向 MEMORY_LLM_*
-# LLM_MODE=custom → 不走 memory 的 LLM proxy，而是 knowledge 直连用户提供的端点
 info "启动 memory-hub (image=$MEMORY_HUB_IMAGE, panel=$PANEL_PORT knowledge=$KNOWLEDGE_PORT)"
 $DOCKER run -d --name "$CONTAINER" \
   --network "$NETWORK" \
@@ -124,16 +136,27 @@ $DOCKER run -d --name "$CONTAINER" \
   -e REMOTE_INSTANCE_KEY="$MEMORY_CORE_GATEWAY_API_KEY" \
   -e REMOTE_INSTANCE_PROXY_URL="$MEMORY_HUB_PROXY_PUBLIC_URL" \
   -e REMOTE_INSTANCE_UPSTREAM_MODEL="$PROXY_UPSTREAM_MODEL" \
-  -e LLM_MODE=custom \
+  -e LLM_MODE="$HUB_LLM_MODE" \
   -e LLM_PROTOCOL="${MEMORY_LLM_PROTOCOL:-openai}" \
-  -e LLM_API_KEY="$MEMORY_LLM_API_KEY" \
-  -e LLM_BASE_URL="$MEMORY_LLM_BASE_URL" \
+  -e LLM_API_KEY="$HUB_LLM_API_KEY" \
+  -e LLM_BASE_URL="$HUB_LLM_BASE_URL" \
   -e LLM_MODEL="$MEMORY_LLM_MODEL" \
-  -e KNOWLEDGE_LLM_BINDING_SYNC=0 \
+  "${HUB_EXTRA_ENV[@]}" \
   "${git_proxy_env[@]}" \
   "$MEMORY_HUB_IMAGE" >/dev/null
 
 wait_healthy "$CONTAINER" 120
+if [[ "${MEMORY_MODEL_ROUTING_VIA_PROXY:-0}" == "1" ]]; then
+  binding_response=$(printf '{"mode":"proxy","proxy_base_url":"http://proxy:8096","api_key":"%s","enabled":true}' "$MEMORY_SYSTEM_USER_KEY" \
+    | curl -fsS --max-time 10 -X POST \
+        -H "Authorization: Bearer ${KNOWLEDGE_SERVICE_KEY}" \
+        -H "x-tdai-service-id: default" \
+        -H 'Content-Type: application/json' \
+        --data-binary @- "http://127.0.0.1:${KNOWLEDGE_PORT}/v3/internal/llm-binding/set") \
+    || die "Knowledge LLM binding 写入失败"
+  node -e 'const r=JSON.parse(process.argv[1]);if(r.code!==0)process.exit(1)' "$binding_response" \
+    || die "Knowledge LLM binding 未确认成功"
+fi
 ok "memory-hub 已启动"
 ok "  Panel UI  → http://localhost:${PANEL_PORT}/"
 ok "  KS Health → http://localhost:${KNOWLEDGE_PORT}/health"

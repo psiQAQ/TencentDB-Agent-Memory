@@ -121,6 +121,27 @@ rm_container_if_exists "$CONTAINER"
 CORE_CONFIG_DIR="${MEMORY_CORE_CONFIG_DIR:-$SCRIPT_DIR/.memory-core-config}"
 mkdir -p "$CORE_CONFIG_DIR"
 CORE_CONFIG_FILE="$CORE_CONFIG_DIR/tdai-gateway.yaml"
+CORE_LLM_PROVIDER_LINE=""
+CORE_LLM_BASE_URL="${MEMORY_LLM_BASE_URL:-}"
+CORE_LLM_API_KEY="${MEMORY_LLM_API_KEY:-}"
+CORE_SYSTEM_USER_YAML=""
+if [[ "${MEMORY_MODEL_ROUTING_VIA_PROXY:-0}" == "1" ]]; then
+  MEMORY_SYSTEM_USER_KEY_FILE="$CORE_CONFIG_DIR/memory-system-user.key"
+  if [[ ! -s "$MEMORY_SYSTEM_USER_KEY_FILE" ]]; then
+    (umask 077; printf 'sk-mem-%s' "$(openssl rand -hex 16)" > "$MEMORY_SYSTEM_USER_KEY_FILE")
+  fi
+  MEMORY_SYSTEM_USER_KEY=$(cat "$MEMORY_SYSTEM_USER_KEY_FILE")
+  [[ "$MEMORY_SYSTEM_USER_KEY" =~ ^sk-mem-[A-Za-z0-9_-]{32}$ ]] || die "memory system user key 格式无效"
+  CORE_LLM_PROVIDER_LINE="  provider: proxy"
+  CORE_LLM_BASE_URL="http://proxy:8096"
+  CORE_LLM_API_KEY=""
+  CORE_SYSTEM_USER_YAML="metadata:
+  systemUser:
+    memory:
+      userId: usr-sys-memory
+      displayName: Memory extraction
+      userKey: \"${MEMORY_SYSTEM_USER_KEY}\""
+fi
 info "生成 gateway config → $CORE_CONFIG_FILE"
 cat > "$CORE_CONFIG_FILE" <<YAML
 # 由 start-memory-core.sh 自动生成 —— 每次启动覆盖，请不要手动改。
@@ -135,11 +156,14 @@ data:
   baseDir: /data/tdai-memory
 
 llm:
-  baseUrl: "${MEMORY_LLM_BASE_URL:-}"
-  apiKey: "${MEMORY_LLM_API_KEY:-}"
+${CORE_LLM_PROVIDER_LINE}
+  baseUrl: "${CORE_LLM_BASE_URL}"
+  apiKey: "${CORE_LLM_API_KEY}"
   model: "${MEMORY_LLM_MODEL:-}"
   maxTokens: 32000
   timeoutMs: 300000
+
+${CORE_SYSTEM_USER_YAML}
 
 memory:
   # promptMode: code（默认，代码工程场景，抽取项目事实/任务/决策/SOP/禁忌等团队共享记忆）

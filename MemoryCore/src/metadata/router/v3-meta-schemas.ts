@@ -533,6 +533,7 @@ export const instanceUpstreamSetSchema = z.object({
   mode: upstreamConfigMode,
   base_url: z.string().optional(),
   api_key: z.string().optional(),
+  credential_ref: z.literal("deployment_default").optional(),
   model_id: z.string().optional(),
   description: z.string().optional(),
 });
@@ -541,6 +542,8 @@ export const instanceUpstreamGetSchema = z.object({
   agent_source: z.string().min(1).default("default"),
   type: upstreamConfigType.default("conversation"),
 });
+
+export const instanceUpstreamGetForEditSchema = instanceUpstreamGetSchema;
 
 export const instanceUpstreamListSchema = z.object({
   agent_source: z.string().min(1).optional(),
@@ -618,6 +621,7 @@ export const V3_SCHEMAS = {
   "/v3/meta/config/user/set": configUserSetSchema,
   "/v3/meta/instance-upstream/set": instanceUpstreamSetSchema,
   "/v3/meta/instance-upstream/get": instanceUpstreamGetSchema,
+  "/v3/meta/instance-upstream/get-for-edit": instanceUpstreamGetForEditSchema,
   "/v3/meta/instance-upstream/list": instanceUpstreamListSchema,
   "/v3/meta/instance-upstream/reset": instanceUpstreamResetSchema,
 } as const;

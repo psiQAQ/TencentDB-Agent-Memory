@@ -365,6 +365,10 @@ const routeTable: Record<string, Handler> = {
     s.assertCanManageUsers(c);
     return s.getInstanceUpstreamConfig(d.agent_source, d.type);
   }),
+  [`${V3_PREFIX}/instance-upstream/get-for-edit`]: bind(S.instanceUpstreamGetForEditSchema, async (d, c, s) => {
+    s.assertCanManageUsers(c);
+    return s.getInstanceUpstreamConfigForEdit(d.agent_source, d.type);
+  }),
   [`${V3_PREFIX}/instance-upstream/list`]: bind(S.instanceUpstreamListSchema, async (d, c, s) => {
     s.assertCanManageUsers(c);
     return s.listInstanceUpstreamConfigs(d);
