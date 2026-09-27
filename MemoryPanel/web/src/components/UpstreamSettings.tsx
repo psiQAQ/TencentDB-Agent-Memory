@@ -97,7 +97,7 @@ function UpstreamSettings() {
         const refreshed = await metaPost<{ adopted: boolean }>('instance-upstream/refresh', payload);
         setAdopted(refreshed.adopted);
       } catch { setAdopted(null); }
-      setEditing(false); setResults([]);
+      setEditing(false);
       setNotice(t('upstream.saved'));
     } catch { setError(t('upstream.saveError')); }
     finally { setBusy(false); }
