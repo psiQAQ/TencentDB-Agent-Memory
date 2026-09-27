@@ -41,6 +41,7 @@ async function postBounded(url: URL, key: string, body: string, protocol: Protoc
     const req = request(url, {
       method: "POST",
       timeout: 10_000,
+      family: 4,
       lookup: (_host, _options, callback) => callback(null, ip, 4),
       headers: {
         "content-type": "application/json",
@@ -121,8 +122,8 @@ export async function handleUpstreamProbe(c: Context, config: ProxyConfig): Prom
     const suffix = protocol === "anthropic" ? "/messages" : protocol === "responses" ? "/responses" : "/chat/completions";
     const target = new URL(resolveInstanceTargetUrl(cfg, baseUrl.replace(/\/+$/, "") + suffix));
     const body = JSON.stringify(protocol === "responses"
-      ? { model, input: "Reply OK.", max_output_tokens: 16, stream: false }
-      : { model, messages: [{ role: "user", content: "Reply OK." }], max_tokens: 16, stream: false });
+      ? { model, input: "Reply OK.", max_output_tokens: 16, reasoning: { effort: "none" }, stream: false }
+      : { model, messages: [{ role: "user", content: "Reply OK." }], max_tokens: 16, thinking: { type: "disabled" }, stream: false });
     try {
       const response = await postBounded(target, key, body, protocol);
       return { protocol, status: response.status >= 300 ? "http_error" : hasText(protocol, response.data) ? "ready" : "invalid_response", httpStatus: response.status };
