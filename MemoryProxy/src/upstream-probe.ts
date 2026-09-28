@@ -139,9 +139,13 @@ export async function handleUpstreamProbe(c: Context, config: ProxyConfig): Prom
   const results = await Promise.all((protocols as Protocol[]).map(async (protocol) => {
     const suffix = protocol === "anthropic" ? "/messages" : protocol === "responses" ? "/responses" : "/chat/completions";
     const target = new URL(resolveInstanceTargetUrl(cfg, baseUrl.replace(/\/+$/, "") + suffix));
+    const deepseek = base.hostname === "api.deepseek.com";
     const body = JSON.stringify(protocol === "responses"
-      ? { model, input: "Reply OK.", max_output_tokens: 16, stream: false }
-      : { model, messages: [{ role: "user", content: "Reply OK." }], max_tokens: 16, stream: false });
+      ? { model, input: "Reply OK.", max_output_tokens: 64, stream: false,
+          ...(deepseek ? { reasoning: { effort: "none" } } : {}) }
+      : { model, messages: [{ role: "user", content: "Reply OK." }], max_tokens: 64, stream: false,
+          ...(deepseek && protocol === "chat" ? { thinking: { type: "disabled" } } : {}),
+          ...(deepseek && protocol === "anthropic" ? { reasoning: { effort: "none" } } : {}) });
     try {
       const response = await postBounded(target, key, body, protocol, local);
       return { protocol, status: response.status >= 300 ? "http_error" : hasText(protocol, response.data) ? "ready" : "invalid_response", httpStatus: response.status };
