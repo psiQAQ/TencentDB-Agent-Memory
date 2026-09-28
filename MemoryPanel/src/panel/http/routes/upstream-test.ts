@@ -10,11 +10,18 @@ const input = z.object({
   type: z.enum(['conversation', 'extraction']),
   base_url: z.string().max(2048),
   model_id: z.string().trim().min(1).max(200),
-  credential_ref: z.literal('deployment_default'),
-});
-const refreshInput = input.extend({
+  credential_ref: z.literal('deployment_default').optional(),
+  api_key: z.string().trim().min(1).max(4096).optional(),
+  local: z.boolean().optional(),
+  protocols: z.array(z.enum(['chat', 'responses', 'anthropic'])).min(1).max(3).optional(),
+}).refine((value) => Boolean(value.credential_ref) !== Boolean(value.api_key))
+  .refine((value) => !value.local || Boolean(value.api_key));
+const refreshInput = z.object({
+  agent_source: z.literal('default'),
+  type: z.enum(['conversation', 'extraction']),
+  base_url: z.string().max(2048),
   model_id: z.string().max(200),
-  credential_ref: z.enum(['deployment_default', 'none']),
+  credential_ref: z.enum(['deployment_default', 'stored', 'none']),
 }).refine((value) => value.credential_ref === 'none' || value.model_id.trim().length > 0);
 
 interface ProbeResult { protocol: string; status: string; httpStatus?: number }
@@ -27,7 +34,8 @@ export function registerUpstreamTestRoute(api: Hono, deps: PanelDeps): void {
     if (!parsed.success) return respondControlError(c, 400, 'INVALID_PARAM');
     const proxyBase = process.env.MODEL_PROBE_PROXY_URL;
     if (!proxyBase) return respondControlError(c, 503, 'PROXY_PROBE_NOT_CONFIGURED');
-    const protocols = parsed.data.type === 'extraction' ? ['chat'] : ['chat', 'responses', 'anthropic'];
+    const protocols = parsed.data.type === 'extraction' ? ['chat'] :
+      (parsed.data.protocols ?? ['chat', 'responses', 'anthropic']);
     try {
       const response = await fetch(`${proxyBase.replace(/\/+$/, '')}/internal/upstream/test`, {
         method: 'POST',

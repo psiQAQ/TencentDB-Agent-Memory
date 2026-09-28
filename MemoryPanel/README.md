@@ -103,6 +103,12 @@ npm run dev
 | `cd web && npm run build` | 构建前端到 `web/dist/` |
 | `bash scripts/secret-scan.sh` | 扫描敏感信息 |
 
+## 模型配置
+
+系统管理员可在“模型配置”分别设置 Agent 对话和记忆与知识抽取的上游。供应商与模型下拉列表是随 Panel 发布的预设；新模型可选“自定义模型 ID”。DeepSeek 可沿用同源部署凭据；其他云供应商和本地模型需要为各用途单独输入 Key。Key 由 Core 保存，Panel 只读取已配置状态，不回传明文。编辑同一地址可保留已保存的 Key；切换供应商地址时必须重新输入，避免把旧 Key 发给新地址。
+
+“本地部署模型”接受 Proxy 容器可访问的私有域名或私有 IPv4:端口，模型 ID 自填。HTTPS 域名可省略端口；HTTP 连接中的 Key 在该网络链路上以明文传输。测试连接会解析并固定到私有 IPv4 地址，只使用此用途输入的独立 Key。保存后可检查 Proxy 是否采用配置；真实 Agent 调用仍需按所用接口验证。当前对话预设标明 Chat、Responses、Anthropic 接口支持范围，抽取使用 Chat 接口。
+
 ## 公开 API
 
 Control 的公开入口统一位于 `/api/v1`：

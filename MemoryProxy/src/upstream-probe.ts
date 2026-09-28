@@ -1,6 +1,8 @@
 import { timingSafeEqual } from "node:crypto";
 import { lookup } from "node:dns/promises";
+import { request as httpRequest } from "node:http";
 import { request } from "node:https";
+import { isIP } from "node:net";
 import type { Context } from "hono";
 import type { ProxyConfig } from "./types.js";
 import { refreshInstanceUpstreamConfigs, resolveInstanceCredential, resolveInstanceTargetUrl, type InstanceUpstreamConfigEntry } from "./instance-upstream-cache.js";
@@ -28,17 +30,25 @@ function publicIpv4(address: string): boolean {
     (a === 203 && b === 0 && c === 113));
 }
 
-async function pinnedPublicAddress(host: string): Promise<string> {
+function privateIpv4(address: string): boolean {
+  const v = address.split(".").map(Number);
+  if (v.length !== 4 || v.some((n) => !Number.isInteger(n) || n < 0 || n > 255)) return false;
+  const [a, b] = v;
+  return a === 10 || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168);
+}
+
+async function pinnedAddress(host: string, local: boolean): Promise<string> {
   const addresses = await lookup(host, { all: true, verbatim: true });
   const ipv4 = addresses.filter((entry) => entry.family === 4);
-  if (!ipv4.length || ipv4.some((entry) => !publicIpv4(entry.address))) throw new Error("non_public_target");
+  const allowed = local ? privateIpv4 : publicIpv4;
+  if (!ipv4.length || ipv4.some((entry) => !allowed(entry.address))) throw new Error("invalid_target");
   return ipv4[0].address;
 }
 
-async function postBounded(url: URL, key: string, body: string, protocol: Protocol): Promise<{ status: number; data?: Record<string, unknown> }> {
-  const ip = await pinnedPublicAddress(url.hostname);
+async function postBounded(url: URL, key: string, body: string, protocol: Protocol, local: boolean): Promise<{ status: number; data?: Record<string, unknown> }> {
+  const ip = await pinnedAddress(url.hostname, local);
   return new Promise((resolve, reject) => {
-    const req = request(url, {
+    const req = (url.protocol === "http:" ? httpRequest : request)(url, {
       method: "POST",
       timeout: 10_000,
       family: 4,
@@ -95,37 +105,45 @@ export async function handleUpstreamProbe(c: Context, config: ProxyConfig): Prom
   catch { return c.json({ error: "invalid_input" }, 400); }
   const instanceId = c.req.header("x-tdai-service-id") ?? "";
   if (!instanceId || instanceId.length > 128) return c.json({ error: "invalid_instance" }, 400);
-  const previous = recent.get(instanceId) ?? 0;
-  if (Date.now() - previous < 10_000) return c.json({ error: "probe_rate_limited" }, 429);
-  if (recent.size > 256) recent.clear();
   const baseUrl = input.base_url;
   const model = input.model_id;
   const protocols = input.protocols;
+  const local = input.local === true;
+  const hasDeploymentKey = input.credential_ref === "deployment_default" && input.api_key === undefined;
+  const hasIndependentKey = input.credential_ref === undefined && typeof input.api_key === "string" && !!input.api_key.trim();
   if (typeof baseUrl !== "string" || baseUrl.length > 2048 || typeof model !== "string" || !model.trim() || model.length > 200 ||
       !Array.isArray(protocols) || !protocols.length || protocols.length > 3 || protocols.some((p) => !PROTOCOLS.has(p as Protocol)) ||
-      input.credential_ref !== "deployment_default") return c.json({ error: "invalid_input" }, 400);
+      (!hasDeploymentKey && !hasIndependentKey) || (local && !hasIndependentKey)) return c.json({ error: "invalid_input" }, 400);
   let base: URL;
   try { base = new URL(baseUrl); } catch { return c.json({ error: "invalid_endpoint" }, 400); }
-  if (base.protocol !== "https:" || base.username || base.password || base.search || base.hash || base.port) {
+  if ((local ? !["http:", "https:"].includes(base.protocol) ||
+      (!base.port && (base.protocol !== "https:" || isIP(base.hostname) !== 0))
+    : base.protocol !== "https:" || !!base.port) ||
+      base.username || base.password || base.search || base.hash) {
     return c.json({ error: "invalid_endpoint" }, 400);
   }
   const cfg: InstanceUpstreamConfigEntry = {
     agent_source: "default", type: "conversation", mode: "custom_unified", base_url: baseUrl,
-    api_key: "", credential_ref: "deployment_default", model_id: model,
+    api_key: hasIndependentKey ? input.api_key as string : "",
+    credential_ref: hasDeploymentKey ? "deployment_default" : "", model_id: model,
   };
   const key = resolveInstanceCredential(cfg, config);
   if (!key) return c.json({ error: "deployment_credential_unavailable" }, 400);
-  try { await pinnedPublicAddress(base.hostname); }
-  catch { return c.json({ error: "non_public_target" }, 400); }
-  recent.set(instanceId, Date.now());
+  try { await pinnedAddress(base.hostname, local); }
+  catch { return c.json({ error: local ? "non_private_target" : "non_public_target" }, 400); }
+  const rateKey = `${instanceId}:${input.type}`;
+  const previous = recent.get(rateKey) ?? 0;
+  if (Date.now() - previous < 10_000) return c.json({ error: "probe_rate_limited" }, 429);
+  if (recent.size > 256) recent.clear();
+  recent.set(rateKey, Date.now());
   const results = await Promise.all((protocols as Protocol[]).map(async (protocol) => {
     const suffix = protocol === "anthropic" ? "/messages" : protocol === "responses" ? "/responses" : "/chat/completions";
     const target = new URL(resolveInstanceTargetUrl(cfg, baseUrl.replace(/\/+$/, "") + suffix));
     const body = JSON.stringify(protocol === "responses"
-      ? { model, input: "Reply OK.", max_output_tokens: 16, reasoning: { effort: "none" }, stream: false }
-      : { model, messages: [{ role: "user", content: "Reply OK." }], max_tokens: 16, thinking: { type: "disabled" }, stream: false });
+      ? { model, input: "Reply OK.", max_output_tokens: 16, stream: false }
+      : { model, messages: [{ role: "user", content: "Reply OK." }], max_tokens: 16, stream: false });
     try {
-      const response = await postBounded(target, key, body, protocol);
+      const response = await postBounded(target, key, body, protocol, local);
       return { protocol, status: response.status >= 300 ? "http_error" : hasText(protocol, response.data) ? "ready" : "invalid_response", httpStatus: response.status };
     } catch {
       return { protocol, status: "unreachable" };
@@ -151,7 +169,9 @@ export async function handleUpstreamRefresh(c: Context, config: ProxyConfig): Pr
     const adopted = input.credential_ref === "none"
       ? !active || active.mode === "official"
       : active?.mode === "custom_unified" && active.base_url === input.base_url &&
-        active.model_id === input.model_id && active.credential_ref === input.credential_ref;
+        active.model_id === input.model_id && (input.credential_ref === "stored"
+          ? !!active.api_key && !active.credential_ref
+          : active.credential_ref === input.credential_ref);
     return c.json({ adopted });
   } catch {
     return c.json({ error: "core_unavailable" }, 502);

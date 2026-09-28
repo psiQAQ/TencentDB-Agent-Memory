@@ -52,6 +52,27 @@ it('probes only Chat for extraction', async () => {
   expect(JSON.parse(proxyFetch.mock.calls[0][1].body).protocols).toEqual(['chat']);
 });
 
+it('forwards an independent local key only to the internal probe and does not return it', async () => {
+  const local = {
+    agent_source: 'default', type: 'conversation', base_url: 'http://192.168.1.20:11434/v1',
+    model_id: 'my-local-model', api_key: 'local-secret', local: true, protocols: ['chat'],
+  };
+  const response = await call(local);
+  expect(response.status).toBe(200);
+  const forwarded = JSON.parse(proxyFetch.mock.calls[0][1].body);
+  expect(forwarded).toMatchObject(local);
+  expect(JSON.stringify(await response.json())).not.toContain('local-secret');
+});
+
+it('keeps protocol choices for a cloud provider with an independent key', async () => {
+  const response = await call({
+    ...draft, base_url: 'https://api.anthropic.com/v1', model_id: 'claude-sonnet-4-6',
+    credential_ref: undefined, api_key: 'anthropic-secret', protocols: ['anthropic'],
+  });
+  expect(response.status).toBe(200);
+  expect(JSON.parse(proxyFetch.mock.calls[0][1].body).protocols).toEqual(['anthropic']);
+});
+
 it('requests an authenticated Proxy refresh and relays the adoption result', async () => {
   proxyFetch.mockResolvedValueOnce(Response.json({ adopted: true }));
   const response = await call(draft, 'refresh');
@@ -60,6 +81,16 @@ it('requests an authenticated Proxy refresh and relays the adoption result', asy
   expect(url).toBe('http://proxy:8096/internal/upstream/refresh');
   expect(init.headers.authorization).toBe('Bearer gateway-secret');
   expect((await response.json()).data.adopted).toBe(true);
+});
+
+it('checks adoption of a stored independent credential without sending it again', async () => {
+  proxyFetch.mockResolvedValueOnce(Response.json({ adopted: true }));
+  const response = await call({
+    agent_source: 'default', type: 'conversation', base_url: 'https://api.openai.com/v1',
+    model_id: 'gpt-5.6-sol', credential_ref: 'stored',
+  }, 'refresh');
+  expect(response.status).toBe(200);
+  expect(JSON.parse(proxyFetch.mock.calls[0][1].body).credential_ref).toBe('stored');
 });
 
 it('allows a reset refresh with no model or endpoint', async () => {

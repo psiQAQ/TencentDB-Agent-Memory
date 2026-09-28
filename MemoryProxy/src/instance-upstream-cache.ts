@@ -198,7 +198,6 @@ export function resolveInstanceCredential(
 
 /** DeepSeek has distinct Anthropic and Responses prefixes behind one supplier host. */
 export function resolveInstanceTargetUrl(cfg: InstanceUpstreamConfigEntry, original: string): string {
-  if (cfg.credential_ref !== "deployment_default") return original;
   try {
     const base = new URL(cfg.base_url);
     if (base.hostname !== "api.deepseek.com") return original;

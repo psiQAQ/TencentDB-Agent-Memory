@@ -1,9 +1,31 @@
-.upstream-settings { width: 100%; max-width: 440px; }
-.upstream-settings .tea-form,
-.upstream-settings .tea-form-control,
-.upstream-settings .tea-input { width: 100%; max-width: 100%; }
-.upstream-settings .tea-select,
-.upstream-settings .tea-dropdown { width: 200px; max-width: 100%; }
+.upstream-settings {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  align-items: start;
+  gap: 20px;
+  width: 100%;
+}
+.upstream-card {
+  min-width: 0;
+  padding: 20px;
+  border: 1px solid #e5e7eb;
+  border-radius: 6px;
+}
+.upstream-card h2 { margin: 0 0 20px; font-size: 16px; }
+.upstream-card .tea-form,
+.upstream-card .tea-form-control,
+.upstream-card .tea-input,
+.upstream-card .tea-select,
+.upstream-card .tea-dropdown { width: 100%; max-width: 100%; }
+.upstream-secret-input {
+  box-sizing: border-box;
+  width: 100%;
+  min-height: 32px;
+  padding: 5px 10px;
+  border: 1px solid #d1d5db;
+  border-radius: 2px;
+  font: inherit;
+}
 .upstream-current {
   display: grid;
   grid-template-columns: 84px minmax(0, 1fr);
@@ -18,3 +40,8 @@
 }
 .upstream-current dt { color: #64748b; }
 .upstream-current dd { margin: 0; overflow-wrap: anywhere; color: #1f2937; }
+.upstream-help { margin: 8px 0; color: #64748b; font-size: 12px; }
+.upstream-actions { display: flex; gap: 8px; margin-top: 16px; flex-wrap: wrap; }
+@media (max-width: 980px) {
+  .upstream-settings { grid-template-columns: minmax(0, 1fr); }
+}
