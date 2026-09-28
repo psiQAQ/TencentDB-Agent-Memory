@@ -14,6 +14,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/_lib.sh"
 
 load_env
+MEMORY_MODEL_ROUTING_VIA_PROXY=1
+MEMORY_LLM_MODEL=panel-selected
+MEMORY_LLM_PROTOCOL=openai
 require_vars \
   MEMORY_CORE_IMAGE MEMORY_CORE_PORT MEMORY_CORE_VOLUME \
   MEMORY_CORE_GATEWAY_API_KEY
@@ -117,13 +120,17 @@ rm_container_if_exists "$CONTAINER"
 
 # ── 生成 gateway config.yaml，挂到容器 /data/config/tdai-gateway.yaml ──
 # 默认镜像里没 config，memory-core 走编译时的默认（skill / knowledge 模块关闭）。
-# 从 .env 里的 MEMORY_LLM_* 生成一份 standalone+skill 的最小配置。
+# 生成经 Proxy 路由总结模型的 standalone+skill 配置。
 CORE_CONFIG_DIR="${MEMORY_CORE_CONFIG_DIR:-$SCRIPT_DIR/.memory-core-config}"
 mkdir -p "$CORE_CONFIG_DIR"
+LLM_SECRET_FILE="${MEMORY_CORE_LLM_SECRET_FILE:-$CORE_CONFIG_DIR/llm-config.key}"
+if [[ ! -s "$LLM_SECRET_FILE" ]]; then
+  (umask 077; openssl rand -base64 32 > "$LLM_SECRET_FILE")
+fi
 CORE_CONFIG_FILE="$CORE_CONFIG_DIR/tdai-gateway.yaml"
 CORE_LLM_PROVIDER_LINE=""
-CORE_LLM_BASE_URL="${MEMORY_LLM_BASE_URL:-}"
-CORE_LLM_API_KEY="${MEMORY_LLM_API_KEY:-}"
+CORE_LLM_BASE_URL=""
+CORE_LLM_API_KEY=""
 CORE_SYSTEM_USER_YAML=""
 if [[ "${MEMORY_MODEL_ROUTING_VIA_PROXY:-0}" == "1" ]]; then
   MEMORY_SYSTEM_USER_KEY_FILE="$CORE_CONFIG_DIR/memory-system-user.key"
@@ -225,6 +232,9 @@ $DOCKER run -d --name "$CONTAINER" \
   -p "${MEMORY_CORE_BIND_HOST:-0.0.0.0}:${MEMORY_CORE_PORT}:8420" \
   -v "${MEMORY_CORE_VOLUME}:/data/tdai-memory" \
   -v "$CORE_CONFIG_FILE:/data/config/tdai-gateway.yaml:ro" \
+  -v "$LLM_SECRET_FILE:/run/secrets/tdai-llm-config-key:ro" \
+  -e TDAI_LLM_CONFIG_ENCRYPTION_KEY_FILE=/run/secrets/tdai-llm-config-key \
+  -e TDAI_MODEL_PROBE_PROXY_URL=http://proxy:8096 \
   -e TDAI_GATEWAY_PORT=8420 \
   -e TDAI_GATEWAY_HOST=0.0.0.0 \
   -e TDAI_GATEWAY_API_KEY="$MEMORY_CORE_GATEWAY_API_KEY" \

@@ -37,6 +37,7 @@ import {
 import { resolveUserId } from "./resolve-user-id.js";
 import { getUserKeyRevocationBlockReason } from "./user-key-revocation-policy.js";
 import type { V3AuthContext } from "../router/auth.js";
+import { UpstreamProfileLibrary, decryptUpstreamKey, type UpstreamProfile } from "./upstream-profile-library.js";
 import { DEFAULT_INSTANCE_ID, DEFAULT_AUTH_PROVIDER } from "../constants.js";
 import {
   canManageUsers,
@@ -254,6 +255,81 @@ export const DEFAULT_METADATA_QUOTA_LIMITS: MetadataQuotaLimits = {
 };
 
 export class MetadataService {
+  private get upstreamProfiles(): UpstreamProfileLibrary { return new UpstreamProfileLibrary(this.store); }
+
+  private async probeUpstreamProfile(profile: UpstreamProfile): Promise<UpstreamProfile["probe_results"]> {
+    if (!profile.encrypted_key) throw new MetadataError("invalid_input", "upstream_api_key_required");
+    const proxyUrl = process.env.TDAI_MODEL_PROBE_PROXY_URL;
+    const token = process.env.TDAI_GATEWAY_API_KEY;
+    if (!proxyUrl || !token) throw new MetadataError("proxy_probe_unavailable", "model probe is not configured");
+    const protocols = profile.type === "extraction" ? ["chat"] : ["chat", "responses", "anthropic"];
+    const response = await fetch(`${proxyUrl.replace(/\/+$/, "")}/internal/upstream/test`, {
+      method: "POST", redirect: "error", signal: AbortSignal.timeout(20000),
+      headers: { authorization: `Bearer ${token}`, "x-tdai-service-id": this.instanceId,
+        "content-type": "application/json" },
+      body: JSON.stringify({ agent_source: "default", type: profile.type,
+        base_url: profile.base_url, model_id: profile.model_id,
+        api_key: decryptUpstreamKey(profile.encrypted_key), local: profile.local, protocols }),
+    });
+    if (response.status === 429) throw new MetadataError("proxy_probe_rate_limited", "model probe is rate limited; retry after 10 seconds");
+    if (!response.ok) throw new MetadataError("proxy_probe_failed", `model probe HTTP ${response.status}`);
+    const data = await response.json() as { results?: UpstreamProfile["probe_results"] };
+    if (!Array.isArray(data.results)) throw new MetadataError("proxy_probe_failed", "invalid model probe response");
+    return data.results;
+  }
+
+  async listUpstreamProfiles(type: UpstreamConfigType) { return this.upstreamProfiles.list(type); }
+
+  private upstreamProfileError(error: unknown): never {
+    if (error instanceof Error) {
+      if (error.message === "upstream_profile_not_found") {
+        throw new MetadataError("upstream_profile_not_found", error.message);
+      }
+      if (error.message === "upstream_api_key_required") {
+        throw new MetadataError("invalid_input", error.message);
+      }
+      if (error.message === "upstream_probe_failed") {
+        throw new MetadataError("proxy_probe_failed", error.message);
+      }
+    }
+    throw error;
+  }
+
+  async saveUpstreamProfile(input: { type: UpstreamConfigType; id?: string; name: string;
+    base_url: string; model_id: string; api_key?: string; local: boolean }) {
+    try { await this.upstreamProfiles.save(input, (profile) => this.probeUpstreamProfile(profile)); }
+    catch (error) { this.upstreamProfileError(error); }
+    return this.upstreamProfiles.list(input.type);
+  }
+
+  async activateUpstreamProfile(type: UpstreamConfigType, id: string) {
+    try { await this.upstreamProfiles.activate(type, id, (profile) => this.probeUpstreamProfile(profile)); }
+    catch (error) { this.upstreamProfileError(error); }
+    return this.upstreamProfiles.list(type);
+  }
+
+  async deleteUpstreamProfile(type: UpstreamConfigType, id: string) {
+    try { await this.upstreamProfiles.remove(type, id); }
+    catch (error) { this.upstreamProfileError(error); }
+    return this.upstreamProfiles.list(type);
+  }
+
+  async listActiveUpstreamProfilesInternal(): Promise<{ items: Record<string, unknown>[] }> {
+    const items: Record<string, unknown>[] = [];
+    for (const type of ["conversation", "extraction"] as const) {
+      const profile = await this.upstreamProfiles.active(type);
+      if (profile) items.push({ agent_source: "default", type, mode: "custom_unified",
+        base_url: profile.base_url, model_id: profile.model_id,
+        api_key: decryptUpstreamKey(profile.encrypted_key), credential_ref: "",
+        ready_protocols: profile.ready_protocols });
+    }
+    return { items };
+  }
+
+  async getActiveConversationModelInternal(): Promise<{ model_id: string | null }> {
+    const profile = await this.upstreamProfiles.active("conversation");
+    return { model_id: profile?.model_id ?? null };
+  }
   private readonly quota: MetadataQuotaLimits;
   private readonly memorySystemUser?: MemorySystemUserConfig;
   private _configParams?: import("./config-param-service.js").IConfigParamService;

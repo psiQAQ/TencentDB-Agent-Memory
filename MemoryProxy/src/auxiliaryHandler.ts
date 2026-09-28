@@ -46,6 +46,7 @@ import {
 import {
   getInstanceUpstreamConfigs,
   resolveUpstreamConfig,
+  isReadyForProtocol,
   shouldOverride,
 } from "./instance-upstream-cache.js";
 
@@ -247,6 +248,8 @@ export async function handleAuxiliaryEndpoint(
     const instanceConfigs = await getInstanceUpstreamConfigs(config.coreSkill, spaceId);
     const agentFromPath = c.req.path.split("/").filter(Boolean)[0] ?? undefined;
     const convCfg = resolveUpstreamConfig(instanceConfigs, agentFromPath, "conversation");
+    const protocol = c.req.path.endsWith("/responses") ? "responses" : c.req.path.includes("/messages") ? "anthropic" : "chat";
+    if (!isReadyForProtocol(convCfg, protocol)) return c.json({ error: "model_not_configured_or_protocol_unavailable" }, 503);
     if (shouldOverride(convCfg)) {
       upstreamUrl = joinUrl(convCfg.base_url, c.req.path);
       upstreamApiKey = convCfg.mode === "custom_unified" ? convCfg.api_key : "";

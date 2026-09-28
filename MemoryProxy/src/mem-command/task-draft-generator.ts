@@ -190,6 +190,15 @@ export function joinTaskDraftUrl(base: string, endpoint: string): string {
   return normalized + endpoint;
 }
 
+export function taskDraftUrl(base: string, protocol: "openai" | "anthropic" | "responses"): string {
+  const endpoint = protocol === "anthropic" ? "/v1/messages" :
+    protocol === "responses" ? "/responses" : "/chat/completions";
+  if (new URL(base).hostname === "api.deepseek.com") {
+    return `https://api.deepseek.com${protocol === "anthropic" ? "/anthropic" : ""}${endpoint}`;
+  }
+  return joinTaskDraftUrl(base, endpoint);
+}
+
 /**
  * 指令关键词剥离表：LLM 有时会把用户输入的原始指令字面搬进 title（如
  * "Fix mem:create-task LLM ..."），这些前缀既冗余又占字符预算。
@@ -538,7 +547,7 @@ async function attemptDraftOnce(
       // ⚠️ copilot 上游对 /v1/messages **强制返 SSE 流式**（非流式返 200 + event-stream body
       // 会让 JSON.parse 直接爆 "Unexpected token 'e', event: mes..."）。因此显式设 stream:true
       // 并走 parseAnthropicStream 累积 content_block_delta。与 openai 分支的策略一致。
-      fetchUrl = joinTaskDraftUrl(cfg.url, "/v1/messages");
+      fetchUrl = taskDraftUrl(cfg.url, "anthropic");
       resp = await fetch(fetchUrl, {
         method: "POST",
         headers: {
@@ -553,6 +562,7 @@ async function attemptDraftOnce(
           temperature: 0.3,
           max_tokens: LLM_MAX_TOKENS,
           stream: true,
+          ...(new URL(cfg.url).hostname === "api.deepseek.com" ? { reasoning: { effort: "none" } } : {}),
         }),
         signal: AbortSignal.timeout(effectiveTimeoutMs),
       });
@@ -564,7 +574,7 @@ async function attemptDraftOnce(
       // body 回给你，客户端按 JSON 直接爆 "Unexpected token 'e', event: res..."）。因此
       // 显式 stream:true，走 parseResponsesStream 累积 response.output_text.delta。
       // 与 anthropic/openai 分支的策略一致 —— copilot 三协议全强制流式。
-      fetchUrl = joinTaskDraftUrl(cfg.url, "/responses");
+      fetchUrl = taskDraftUrl(cfg.url, "responses");
       resp = await fetch(fetchUrl, {
         method: "POST",
         headers: {
@@ -580,6 +590,7 @@ async function attemptDraftOnce(
           temperature: 0.3,
           max_output_tokens: LLM_MAX_TOKENS,
           stream: true,
+          ...(new URL(cfg.url).hostname === "api.deepseek.com" ? { reasoning: { effort: "none" } } : {}),
         }),
         signal: AbortSignal.timeout(effectiveTimeoutMs),
       });
@@ -591,7 +602,7 @@ async function attemptDraftOnce(
       // 让上游末尾额外回一个 usage chunk 用于观测。
       // base 通常自带 /v2 尾巴（主链路约定），joinTaskDraftUrl 里规则 3 走"直接拼"分支
       // 得到 .../v2/chat/completions（endpoint 与 base 无重合）。
-      fetchUrl = joinTaskDraftUrl(cfg.url, "/chat/completions");
+      fetchUrl = taskDraftUrl(cfg.url, "openai");
       resp = await fetch(fetchUrl, {
         method: "POST",
         headers: {
@@ -607,6 +618,7 @@ async function attemptDraftOnce(
           temperature: 0.3,
           max_tokens: LLM_MAX_TOKENS,
           stream: true,
+          ...(new URL(cfg.url).hostname === "api.deepseek.com" ? { thinking: { type: "disabled" } } : {}),
           stream_options: { include_usage: true },
         }),
         signal: AbortSignal.timeout(effectiveTimeoutMs),

@@ -32,12 +32,13 @@ function configuration() {
   return config;
 }
 
-function entry(mode: "custom_unified" | "custom_passthrough", type: "conversation" | "extraction" = "conversation"): InstanceUpstreamConfigEntry {
+function entry(type: "conversation" | "extraction" = "conversation"): InstanceUpstreamConfigEntry {
   return {
-    agent_source: "default", type, mode,
+    agent_source: "default", type, mode: "custom_unified",
     base_url: "https://instance.invalid/v1",
-    api_key: mode === "custom_unified" ? "instance-model-key" : "",
+    api_key: "instance-model-key",
     model_id: "instance-model",
+    ready_protocols: type === "extraction" ? ["chat"] : ["chat", "responses", "anthropic"],
   };
 }
 
@@ -84,7 +85,7 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-describe.each(["custom_unified", "custom_passthrough"] as const)("merged instance upstream: %s", (mode) => {
+describe("selected Panel upstream", () => {
   it.each(routes)("applies configured credentials to %s/%s", async (source, endpoint, authHeader) => {
     const config = configuration();
     initAuth(config.auth);
@@ -93,7 +94,7 @@ describe.each(["custom_unified", "custom_passthrough"] as const)("merged instanc
       const url = String(input);
       calls.push({ url, headers: new Headers(init?.headers), body: String(init?.body ?? "") });
       if (url.endsWith("/v3/internal/meta/instance-upstream/list")) {
-        return Response.json({ code: 0, data: { items: [entry(mode)] } });
+        return Response.json({ code: 0, data: { items: [entry()] } });
       }
       return Response.json({ id: "test-response", output: [], content: [], choices: [], usage: {} });
     }));
@@ -117,7 +118,7 @@ describe.each(["custom_unified", "custom_passthrough"] as const)("merged instanc
     const forwarded = calls.filter((call) => call.url.startsWith("https://instance.invalid/"));
     expect(forwarded).toHaveLength(1);
     expect(forwarded[0].url).toBe(`https://instance.invalid/v1/${endpoint}`);
-    const key = mode === "custom_unified" ? "instance-model-key" : "client-model-key";
+    const key = "instance-model-key";
     expect(forwarded[0].headers.get(authHeader)).toBe(authHeader === "authorization" ? `Bearer ${key}` : key);
     expect(forwarded[0].headers.has("x-team-id")).toBe(false);
     expect(forwarded[0].headers.has("x-session-id")).toBe(false);
@@ -133,39 +134,75 @@ describe.each(["custom_unified", "custom_passthrough"] as const)("merged instanc
     vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
       const url = String(input);
       if (url.endsWith("/v3/meta/auth/verify")) return Response.json({ code: 0, data: { valid: true, user: { user_id: "system-user" } } });
-      if (url.endsWith("/v3/internal/meta/instance-upstream/list")) return Response.json({ code: 0, data: { items: [entry(mode, "extraction")] } });
-      expect(url).toBe("https://instance.invalid/v1/messages");
+      if (url.endsWith("/v3/internal/meta/instance-upstream/list")) return Response.json({ code: 0, data: { items: [entry("extraction")] } });
+      expect(url).toBe("https://instance.invalid/v1/chat/completions");
       forwarded.push(new Headers(init?.headers));
       return Response.json({ id: "test-response", content: [], usage: {} });
     }));
-    const response = await createApp(config).request("http://proxy/claude-code/space-test/v1/messages", {
+    const response = await createApp(config).request("http://proxy/codebuddy/space-test/v1/chat/completions", {
       method: "POST",
-      headers: { "content-type": "application/json", "x-session-id": "session-test", "x-api-key": "client-model-key" },
-      body: JSON.stringify(requestBody("messages")),
+      headers: { "content-type": "application/json", "x-session-id": "session-test", authorization: "Bearer client-model-key" },
+      body: JSON.stringify(requestBody("chat/completions")),
     });
     await response.text();
     expect(response.status).toBe(200);
     expect(forwarded).toHaveLength(1);
-    expect(forwarded[0].get("x-api-key")).toBe(mode === "custom_unified" ? "instance-model-key" : "client-model-key");
+    expect(forwarded[0].get("authorization")).toBe("Bearer instance-model-key");
   });
 });
 
-it("keeps instance lookup failures out of diagnostics while using the last known configuration", async () => {
+it("returns unconfigured without a selected conversation profile", async () => {
+  const config = configuration();
+  initAuth(config.auth);
+  const fetchMock = vi.fn(async (input: string | URL | Request) => {
+    if (String(input).endsWith("/v3/internal/meta/instance-upstream/list")) {
+      return Response.json({ code: 0, data: { items: [] } });
+    }
+    throw new Error("unexpected supplier call");
+  });
+  vi.stubGlobal("fetch", fetchMock);
+  const response = await createApp(config).request("http://proxy/codebuddy/space-test/v1/chat/completions", {
+    method: "POST", headers: { "content-type": "application/json", authorization: "Bearer user-key" },
+    body: JSON.stringify(requestBody("chat/completions")),
+  });
+  expect(response.status).toBe(503);
+  expect(fetchMock).toHaveBeenCalledTimes(1);
+});
+
+it("rejects a protocol that did not pass activation", async () => {
+  const config = configuration();
+  initAuth(config.auth);
+  const fetchMock = vi.fn(async (input: string | URL | Request) => {
+    if (String(input).endsWith("/v3/internal/meta/instance-upstream/list")) {
+      return Response.json({ code: 0, data: { items: [{ ...entry(), ready_protocols: ["chat"] }] } });
+    }
+    throw new Error("unexpected supplier call");
+  });
+  vi.stubGlobal("fetch", fetchMock);
+  const response = await createApp(config).request("http://proxy/codex/space-test/v1/responses", {
+    method: "POST", headers: { "content-type": "application/json", authorization: "Bearer user-key" },
+    body: JSON.stringify(requestBody("responses")),
+  });
+  expect(response.status).toBe(503);
+  expect(fetchMock).toHaveBeenCalledTimes(1);
+});
+
+it("fails closed when Core becomes unavailable", async () => {
   const config = configuration();
   const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-  const rows = [entry("custom_unified")];
+  const rows = [entry()];
   const fetchMock = vi.fn().mockResolvedValueOnce(Response.json({ code: 0, data: { items: rows } }))
     .mockRejectedValue(new Error("private-service-token private-host"));
   vi.stubGlobal("fetch", fetchMock);
   expect(await getInstanceUpstreamConfigs(config.coreSkill, "private-space")).toEqual(rows);
   const now = Date.now();
   vi.spyOn(Date, "now").mockReturnValue(now + 6 * 60 * 1000);
-  expect(await getInstanceUpstreamConfigs(config.coreSkill, "private-space")).toEqual(rows);
+  await expect(getInstanceUpstreamConfigs(config.coreSkill, "private-space")).rejects.toThrow();
   expect(fetchMock).toHaveBeenCalledTimes(2);
   expect(JSON.stringify(warn.mock.calls)).not.toContain("private-");
 });
 
-it("preserves the upstream direct route's caller credentials and raw body without business auth or rewriting", async () => {
+it("disables the direct route without a Panel instance", async () => {
   const config = configuration();
   config.auth = { enabled: true, url: "https://auth.invalid", timeoutMs: 1000 };
   initAuth(config.auth);
@@ -178,11 +215,7 @@ it("preserves the upstream direct route's caller credentials and raw body withou
     body: rawBody,
   });
   await response.text();
-  expect(response.status).toBe(200);
-  expect(fetchMock).toHaveBeenCalledTimes(1);
-  const [url, init] = fetchMock.mock.calls[0];
-  expect(url).toBe("https://global.invalid/v1/chat/completions?seed=7");
-  expect(new Headers(init.headers).get("authorization")).toBe("Bearer client-model-key");
-  expect(new TextDecoder().decode(init.body)).toBe(rawBody);
+  expect(response.status).toBe(410);
+  expect(fetchMock).not.toHaveBeenCalled();
   expect(resolveForwardTarget).not.toHaveBeenCalled();
 });

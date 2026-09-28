@@ -65,6 +65,7 @@ import {
 import {
   getInstanceUpstreamConfigs,
   resolveUpstreamConfig,
+  isReadyForProtocol,
   resolveInstanceCredential,
   resolveInstanceTargetUrl,
   shouldOverride,
@@ -772,6 +773,9 @@ export async function handleCodexEndpoint(
           return errResponse;
         }
         pipe.info("CODEX_MEM_CMD", `mem command intercepted: ${memCmd.command}`);
+        const taskCfg = memCmd.command.endsWith("-task")
+          ? resolveUpstreamConfig(await getInstanceUpstreamConfigs(config.coreSkill, spaceId), "codex", "conversation")
+          : null;
         const memResult = await executeMemCommand(memCmd, {
           sessionKey,
           agentSource: "codex",
@@ -788,8 +792,9 @@ export async function handleCodexEndpoint(
           // extractSimpleMessages 已内置对该形态的识别，转成 {role, content} 极简格式。
           bodyMessages: extractSimpleMessages(input),
           // 方案 D：taskDraft LLM 跟随主模型 —— codex 固定 agent，上游复用 per-agent url
-          model: modelId,
-          upstreamUrl: config.upstream.agents?.["codex"]?.url || config.upstream.url,
+          model: taskCfg?.model_id,
+          upstreamUrl: taskCfg?.base_url,
+          taskDraftApiKey: taskCfg ? resolveInstanceCredential(taskCfg, config, "codex") ?? undefined : undefined,
           // codex 主链路走 OpenAI Responses API
           upstreamProtocol: "responses",
         });
@@ -1122,6 +1127,7 @@ async function forwardToUpstream(
     const spaceId = extractSpaceIdFromPath(c.req.path) ?? "";
     const instanceConfigs = await getInstanceUpstreamConfigs(config.coreSkill, spaceId);
     const convCfg = resolveUpstreamConfig(instanceConfigs, "codex", "conversation");
+    if (!isReadyForProtocol(convCfg, "responses")) return c.json({ error: "model_not_configured_or_protocol_unavailable" }, 503);
     if (shouldOverride(convCfg)) {
       const resolvedKey = resolveInstanceCredential(convCfg, config, "codex");
       if (resolvedKey === null) return c.json({ error: "upstream_credential_unavailable" }, 502);

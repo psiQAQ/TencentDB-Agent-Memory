@@ -23,6 +23,10 @@ export const META_LIST_ACTIONS = new Set([
 ]);
 
 export const META_ACTIONS = [
+  'upstream-profile/list',
+  'upstream-profile/save',
+  'upstream-profile/activate',
+  'upstream-profile/delete',
   'instance-upstream/list',
   'instance-upstream/get-for-edit',
   'instance-upstream/set',

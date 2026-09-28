@@ -64,6 +64,7 @@ import type { SystemUserMatch } from "./systemUser.js";
 import {
   getInstanceUpstreamConfigs,
   resolveUpstreamConfig,
+  isReadyForProtocol,
   resolveInstanceCredential,
   resolveInstanceTargetUrl,
   shouldOverride,
@@ -460,6 +461,8 @@ export async function handleSystemUserPassthrough(
   {
     const instanceConfigs = await getInstanceUpstreamConfigs(config.coreSkill, spaceId);
     const extractCfg = resolveUpstreamConfig(instanceConfigs, undefined, "extraction");
+    const protocol = path.endsWith("/responses") ? "responses" : path.endsWith("/messages") ? "anthropic" : "chat";
+    if (!isReadyForProtocol(extractCfg, protocol)) return c.json({ error: "model_not_configured_or_protocol_unavailable" }, 503);
     if (shouldOverride(extractCfg)) {
       const resolvedKey = resolveInstanceCredential(extractCfg, config);
       if (resolvedKey === null) return c.json({ error: "upstream_credential_unavailable" }, 502);

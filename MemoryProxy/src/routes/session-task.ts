@@ -198,56 +198,22 @@ function resolveSession(
 
 const DEFAULT_TASK_DRAFT_TIMEOUT_MS = 20000;
 
-/**
- * 方案 D（含环境变量覆盖扩展）：taskDraft LLM 配置解析。
- *
- * ## 优先级（从高到低）
- *
- *   1. **环境变量覆盖**（ops escape hatch）
- *      - MEMORY_LLM_PROTOCOL → 覆盖 protocol
- *      - MEMORY_LLM_API_KEY  → 覆盖 apiKey
- *      - MEMORY_LLM_BASE_URL → 覆盖 upstreamUrl
- *      - MEMORY_LLM_MODEL    → 覆盖 model
- *
- *   2. **客户端请求**（原 Plan D "follow-the-client" 行为）
- *      - upstream.protocol / upstream.apiKey / upstream.upstreamUrl / upstream.model
- *
- *   3. **缺失即报错**
- *      - model / upstreamUrl / apiKey 三者任一缺失 → 返回 { error: "..." }
- *      - protocol 缺失时不报错，由 task-draft-generator 使用默认协议
- *
- * ## 使用场景
- *
- * 部署在 OpenAI 兼容网关（如 rcaaitoken）后面时，客户端（如 Claude Code）
- * 传递的 protocol=anthropic 与上游实际协议不匹配，导致 401。
- * 通过环境变量覆盖，运维可在部署时修正，无需改代码。
- *
- * ## 测试
- *
- * 见 src/routes/__tests__/session-task.test.ts
- */
+/** Task drafts use the selected Panel conversation profile passed by the handler. */
 export function resolveTaskDraftConfig(
   upstream: TaskDraftUpstream,
 ): { cfg: TaskDraftConfig } | { error: string } {
   const { model, upstreamUrl, protocol, apiKey } = upstream;
 
-  // 环境变量优先覆盖：允许运维层面完全接管 task-draft 的 LLM 配置
-  const envProtocol = process.env.MEMORY_LLM_PROTOCOL as "openai" | "anthropic" | "responses" | undefined;
-  const envApiKey = process.env.MEMORY_LLM_API_KEY;
-  const envBaseUrl = process.env.MEMORY_LLM_BASE_URL;
-  const envModel = process.env.MEMORY_LLM_MODEL;
-
-  const effectiveModel = envModel || model;
-  const effectiveUrl = envBaseUrl || upstreamUrl;
-  const effectiveApiKey = envApiKey || apiKey;
-  const effectiveProtocol = envProtocol || protocol;
+  const effectiveModel = model;
+  const effectiveUrl = upstreamUrl;
+  const effectiveApiKey = apiKey;
+  const effectiveProtocol = protocol;
 
   if (!effectiveModel || !effectiveUrl || !effectiveApiKey) {
     return {
       error:
         "task_draft is not configured (missing model / upstream url / apiKey). " +
-        "Set MEMORY_LLM_MODEL, MEMORY_LLM_BASE_URL, MEMORY_LLM_API_KEY env vars, " +
-        "or ensure handler passes them in the request.",
+        "Select a validated conversation model in Panel.",
     };
   }
 

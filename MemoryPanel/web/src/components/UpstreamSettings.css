@@ -42,6 +42,17 @@
 .upstream-current dd { margin: 0; overflow-wrap: anywhere; color: #1f2937; }
 .upstream-help { margin: 8px 0; color: #64748b; font-size: 12px; }
 .upstream-actions { display: flex; gap: 8px; margin-top: 16px; flex-wrap: wrap; }
+.upstream-form { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+.upstream-form label { display: grid; gap: 4px; min-width: 0; font-size: 12px; }
+.upstream-form input, .upstream-form select { box-sizing: border-box; width: 100%; min-height: 32px; padding: 5px 8px; border: 1px solid #d1d5db; }
+.upstream-form .upstream-actions { grid-column: 1 / -1; margin-top: 2px; }
+.upstream-profile-list { margin-top: 18px; display: grid; gap: 8px; }
+.upstream-profile { border: 1px solid #e5e7eb; border-radius: 4px; padding: 10px; }
+.upstream-profile-head { display: flex; align-items: center; gap: 8px; }
+.upstream-profile-name { flex: 1; min-width: 0; text-align: left; border: 0; background: none; cursor: pointer; font: inherit; overflow-wrap: anywhere; }
+.upstream-profile-detail { margin: 10px 0 0 24px; overflow-wrap: anywhere; line-height: 1.7; font-size: 12px; }
+.upstream-status-good { color: #15803d; }
+.upstream-status-bad { color: #b91c1c; }
 @media (max-width: 980px) {
   .upstream-settings { grid-template-columns: minmax(0, 1fr); }
 }

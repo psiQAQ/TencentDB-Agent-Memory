@@ -142,7 +142,7 @@ export async function executeUpdateTask(ctx: MemCommandContext): Promise<MemComm
     ...(ctx.model ? { model: ctx.model } : {}),
     ...(ctx.upstreamUrl ? { upstreamUrl: ctx.upstreamUrl } : {}),
     ...(ctx.upstreamProtocol ? { protocol: ctx.upstreamProtocol } : {}),
-    ...(ctx.apiKey ? { apiKey: ctx.apiKey } : {}),
+    ...(ctx.taskDraftApiKey ? { apiKey: ctx.taskDraftApiKey } : {}),
     ...(directDescription ? { directDescription, hint: rawArgs } : {}),
   });
 

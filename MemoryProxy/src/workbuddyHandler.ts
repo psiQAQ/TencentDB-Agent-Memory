@@ -25,6 +25,7 @@ import { extractSpaceIdFromPath } from "./credit-reporter.js";
 import {
   getInstanceUpstreamConfigs,
   resolveUpstreamConfig,
+  isReadyForProtocol,
   resolveInstanceCredential,
   resolveInstanceTargetUrl,
   shouldOverride,
@@ -516,6 +517,8 @@ async function forwardToUpstream(
     const spaceId = extractSpaceIdFromPath(c.req.path) ?? "";
     const instanceConfigs = await getInstanceUpstreamConfigs(config.coreSkill, spaceId);
     const convCfg = resolveUpstreamConfig(instanceConfigs, "workbuddy", "conversation");
+    const protocol = c.req.path.endsWith("/responses") ? "responses" : "chat";
+    if (!isReadyForProtocol(convCfg, protocol)) return c.json({ error: "model_not_configured_or_protocol_unavailable" }, 503);
     if (shouldOverride(convCfg)) {
       const resolvedKey = resolveInstanceCredential(convCfg, config, "workbuddy");
       if (resolvedKey === null) return c.json({ error: "upstream_credential_unavailable" }, 502);
@@ -1301,6 +1304,9 @@ export async function handleWorkbuddyEndpoint(
           return errResponse;
         }
         pipe.info("WORKBUDDY_MEM_CMD", `mem command intercepted: ${memCmd.command}`);
+        const taskCfg = memCmd.command.endsWith("-task")
+          ? resolveUpstreamConfig(await getInstanceUpstreamConfigs(config.coreSkill, spaceId), "workbuddy", "conversation")
+          : null;
         const memResult = await executeMemCommand(memCmd, {
           sessionKey,
           agentSource: "workbuddy",
@@ -1319,12 +1325,14 @@ export async function handleWorkbuddyEndpoint(
           // extractSimpleMessages 已内置对该形态的识别，转成 {role, content} 极简格式。
           bodyMessages: extractSimpleMessages(input),
           // 方案 D：taskDraft LLM 跟随主模型 —— workbuddy 固定 agent，上游复用 per-agent url
-          model: modelId,
-          upstreamUrl: config.upstream.agents?.["workbuddy"]?.url || config.upstream.url,
+          model: taskCfg?.model_id,
+          upstreamUrl: taskCfg?.base_url,
+          taskDraftApiKey: taskCfg ? resolveInstanceCredential(taskCfg, config, "workbuddy") ?? undefined : undefined,
           // ⚠️ workbuddy 客户端主链路的 upstream 走 OpenAI chat/completions
           // (path 结尾: /workbuddy/<id>/chat/completions), 与 ctx.protocol="responses"
           // 无关 (那个只用来渲染响应 SSE 骨架)。
-          upstreamProtocol: "openai",
+          upstreamProtocol: taskCfg?.ready_protocols?.includes("chat") ? "openai" :
+            taskCfg?.ready_protocols?.includes("responses") ? "responses" : "anthropic",
         });
 
         // ── TDAI L0 write + Skill extraction (fire-and-forget) ──

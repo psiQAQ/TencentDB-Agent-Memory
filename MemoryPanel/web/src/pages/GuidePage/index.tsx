@@ -282,7 +282,7 @@ export function GuidePage() {
   const [urlHint, setUrlHint] = useState(t('guide.proxyHint.reading'));
   const [manualOpen, setManualOpen] = useState(false);
   const [manualIdeId, setManualIdeId] = useState<ManualIdeId>('claude');
-  const [modelId, setModelId] = useState('claude-sonnet-4-5');
+  const [modelId, setModelId] = useState('');
 
   useEffect(() => {
     const session = getPanelSession();
@@ -297,7 +297,7 @@ export function GuidePage() {
         if (current) {
           setInstanceId(current.instance_id);
           setProxyBase((current.proxy_endpoint || fallback).replace(/\/$/, ''));
-          if (current.upstream_model) setModelId(current.upstream_model);
+          setModelId(current.upstream_model ?? '');
           setUrlHint(
             current.proxy_endpoint
               ? t('guide.proxyHint.fromInstance', { name: current.name })
@@ -326,10 +326,9 @@ export function GuidePage() {
 
   const manualIde = MANUAL_IDES.find((item) => item.id === manualIdeId) ?? MANUAL_IDES[0];
   const proxyFallback = t('guide.proxyFallback');
-  const modelFallback = t('guide.modelFallback');
   const manualConfig = useMemo(
-    () => manualIde.config(proxyBase || proxyFallback, instanceId, proxyMode, modelId || modelFallback),
-    [manualIde, modelId, proxyBase, proxyMode, instanceId, proxyFallback, modelFallback],
+    () => modelId ? manualIde.config(proxyBase || proxyFallback, instanceId, proxyMode, modelId) : '',
+    [manualIde, modelId, proxyBase, proxyMode, instanceId, proxyFallback],
   );
   const practiceSteps = PRACTICE_STEPS[practice];
   const activePracticeStep = practiceSteps[practiceStep] ?? practiceSteps[0];
@@ -573,9 +572,9 @@ export function GuidePage() {
                           {t('guide.manual.fileHint')} <code>{manualIde.file}</code>
                         </p>
                       </div>
-                      <CopyButton value={manualConfig} label={t('guide.copyConfig')} />
+                      {manualConfig && <CopyButton value={manualConfig} label={t('guide.copyConfig')} />}
                     </header>
-                    <pre>{manualConfig}</pre>
+                    <pre>{manualConfig || '请先在 Panel 模型配置页启用对话模型。'}</pre>
                   </div>
                   {manualIde.notes && manualIde.notes.length > 0 && (
                     <ul className="guide-manual-notes">

@@ -75,6 +75,18 @@ const OK = { ok: true } as const;
 
 // ── Route table ──
 const routeTable: Record<string, Handler> = {
+  [`${V3_PREFIX}/upstream-profile/list`]: bind(S.upstreamProfileListSchema, async (d, c, s) => {
+    s.assertCanManageUsers(c); return s.listUpstreamProfiles(d.type);
+  }),
+  [`${V3_PREFIX}/upstream-profile/save`]: bind(S.upstreamProfileSaveSchema, async (d, c, s) => {
+    s.assertCanManageUsers(c); return s.saveUpstreamProfile(d);
+  }),
+  [`${V3_PREFIX}/upstream-profile/activate`]: bind(S.upstreamProfileIdSchema, async (d, c, s) => {
+    s.assertCanManageUsers(c); return s.activateUpstreamProfile(d.type, d.id);
+  }),
+  [`${V3_PREFIX}/upstream-profile/delete`]: bind(S.upstreamProfileIdSchema, async (d, c, s) => {
+    s.assertCanManageUsers(c); return s.deleteUpstreamProfile(d.type, d.id);
+  }),
   // User
   [`${V3_PREFIX}/user/create`]: bind(S.userCreateSchema, async (d, c, s) => {
     s.assertCanManageUsers(c);
@@ -357,9 +369,9 @@ const routeTable: Record<string, Handler> = {
   }),
 
   // InstanceUpstreamConfig
-  [`${V3_PREFIX}/instance-upstream/set`]: bind(S.instanceUpstreamSetSchema, async (d, c, s) => {
+  [`${V3_PREFIX}/instance-upstream/set`]: bind(S.instanceUpstreamSetSchema, async (_d, c, s) => {
     s.assertCanManageUsers(c);
-    return s.setInstanceUpstreamConfig(d);
+    throw new MetadataError("invalid_input", "Use upstream-profile/save in Panel");
   }),
   [`${V3_PREFIX}/instance-upstream/get`]: bind(S.instanceUpstreamGetSchema, async (d, c, s) => {
     s.assertCanManageUsers(c);
@@ -416,6 +428,13 @@ function mapErrorCode(code: string): number {
       return 409;
     case "lifecycle_transactions_required":
       return 503;
+    case "proxy_probe_failed":
+    case "proxy_probe_unavailable":
+      return 502;
+    case "proxy_probe_rate_limited":
+      return 429;
+    case "invalid_input":
+      return 400;
     case "invalid_credentials":
     case "invalid_password":
       return 401;

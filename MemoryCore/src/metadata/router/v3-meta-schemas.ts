@@ -525,6 +525,20 @@ export const configUserSetSchema = z.object({
 
 // ── InstanceUpstreamConfig ──
 const upstreamConfigType = z.enum(["conversation", "extraction"]);
+export const upstreamProfileListSchema = z.object({ type: upstreamConfigType });
+export const upstreamProfileSaveSchema = z.object({
+  type: upstreamConfigType, id: z.string().uuid().optional(), name: z.string().trim().min(1).max(100),
+  base_url: z.string().url().max(2048), model_id: z.string().trim().min(1).max(200),
+  api_key: z.string().trim().min(1).max(4096).optional(), local: z.boolean().default(false),
+}).refine((input) => {
+  const url = new URL(input.base_url);
+  if (url.username || url.password || url.search || url.hash) return false;
+  if (input.local) return (url.protocol === "http:" || url.protocol === "https:") &&
+    url.hostname !== "localhost" && url.hostname !== "127.0.0.1" &&
+    (!!url.port || (url.protocol === "https:" && !/^\d+\.\d+\.\d+\.\d+$/.test(url.hostname)));
+  return url.protocol === "https:" && !url.port;
+}, { message: "invalid model endpoint" });
+export const upstreamProfileIdSchema = z.object({ type: upstreamConfigType, id: z.string().uuid() });
 const upstreamConfigMode = z.enum(["official", "custom_unified", "custom_passthrough"]);
 
 export const instanceUpstreamSetSchema = z.object({
@@ -556,6 +570,10 @@ export const instanceUpstreamResetSchema = z.object({
 });
 
 export const V3_SCHEMAS = {
+  "/v3/meta/upstream-profile/list": upstreamProfileListSchema,
+  "/v3/meta/upstream-profile/save": upstreamProfileSaveSchema,
+  "/v3/meta/upstream-profile/activate": upstreamProfileIdSchema,
+  "/v3/meta/upstream-profile/delete": upstreamProfileIdSchema,
   "/v3/meta/user/create": userCreateSchema,
   "/v3/meta/user/create-with-key": userCreateWithKeySchema,
   "/v3/meta/user/get": userGetSchema,

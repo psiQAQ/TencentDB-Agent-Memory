@@ -4,7 +4,6 @@ import { Hono } from "hono";
 import { handleChatCompletions } from "./handler.js";
 import { handleAnthropicMessages } from "./anthropicHandler.js";
 import { handleAuxiliaryEndpoint } from "./auxiliaryHandler.js";
-import { handleDirectPassthrough } from "./directHandler.js";
 import { handleCodexEndpoint } from "./codexHandler.js";
 import { handleWorkbuddyEndpoint } from "./workbuddyHandler.js";
 import { handleUpstreamProbe, handleUpstreamRefresh } from "./upstream-probe.js";
@@ -154,11 +153,8 @@ export function createApp(config: ProxyConfig): Hono {
     return c.text(keyId + "\n");
   });
 
-  // ── /direct/* — 纯路由透传通道（必须置于所有业务路由之前） ────────────────
-  // 完全绕开 cost-guard / auth / model alias / thinking sanitize；
-  // 但保留 opik trace/span 上报与 jsonl usage 落表（仅对 Anthropic messages
-  // 与 OpenAI chat/completions 生效）。详见 directHandler.ts 头部注释。
-  app.all("/direct/*", (c) => handleDirectPassthrough(c, config));
+  // Direct routing has no instance identity, so it cannot select a Panel model.
+  app.all("/direct/*", (c) => c.json({ error: "direct_route_disabled_use_panel_model_configuration" }, 410));
 
 // Skill bridge: LLM curls land here, proxy injects auth + identity, forwards to core.
   // MUST be registered before the agent-prefixed `/:agent/v1/*` routes below.

@@ -60,6 +60,15 @@ describe("upstream redirect privacy", () => {
         }));
         return;
       }
+      if (request.url?.endsWith("/v3/internal/meta/instance-upstream/list")) {
+        response.writeHead(200, { "content-type": "application/json" });
+        response.end(JSON.stringify({ code: 0, data: { items: ["conversation", "extraction"].map((type) => ({
+          agent_source: "default", type, mode: "custom_unified",
+          base_url: `${redirectorOrigin}/anthropic/v1`, api_key: "server-key", model_id: "test-model",
+          ready_protocols: ["chat", "anthropic"],
+        })) } }));
+        return;
+      }
       primaryRequests += 1;
       response.writeHead(302, { location: `${receiverOrigin}/capture` });
       response.end();
@@ -85,6 +94,7 @@ describe("upstream redirect privacy", () => {
   function config() {
     const value = structuredClone(DEFAULT_CONFIG);
     value.auth = { enabled: true, url: redirectorOrigin, timeoutMs: 1_000 };
+    value.coreSkill.endpoint = redirectorOrigin;
     value.upstream.url = `${redirectorOrigin}/anthropic/v1`;
     value.upstream.apiKey = "server-key";
     value.upstream.agents["claude-code"] = {

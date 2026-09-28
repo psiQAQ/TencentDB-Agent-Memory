@@ -36,6 +36,7 @@ import { tryReportCreditFromPath, extractSpaceIdFromPath } from "./credit-report
 import {
   getInstanceUpstreamConfigs,
   resolveUpstreamConfig,
+  isReadyForProtocol,
   resolveInstanceCredential,
   resolveInstanceTargetUrl,
   shouldOverride,
@@ -616,6 +617,9 @@ export async function handleAnthropicMessages(
   const _earlyConvCfg = resolveUpstreamConfig(_earlyInstanceConfigs, agentSource, "conversation");
   const _earlyExtractCfg = resolveUpstreamConfig(_earlyInstanceConfigs, agentSource, "extraction");
   const _earlySysMatch = hasSystemUsers() ? matchSystemUserByUserId(earlyVerify.userId) : null;
+  if (!isReadyForProtocol(_earlySysMatch ? _earlyExtractCfg : _earlyConvCfg, "anthropic")) {
+    return c.json({ error: "model_not_configured_or_protocol_unavailable" }, 503);
+  }
   const _isCustomUpstream = _earlySysMatch !== null
     ? shouldOverride(_earlyExtractCfg)
     : shouldOverride(_earlyConvCfg);
@@ -1139,12 +1143,12 @@ export async function handleAnthropicMessages(
         // extractSimpleMessages 会合并所有 text 段落。
         bodyMessages: extractSimpleMessages((body as Record<string, unknown>).messages),
         // 方案 D：taskDraft LLM 跟随主模型 —— 复用客户端当次 model + per-agent 上游 + apiKey
-        model: modelId,
-        upstreamUrl:
-          (agentFromPath ? config.upstream.agents?.[agentFromPath]?.url : undefined) ||
-          config.upstream.url,
+        model: _earlyConvCfg!.model_id,
+        upstreamUrl: _earlyConvCfg!.base_url,
+        taskDraftApiKey: resolveInstanceCredential(_earlyConvCfg!, config, agentFromPath) ?? undefined,
         // Claude Code 主链路走 Anthropic Messages API
-        upstreamProtocol: "anthropic",
+        upstreamProtocol: _earlyConvCfg!.ready_protocols?.includes("anthropic") ? "anthropic" :
+          _earlyConvCfg!.ready_protocols?.includes("chat") ? "openai" : "responses",
       });
 
       if (!memResult.success) {
@@ -1332,9 +1336,8 @@ export async function handleAnthropicMessages(
   // ── Instance upstream config override ──────────────────────────────────
   let skipCreditReport = false;
   {
-    const routedToCheapModel = target.routedFrom !== "";
     const convCfg = _earlyConvCfg;
-    if (!routedToCheapModel && shouldOverride(convCfg)) {
+    if (shouldOverride(convCfg)) {
       const resolvedKey = resolveInstanceCredential(convCfg, config, agentFromPath);
       if (resolvedKey === null) return c.json({ error: "upstream_credential_unavailable" }, 502);
       target.url = resolveInstanceTargetUrl(convCfg, `${convCfg.base_url.replace(/\/+$/, "")}${forwardEndpoint}`);

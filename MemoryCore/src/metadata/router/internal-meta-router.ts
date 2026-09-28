@@ -144,7 +144,11 @@ const routeTable: Record<string, InternalHandler> = {
   ),
   [`${V3_INTERNAL_PREFIX}/instance-upstream/list`]: bind(
     instanceUpstreamListSchema,
-    async (d, svc) => svc.listInstanceUpstreamConfigsInternal(d),
+    async (_d, svc) => svc.listActiveUpstreamProfilesInternal(),
+  ),
+  [`${V3_INTERNAL_PREFIX}/instance-upstream/model`]: bind(
+    instanceUpstreamListSchema,
+    async (_d, svc) => svc.getActiveConversationModelInternal(),
   ),
 };
 

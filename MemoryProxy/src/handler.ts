@@ -36,6 +36,7 @@ import { tryReportCreditFromPath, extractSpaceIdFromPath } from "./credit-report
 import {
   getInstanceUpstreamConfigs,
   resolveUpstreamConfig,
+  isReadyForProtocol,
   resolveInstanceCredential,
   resolveInstanceTargetUrl,
   shouldOverride,
@@ -623,6 +624,9 @@ export async function handleChatCompletions(
   const _earlyConvCfg = resolveUpstreamConfig(_earlyInstanceConfigs, _earlyAgent, "conversation");
   const _earlyExtractCfg = resolveUpstreamConfig(_earlyInstanceConfigs, _earlyAgent, "extraction");
   const _earlySysMatch = hasSystemUsers() ? matchSystemUserByUserId(earlyVerify.userId) : null;
+  if (!isReadyForProtocol(_earlySysMatch ? _earlyExtractCfg : _earlyConvCfg, "chat")) {
+    return c.json({ error: "model_not_configured_or_protocol_unavailable" }, 503);
+  }
   const _isCustomUpstream = _earlySysMatch !== null
     ? shouldOverride(_earlyExtractCfg)
     : shouldOverride(_earlyConvCfg);
@@ -1250,12 +1254,12 @@ export async function handleChatCompletions(
         // task 命令族用最近对话生成草稿。OpenAI/CC/CB 协议直接从 body.messages 取。
         bodyMessages: extractSimpleMessages(body.messages),
         // 方案 D：taskDraft LLM 跟随主模型 —— 复用客户端当次 model + per-agent 上游 + apiKey
-        model: modelId,
-        upstreamUrl:
-          config.upstream.agents?.[agentSource]?.url ||
-          config.upstream.url,
+        model: _earlyConvCfg!.model_id,
+        upstreamUrl: _earlyConvCfg!.base_url,
+        taskDraftApiKey: resolveInstanceCredential(_earlyConvCfg!, config, agentSource) ?? undefined,
         // CB/CodeBuddy 主链路走 OpenAI chat/completions
-        upstreamProtocol: "openai",
+        upstreamProtocol: _earlyConvCfg!.ready_protocols?.includes("chat") ? "openai" :
+          _earlyConvCfg!.ready_protocols?.includes("responses") ? "responses" : "anthropic",
         // OpenAI 协议无 extended thinking 概念，恒 false
       });
 
@@ -1430,9 +1434,8 @@ export async function handleChatCompletions(
   // Reuse the early-fetched config (already cached, no extra RPC).
   let skipCreditReport = false;
   {
-    const routedToCheapModel = target.routedFrom !== "";
     const convCfg = _earlyConvCfg;
-    if (!routedToCheapModel && shouldOverride(convCfg)) {
+    if (shouldOverride(convCfg)) {
       const resolvedKey = resolveInstanceCredential(convCfg, config, agentSource);
       if (resolvedKey === null) return c.json({ error: "upstream_credential_unavailable" }, 502);
       target.url = resolveInstanceTargetUrl(convCfg, `${convCfg.base_url.replace(/\/+$/, "")}${forwardEndpoint}`);

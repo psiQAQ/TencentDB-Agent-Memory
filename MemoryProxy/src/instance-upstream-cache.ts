@@ -1,22 +1,16 @@
 /**
  * Instance Upstream Config Cache — per-instance LLM upstream configuration
- * fetched from Core and cached with TTL + stale-if-error.
+ * fetched from Core on each request.
  *
- * Pattern: modeled after CoreKnowledgeClient._cachedFetch (knowledge/core-client.ts).
- *
- * Cache semantics:
- *   - Key: spaceId (one entry per instance, covering all agent_source + type rows)
- *   - TTL: 5 minutes (hard expiry, not refreshed on access)
- *   - Stale-if-error: on fetch failure, return last known good value
- *   - First-time failure: return empty array (= all official, no overrides)
- *   - Max entries: 256, evict oldest-written on overflow
+ * A failed Core read does not reuse stale credentials. A successful empty list
+ * means no active model is selected for the instance.
  */
 
 import type { CoreSkillConfig } from "./types.js";
 import type { ProxyConfig } from "./types.js";
 
 const TAG = "[instance-upstream-cache]";
-const DEFAULT_TTL_MS = 5 * 60 * 1000; // 5 minutes
+const DEFAULT_TTL_MS = 0; // Every request observes activation and deletion.
 const MAX_ENTRIES = 256;
 
 // ── Types ────────────────────────────────────────────────────────────────────
@@ -24,7 +18,7 @@ const MAX_ENTRIES = 256;
 export type UpstreamConfigType = "conversation" | "extraction";
 export type UpstreamConfigMode = "official" | "custom_unified" | "custom_passthrough";
 
-/** A single row from meta_instance_upstream_config (internal API returns full api_key). */
+/** An active Panel profile from Core's internal API. */
 export interface InstanceUpstreamConfigEntry {
   agent_source: string;
   type: UpstreamConfigType;
@@ -33,6 +27,7 @@ export interface InstanceUpstreamConfigEntry {
   api_key: string;
   credential_ref?: string;
   model_id: string;
+  ready_protocols?: string[];
 }
 
 interface CacheEntry {
@@ -43,7 +38,6 @@ interface CacheEntry {
 // ── Module state ─────────────────────────────────────────────────────────────
 
 const cache = new Map<string, CacheEntry>();
-const lastGood = new Map<string, InstanceUpstreamConfigEntry[]>();
 
 // ── Fetch from Core ──────────────────────────────────────────────────────────
 
@@ -82,18 +76,15 @@ export async function refreshInstanceUpstreamConfigs(
   const fresh = await fetchFromCore(config, spaceId);
   evictIfNeeded();
   cache.set(spaceId, { items: fresh, expiresAt: Date.now() + DEFAULT_TTL_MS });
-  lastGood.set(spaceId, fresh);
   return fresh;
 }
 
 // ── Public API ───────────────────────────────────────────────────────────────
 
 /**
- * Get all upstream config rows for an instance (cached, TTL 5min, stale-if-error).
+ * Get active upstream rows for an instance.
  *
- * Returns empty array when:
- *   - Instance has no config (= all official)
- *   - Core unreachable AND no prior cached value
+ * Returns an empty array only when Core reports no active model.
  */
 export async function getInstanceUpstreamConfigs(
   config: Pick<CoreSkillConfig, "endpoint" | "serviceToken" | "timeoutMs">,
@@ -117,27 +108,18 @@ export async function getInstanceUpstreamConfigs(
   }
 
   if (fresh !== null) {
-    // Success → write cache + lastGood
+    // Successful Core read.
     evictIfNeeded();
     cache.set(spaceId, { items: fresh, expiresAt: Date.now() + DEFAULT_TTL_MS });
-    lastGood.set(spaceId, fresh);
     return fresh;
   }
 
-  // Fetch failed → stale-if-error fallback
-  const stale = lastGood.get(spaceId);
-  if (stale !== undefined) {
-    console.warn(`${TAG} fetch failed; using cached instance configuration`);
-    return stale;
-  }
+  throw fetchErr ?? new Error(`${TAG} configuration unavailable`);
+}
 
-  // First-time failure, no history → return empty (= all official)
-  if (fetchErr) {
-    console.warn(
-      `${TAG} fetch failed; no cached instance configuration`,
-    );
-  }
-  return [];
+export function isReadyForProtocol(cfg: InstanceUpstreamConfigEntry | null, protocol: string): boolean {
+  return !!cfg && cfg.mode === "custom_unified" && !!cfg.api_key &&
+    (cfg.ready_protocols ?? []).includes(protocol);
 }
 
 /**
@@ -216,12 +198,10 @@ function evictIfNeeded(): void {
   const oldestKey = cache.keys().next().value as string | undefined;
   if (oldestKey) {
     cache.delete(oldestKey);
-    // Keep lastGood for stale-if-error — only remove from TTL cache
   }
 }
 
 /** Clear all cache (for testing). */
 export function clearCache(): void {
   cache.clear();
-  lastGood.clear();
 }

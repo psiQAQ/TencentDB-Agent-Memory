@@ -1,15 +1,14 @@
 #!/usr/bin/env bash
 # 单独拉起 proxy（context-proxy，端口 8096）。
 #
-# proxy 的转发上游走 PROXY_UPSTREAM_URL（与 memory 组的 MEMORY_LLM_* 独立）。
+# proxy 的转发上游按实例读取 Panel 已选中的对话或总结配置。
 # proxy 会调 memory:8420 做鉴权 / skill / tdai memory 注入；调 memory-hub:8125
 # 做 sessionInit control plane。可以单跑 proxy 但相关能力会降级 / 关闭。
 #
 # 用法：
 #   ./start-proxy.sh
 #
-# 需要以下 proxy 组参数（写在 .env）：
-#   PROXY_UPSTREAM_URL / PROXY_UPSTREAM_API_KEY / PROXY_UPSTREAM_MODEL
+# 供应商模型地址和 Key 不从 .env 读取。
 
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -17,9 +16,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/_lib.sh"
 
 load_env
+MEMORY_MODEL_ROUTING_VIA_PROXY=1
 require_vars \
   PROXY_IMAGE PROXY_PORT \
-  PROXY_UPSTREAM_URL PROXY_UPSTREAM_API_KEY PROXY_UPSTREAM_MODEL \
   MEMORY_CORE_GATEWAY_API_KEY
 
 # 与 memory-core 保持一致的 gateway 内部凭据。
@@ -71,14 +70,19 @@ PROXY_ENABLE_AUTH="${PROXY_ENABLE_AUTH:-0}"
 PROXY_ENABLE_TDAI="${PROXY_ENABLE_TDAI:-0}"
 PROXY_ENABLE_SESSION_INIT="${PROXY_ENABLE_SESSION_INIT:-0}"
 PROXY_ENABLE_KNOWLEDGE="${PROXY_ENABLE_KNOWLEDGE:-0}"
-PROXY_OPENAI_UPSTREAM_URL="${PROXY_OPENAI_UPSTREAM_URL:-$PROXY_UPSTREAM_URL}"
-PROXY_ANTHROPIC_UPSTREAM_URL="${PROXY_ANTHROPIC_UPSTREAM_URL:-$PROXY_UPSTREAM_URL}"
+PROXY_UPSTREAM_URL=""
+PROXY_UPSTREAM_API_KEY=""
+PROXY_OPENAI_UPSTREAM_URL=""
+PROXY_ANTHROPIC_UPSTREAM_URL=""
 PROXY_SYSTEM_USERS_YAML=""
 if [[ "${MEMORY_MODEL_ROUTING_VIA_PROXY:-0}" == "1" ]]; then
   PROXY_SYSTEM_USERS_YAML="systemUsers:
   - name: memory
     userId: usr-sys-memory
-    displayName: Internal extraction"
+    displayName: Internal extraction
+  - name: knowledge
+    userId: knowledge-service
+    displayName: Knowledge extraction"
 fi
 
 # sessionInit 依赖 auth 拿 user_id；开 sessionInit 时自动补 auth

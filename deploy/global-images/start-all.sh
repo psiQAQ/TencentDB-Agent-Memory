@@ -1,25 +1,21 @@
 #!/usr/bin/env bash
-# 一键拉起 memory → memory-hub → proxy 三件套（交互式）。
+# 一键拉起 memory → memory-hub → proxy 三件套。
 #
 # 顺序：先起 memory（内核），等 healthy；再起 memory-hub（面板+知识），等 healthy；
 # 最后起 proxy。任意一步失败会中止并打印容器日志。
 #
 # 用法：
-#   ./start-all.sh            # 交互式引导填写 LLM（回车保留当前值），自动检查通路，通过后一键起
+#   ./start-all.sh            # 启动服务；模型配置在 Panel 中填写和验证
 #   PULL=1 ./start-all.sh     # 先 docker pull 三个镜像，升级到最新 latest
 #
-# 交互式说明：
-#   - .env 不存在时自动从 .env.example 复制一份
-#   - 每次运行都会交互式确认 memory 组 + proxy 组 LLM（已有值作为默认，回车保留）
-#   - 填完立即检查 LLM 通路，不通会提示重新输入，直到通过或主动放弃
-#   - 最终把填写的值写回 .env 持久化，下次启动默认复用
+# .env 不存在时从 .env.example 创建；供应商凭据不写入 .env。
 
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=./_lib.sh
 source "$SCRIPT_DIR/_lib.sh"
 
-# .env 不存在时从模板复制（交互式流程会引导填写 LLM）
+# .env 不存在时从模板复制。
 if [[ ! -f "$ENV_FILE" ]]; then
   info ".env 不存在，从 .env.example 复制一份"
   cp "$SCRIPT_DIR/.env.example" "$ENV_FILE"
@@ -27,22 +23,16 @@ fi
 
 load_env
 
-# 自动化部署可跳过会把默认值显示在终端的交互流程；仍保留后续必填校验。
-# 交互模式供人工首次配置，NON_INTERACTIVE=1 供受管配置/CI 重启。
-if [[ "${NON_INTERACTIVE:-0}" == "1" ]]; then
-  info "NON_INTERACTIVE=1：使用 .env 现有 LLM 配置，跳过交互提示"
-else
-  interactive_llm_setup
-fi
+# 模型配置由 Panel 管理。
+info "模型地址、模型 ID 和供应商 Key 在 Panel 中配置"
 
 # 一次性校验全部必填参数，避免拉起 memory 之后才发现 proxy 参数缺
 require_vars \
   MEMORY_CORE_IMAGE MEMORY_HUB_IMAGE PROXY_IMAGE \
   MEMORY_CORE_PORT PANEL_PORT KNOWLEDGE_PORT PROXY_PORT \
   MEMORY_CORE_VOLUME PANEL_VOLUME \
-  MEMORY_LLM_BASE_URL MEMORY_LLM_API_KEY MEMORY_LLM_MODEL \
   KNOWLEDGE_PUBLIC_BASE_URL \
-  PROXY_UPSTREAM_URL PROXY_UPSTREAM_API_KEY PROXY_UPSTREAM_MODEL
+  MEMORY_CORE_GATEWAY_API_KEY
 
 # 端口预检：一次性检查 4 个目标端口，被外部进程占用则报错退出，
 # 避免拉起 memory 之后才发现 hub/proxy 端口冲突。（会排除 tdai 自己旧容器）
@@ -65,7 +55,6 @@ print_endpoints
 # bootstrap Key 只用于登录 Panel 做账号/凭证管理；业务 Agent 使用 normal 用户 Key。
 ADMIN_KEY_FILE="${MEMORY_CORE_ADMIN_KEY_FILE:-$SCRIPT_DIR/.admin-key}"
 if [[ -s "$ADMIN_KEY_FILE" ]]; then
-  UPSTREAM_MODEL="${PROXY_UPSTREAM_MODEL:-<your-model>}"
   echo ""
   echo "  ┌─ 下一步：用 Panel 创建业务用户 ─────────────────────────────────┐"
   echo "  │  1. 用 $ADMIN_KEY_FILE 中的 bootstrap Key 登录 Panel"
@@ -74,7 +63,7 @@ if [[ -s "$ADMIN_KEY_FILE" ]]; then
   echo "  │  4. coding agent 使用 normal 用户 Key："
   echo "  │  export ANTHROPIC_BASE_URL=http://127.0.0.1:${PROXY_PORT}/claude-code/default"
   echo "  │  export ANTHROPIC_AUTH_TOKEN='<normal-user-key>'"
-  echo "  │  claude --model ${UPSTREAM_MODEL}"
+  echo "  │  模型 ID 从 Panel 已启用的对话配置查看"
   echo "  │"
   echo "  │  bootstrap Key 只用于运维，不要分发给业务用户"
   echo "  └────────────────────────────────────────────────────────────────┘"

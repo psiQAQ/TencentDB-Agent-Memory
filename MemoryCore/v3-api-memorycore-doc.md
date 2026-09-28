@@ -1201,3 +1201,16 @@ Chat Memory 若会让目标 Agent 超过 2 条外部记忆则返回 `IMPORT_LIMI
 | 404 | Knowledge not found / MEMORY_PROMPT_NOT_FOUND / MEMORY_GENERATION_LOG_NOT_FOUND | 资源不存在 |
 | 409 | PROMPT_LIMIT_EXCEEDED | 超限 |
 | 503 | Store not available / Storage not available / Metadata service not available / GENERATION_LOG_STORE_UNAVAILABLE | 依赖不可用 |
+
+### Panel 模型配置库
+
+以下 `POST /v3/meta/*` 接口要求 system admin 身份，并按 `x-tdai-service-id` 隔离实例：
+
+| 路径 | 请求字段 | 返回 |
+| --- | --- | --- |
+| `/upstream-profile/list` | `type: conversation \| extraction` | 配置条列表、`active_id`；Key 仅返回 `has_api_key` |
+| `/upstream-profile/save` | `type`, 可选 `id`, `name`, `base_url`, `model_id`, 可选 `api_key`, `local` | 更新后的配置库；新条目不自动启用 |
+| `/upstream-profile/activate` | `type`, `id` | 验证后选中的配置库；至少一种协议成功才切换 |
+| `/upstream-profile/delete` | `type`, `id` | 更新后的配置库；删除生效项后 `active_id=null` |
+
+编辑生效项时先验证，再原子替换。不同 URL origin 的编辑必须提供新 Key。内部 `/v3/internal/meta/instance-upstream/list` 只返回当前生效项及其已通过协议，供 Proxy 转发；`/v3/internal/meta/instance-upstream/model` 只返回当前对话模型 ID，供 Panel 生成客户端配置。供应商 Key 在 Core 中加密保存，公开接口从不回显。旧 `/instance-upstream/set` 不再接受写入。
