@@ -1,8 +1,7 @@
-// Keep route/identity assertions independent of instance configuration discovery.
-// The discovery and override paths are covered by instance-upstream-merge.test.ts.
+// Only configuration discovery is mocked; profile readiness and credentials remain real.
 vi.mock("../instance-upstream-cache.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../instance-upstream-cache.js")>();
-  return { ...actual, getInstanceUpstreamConfigs: async () => [] };
+  return { ...actual, getInstanceUpstreamConfigs: vi.fn() };
 });
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -20,7 +19,7 @@ import { setMetadataClient } from "../meta/client.js";
 import type { BindingRepo, SessionBinding } from "../db/binding-repo.js";
 import { renderTdaiMemoryToolsBlock } from "../injection/injectors/tdai-tools-injector.js";
 import { renderSkillToolsBlock } from "../injection/injectors/skill-tools-injector.js";
-import { createApp } from "../server.js";
+import { createConfiguredApp as createApp } from "./fixtures/active-profiles.js";
 import {
   __resetSessionStoreForTests,
   getSessionStore,

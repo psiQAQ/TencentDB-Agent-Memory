@@ -1,3 +1,9 @@
+// Only configuration discovery is mocked; profile readiness and credentials remain real.
+vi.mock("../instance-upstream-cache.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../instance-upstream-cache.js")>();
+  return { ...actual, getInstanceUpstreamConfigs: vi.fn() };
+});
+
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { initAuth } from "../auth.js";
@@ -6,7 +12,7 @@ import type { BindingRepo, SessionBinding } from "../db/binding-repo.js";
 import type { SessionRepo } from "../db/sessionRepo.js";
 import { refreshSessionCache } from "../routes/session-refresh.js";
 import { forceArchiveSkill } from "../routes/session-force-archive.js";
-import { createApp } from "../server.js";
+import { createConfiguredApp as createApp } from "./fixtures/active-profiles.js";
 import {
   SessionStore,
   sessionStoreKey,
@@ -331,6 +337,7 @@ describe("session direct-consumer authoritative visibility", () => {
       activeStore = new SessionStore();
       vi.spyOn(activeStore, "getOrRecover").mockResolvedValue(initializedState("mem-state"));
       const config = structuredClone(DEFAULT_CONFIG);
+      config.upstream.apiKey = "profile-test-key";
       config.memCommand = { enabled: true, allowedCommands: [] };
       config.sessionInit.enabled = true;
       config.injection.enabled = false;

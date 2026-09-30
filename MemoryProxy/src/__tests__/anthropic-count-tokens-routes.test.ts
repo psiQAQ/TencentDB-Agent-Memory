@@ -1,8 +1,7 @@
-// Keep route/identity assertions independent of instance configuration discovery.
-// The discovery and override paths are covered by instance-upstream-merge.test.ts.
+// Only configuration discovery is mocked; profile readiness and credentials remain real.
 vi.mock("../instance-upstream-cache.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../instance-upstream-cache.js")>();
-  return { ...actual, getInstanceUpstreamConfigs: async () => [] };
+  return { ...actual, getInstanceUpstreamConfigs: vi.fn() };
 });
 
 import { Hono } from "hono";
@@ -12,7 +11,7 @@ import type { AnthropicMessageSource } from "../agent-adapters/anthropic-platfor
 import { handleAuxiliaryEndpoint } from "../auxiliaryHandler.js";
 import { initAuth } from "../auth.js";
 import { DEFAULT_CONFIG } from "../config.js";
-import { createApp } from "../server.js";
+import { createConfiguredApp as createApp } from "./fixtures/active-profiles.js";
 import type { ProxyConfig } from "../types.js";
 
 const SOURCES = ["claude-code", "opencode", "pi"] as const;
@@ -78,8 +77,10 @@ describe("route-bound Anthropic count_tokens", () => {
       `https://${source}.upstream.invalid/anthropic/v1/messages/count_tokens`,
       "https://credit.invalid/report",
     ]);
-    expect(calls[1].headers.get("x-api-key")).toBe(`${source}-key`);
-    expect(calls[1].headers.has("authorization")).toBe(false);
+    const forwarded = calls.find((call) => call.url === `https://${source}.upstream.invalid/anthropic/v1/messages/count_tokens`);
+    expect(forwarded).toBeDefined();
+    expect(forwarded?.headers.get("x-api-key")).toBe(`${source}-key`);
+    expect(forwarded?.headers.has("authorization")).toBe(false);
   });
 
   it.each(SOURCES)("does not forward private headers on the %s count_tokens route", async (source) => {
@@ -113,7 +114,9 @@ describe("route-bound Anthropic count_tokens", () => {
       },
     );
 
-    const headers = calls[1].headers;
+    const forwarded = calls.find((call) => call.url === `https://${source}.upstream.invalid/anthropic/v1/messages/count_tokens`);
+    expect(forwarded).toBeDefined();
+    const headers = forwarded!.headers;
     const forbiddenNames = [
       "authorization",
       "x-team-id",
@@ -141,7 +144,7 @@ describe("route-bound Anthropic count_tokens", () => {
     expect(headers.get("accept")).toBe("application/json");
   });
 
-  it("passes the client key for a URL-only agent override", async () => {
+  it("uses the active model Key instead of the client Key for a URL-only deployment entry", async () => {
     const config = configWithAuth();
     config.upstream.agents.opencode = { url: "https://opencode.upstream.invalid/anthropic/v1" };
     initAuth(config.auth);
@@ -153,10 +156,11 @@ describe("route-bound Anthropic count_tokens", () => {
     );
 
     expect(response.status).toBe(200);
-    expect(calls[1]?.headers.get("x-api-key")).toBe("memory-user-key");
+    const forwarded = calls.find((call) => call.url === "https://opencode.upstream.invalid/anthropic/v1/messages/count_tokens");
+    expect(forwarded?.headers.get("x-api-key")).toBe("global-key");
   });
 
-  it("passes the client key for count_tokens when no server key is configured", async () => {
+  it("rejects count_tokens without an active model Key before forwarding the client Key", async () => {
     const config = configWithAuth();
     config.upstream.apiKey = "";
     config.upstream.agents.pi = { url: "https://pi.upstream.invalid/anthropic/v1" };
@@ -168,9 +172,9 @@ describe("route-bound Anthropic count_tokens", () => {
       request(),
     );
 
-    expect(response.status).toBe(200);
-    expect(calls[1]?.url).toBe("https://pi.upstream.invalid/anthropic/v1/messages/count_tokens");
-    expect(calls[1]?.headers.get("x-api-key")).toBe("memory-user-key");
+    expect(response.status).toBe(503);
+    expect(await response.json()).toEqual({ error: "model_not_configured_or_protocol_unavailable" });
+    expect(calls.map((call) => call.url)).toEqual(["https://auth.invalid/v3/meta/auth/verify"]);
   });
 
   it("rejects an unknown source before auth, body, upstream, or credit", async () => {

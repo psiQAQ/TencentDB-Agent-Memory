@@ -1,8 +1,7 @@
-// Keep route/identity assertions independent of instance configuration discovery.
-// The discovery and override paths are covered by instance-upstream-merge.test.ts.
+// Only configuration discovery is mocked; profile readiness and credentials remain real.
 vi.mock("../instance-upstream-cache.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../instance-upstream-cache.js")>();
-  return { ...actual, getInstanceUpstreamConfigs: async () => [] };
+  return { ...actual, getInstanceUpstreamConfigs: vi.fn() };
 });
 
 import { createServer, type Server } from "node:http";
@@ -23,7 +22,7 @@ import { DEFAULT_CONFIG } from "../config.js";
 import { resolveForwardTarget, type ForwardTarget } from "../guard-adapter.js";
 import { handleAuxiliaryEndpoint } from "../auxiliaryHandler.js";
 import { handleChatCompletions } from "../handler.js";
-import { createApp } from "../server.js";
+import { createConfiguredApp as createApp } from "./fixtures/active-profiles.js";
 
 const configuredOrigin = "https://configured.invalid";
 
@@ -201,7 +200,7 @@ describe("OpenAI upstream header privacy", () => {
   it.each([
     "/proxy/space-1/v1/chat/completions",
     "/v1/chat/completions",
-  ])("preserves the source-less OpenAI compatibility route %s", async (path) => {
+  ])("requires an active instance on the source-less OpenAI route %s", async (path) => {
     const value = config();
     initAuth(value.auth);
     const response = await createApp(value).request(
@@ -209,6 +208,12 @@ describe("OpenAI upstream header privacy", () => {
       { method: "POST", headers: privateHeaders(), body: requestBody() },
     );
 
+    if (path.startsWith("/v1/")) {
+      expect(response.status).toBe(503);
+      expect(await response.json()).toEqual({ error: "model_not_configured_or_protocol_unavailable" });
+      expect(upstreamHeaders).toEqual([]);
+      return;
+    }
     expect(response.status).toBe(200);
     expect(upstreamHeaders).toHaveLength(1);
     assertSafe(upstreamHeaders[0]!, "Bearer server-global-key");
@@ -295,7 +300,7 @@ describe("OpenAI upstream header privacy", () => {
     "/codebuddy/space-1/v1/moderations",
     "/opencode/space-1/v1/embeddings",
     "/pi/space-1/v1/completions",
-  ])("binds the OpenAI auxiliary compatibility route %s", async (path) => {
+  ])("requires an active instance on the OpenAI auxiliary route %s", async (path) => {
     const value = config();
     initAuth(value.auth);
 
@@ -304,6 +309,12 @@ describe("OpenAI upstream header privacy", () => {
       { method: "POST", headers: privateHeaders(), body: requestBody() },
     );
 
+    if (path.startsWith("/v1/")) {
+      expect(response.status).toBe(503);
+      expect(await response.json()).toEqual({ error: "model_not_configured_or_protocol_unavailable" });
+      expect(upstreamUrls).toEqual([]);
+      return;
+    }
     expect(response.status).toBe(200);
     expect(upstreamUrls).toHaveLength(1);
     assertSafe(upstreamHeaders[0]!, "Bearer server-global-key");
@@ -394,7 +405,7 @@ describe("OpenAI upstream header privacy", () => {
     assertSafe(upstreamHeaders[0]!, "Bearer server-global-key");
   });
 
-  it("passes client credentials for a URL-only agent entry", async () => {
+  it("uses the active profile Key instead of caller credentials for a URL-only deployment entry", async () => {
     const value = config();
     value.upstream.agents.codebuddy = { url: `${configuredOrigin}/v1` };
     initAuth(value.auth);
@@ -405,13 +416,11 @@ describe("OpenAI upstream header privacy", () => {
     );
 
     expect(response.status).toBe(200);
-    expect(upstreamHeaders[0]?.get("authorization")).toBe("Bearer private-caller-credential");
-    expect(upstreamHeaders[0]?.get("x-api-key")).toBe("private-memory-credential");
-    expect(upstreamHeaders[0]?.has("cookie")).toBe(false);
+    assertSafe(upstreamHeaders[0]!, "Bearer server-global-key");
     expect(upstreamHeaders[0]?.has("x-session-id")).toBe(false);
   });
 
-  it("passes client credentials when no server key is configured", async () => {
+  it("rejects a profile without a model Key instead of forwarding caller credentials", async () => {
     const value = config("");
     initAuth(value.auth);
 
@@ -420,13 +429,13 @@ describe("OpenAI upstream header privacy", () => {
       { method: "POST", headers: privateHeaders(), body: requestBody() },
     );
 
-    expect(response.status).toBe(200);
-    expect(upstreamUrls).toHaveLength(1);
-    expect(upstreamHeaders[0]?.get("authorization")).toBe("Bearer private-caller-credential");
-    expect(upstreamHeaders[0]?.has("x-session-id")).toBe(false);
+    expect(response.status).toBe(503);
+    expect(await response.json()).toEqual({ error: "model_not_configured_or_protocol_unavailable" });
+    expect(upstreamUrls).toHaveLength(0);
+    expect(upstreamHeaders).toEqual([]);
   });
 
-  it("allows a same-origin primary target to use the selected server key", async () => {
+  it("keeps the active profile endpoint when a router changes the same-origin path", async () => {
     vi.mocked(resolveForwardTarget).mockResolvedValueOnce(target({
       url: `${configuredOrigin}/alternate/chat/completions`,
     }));
@@ -439,11 +448,11 @@ describe("OpenAI upstream header privacy", () => {
     );
 
     expect(response.status).toBe(200);
-    expect(upstreamUrls).toEqual([`${configuredOrigin}/alternate/chat/completions`]);
+    expect(upstreamUrls).toEqual([`${configuredOrigin}/v1/chat/completions`]);
     assertSafe(upstreamHeaders[0]!, "Bearer server-global-key");
   });
 
-  it("fails closed before fetch for a cross-origin primary target without explicit server auth", async () => {
+  it("keeps the active profile destination and Key when a router selects another origin", async () => {
     vi.mocked(resolveForwardTarget).mockResolvedValueOnce(target({
       url: "https://extension-controlled.invalid/v1/chat/completions",
     }));
@@ -455,12 +464,12 @@ describe("OpenAI upstream header privacy", () => {
       { method: "POST", headers: privateHeaders(), body: requestBody() },
     );
 
-    expect(response.status).toBe(503);
-    expect(upstreamUrls).toEqual([]);
-    expect(upstreamHeaders).toEqual([]);
+    expect(response.status).toBe(200);
+    expect(upstreamUrls).toEqual([`${configuredOrigin}/v1/chat/completions`]);
+    assertSafe(upstreamHeaders[0]!, "Bearer server-global-key");
   });
 
-  it("allows explicit server auth for a cross-origin primary target", async () => {
+  it("does not attach another destination's router Key to the active profile", async () => {
     vi.mocked(resolveForwardTarget).mockResolvedValueOnce(target({
       url: "https://extension-controlled.invalid/v1/chat/completions",
       authHeaders: { authorization: "Bearer server-extension-key" },
@@ -474,8 +483,8 @@ describe("OpenAI upstream header privacy", () => {
     );
 
     expect(response.status).toBe(200);
-    expect(upstreamUrls).toEqual(["https://extension-controlled.invalid/v1/chat/completions"]);
-    assertSafe(upstreamHeaders[0]!, "Bearer server-extension-key");
+    expect(upstreamUrls).toEqual([`${configuredOrigin}/v1/chat/completions`]);
+    assertSafe(upstreamHeaders[0]!, "Bearer server-global-key");
   });
 
   it("prefers the selected per-agent server key over the global key", async () => {
@@ -513,6 +522,7 @@ describe("OpenAI upstream header privacy", () => {
       }),
     );
     const value = config();
+    value.upstream.apiKey = "server-primary-key";
     initAuth(value.auth);
 
     const response = await createApp(value).request(
@@ -577,7 +587,7 @@ describe("OpenAI upstream header privacy", () => {
     expect(upstreamHeaders).toEqual([]);
   });
 
-  it("sends no request to either origin for a cross-origin extension target without auth", async () => {
+  it("sends only to the active profile when an extension selects another origin", async () => {
     vi.unstubAllGlobals();
     let configuredRequests = 0;
     let extensionRequests = 0;
@@ -607,8 +617,8 @@ describe("OpenAI upstream header privacy", () => {
         { method: "POST", headers: privateHeaders(), body: requestBody() },
       );
 
-      expect(response.status).toBe(503);
-      expect(configuredRequests).toBe(0);
+      expect(response.status).toBe(200);
+      expect(configuredRequests).toBe(1);
       expect(extensionRequests).toBe(0);
     } finally {
       await Promise.all([close(configured), close(extension)]);

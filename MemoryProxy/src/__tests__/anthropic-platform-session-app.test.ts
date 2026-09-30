@@ -1,9 +1,15 @@
+// Only configuration discovery is mocked; profile readiness and credentials remain real.
+vi.mock("../instance-upstream-cache.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../instance-upstream-cache.js")>();
+  return { ...actual, getInstanceUpstreamConfigs: vi.fn() };
+});
+
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { initAuth } from "../auth.js";
 import { DEFAULT_CONFIG } from "../config.js";
 import { setMetadataClient } from "../meta/client.js";
-import { createApp } from "../server.js";
+import { createConfiguredApp as createApp } from "./fixtures/active-profiles.js";
 import { __resetSessionStoreForTests } from "../session/store.js";
 import type { ProxyConfig } from "../types.js";
 

@@ -1,6 +1,9 @@
 /** Hono app factory — registers all routes. */
 
 import { Hono } from "hono";
+import { HTTPException } from "hono/http-exception";
+import { UpstreamConfigReadError } from "./instance-upstream-cache.js";
+import { log } from "./report/log.js";
 import { handleChatCompletions } from "./handler.js";
 import { handleAnthropicMessages } from "./anthropicHandler.js";
 import { handleAuxiliaryEndpoint } from "./auxiliaryHandler.js";
@@ -47,6 +50,17 @@ function bindAuxSpaceRoute(
 
 export function createApp(config: ProxyConfig): Hono {
   const app = new Hono();
+
+  app.onError((error, c) => {
+    if (error instanceof UpstreamConfigReadError) {
+      log.warn("instance_upstream.read_failed", { category: error.category, stage: "configuration" });
+      return c.json({ error: "upstream_config_unavailable" }, 503);
+    }
+    // Preserve Hono's handling for errors outside the configuration boundary.
+    if (error instanceof HTTPException) return error.getResponse();
+    console.error(error);
+    return c.text("Internal Server Error", 500);
+  });
 
   app.post("/internal/upstream/test", (c) => handleUpstreamProbe(c, config));
   app.post("/internal/upstream/refresh", (c) => handleUpstreamRefresh(c, config));

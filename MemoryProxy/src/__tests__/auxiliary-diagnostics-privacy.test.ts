@@ -1,3 +1,9 @@
+// Only configuration discovery is mocked; profile readiness and credentials remain real.
+vi.mock("../instance-upstream-cache.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../instance-upstream-cache.js")>();
+  return { ...actual, getInstanceUpstreamConfigs: vi.fn() };
+});
+
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const PRIVATE_VALUE = "private-auxiliary-diagnostics-value";
@@ -14,7 +20,7 @@ vi.mock("../credit-reporter.js", async (importOriginal) => {
 import { initAuth } from "../auth.js";
 import { DEFAULT_CONFIG } from "../config.js";
 import { log } from "../report/log.js";
-import { createApp } from "../server.js";
+import { createConfiguredApp as createApp } from "./fixtures/active-profiles.js";
 
 function containsPrivateValue(value: unknown): boolean {
   const seen = new Set<object>();

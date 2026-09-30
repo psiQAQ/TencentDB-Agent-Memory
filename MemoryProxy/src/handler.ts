@@ -1451,6 +1451,9 @@ export async function handleChatCompletions(
       const resolvedKey = resolveInstanceCredential(convCfg, config, agentSource);
       if (resolvedKey === null) return c.json({ error: "upstream_credential_unavailable" }, 502);
       target.url = resolveInstanceTargetUrl(convCfg, `${convCfg.base_url.replace(/\/+$/, "")}${forwardEndpoint}`);
+      // The active profile owns this destination and its credential. Router
+      // authentication for a different selection must not follow the override.
+      target.authHeaders = null;
       credentialOrigin = convCfg.base_url;
       effectiveApiKey = convCfg.mode === "custom_unified"
         ? resolvedKey

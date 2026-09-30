@@ -324,6 +324,16 @@ MemoryProxy/
   package.json
 ```
 
+## Model configuration failures
+
+Instance-scoped model requests require an active Panel model profile with a
+supplier Key and a successfully activated protocol. An empty or incomplete
+profile returns HTTP 503 with `model_not_configured_or_protocol_unavailable`.
+If Core configuration cannot be read, requests return HTTP 503 JSON with
+`upstream_config_unavailable`; diagnostics contain only fixed failure categories.
+Neither case forwards to the model or falls back to deployment or caller credentials.
+The internal refresh endpoint retains HTTP 502 with `core_unavailable` for a failed read.
+
 ## Running tests
 
 ```bash

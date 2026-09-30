@@ -1,3 +1,9 @@
+// Only configuration discovery is mocked; profile readiness and credentials remain real.
+vi.mock("../instance-upstream-cache.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../instance-upstream-cache.js")>();
+  return { ...actual, getInstanceUpstreamConfigs: vi.fn() };
+});
+
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Hono } from "hono";
 import { initAuth } from "../auth.js";
@@ -17,6 +23,7 @@ import {
   initSystemUsers,
 } from "../systemUser.js";
 import { handleSystemUserPassthrough } from "../systemUserPassthrough.js";
+import { configureActiveProfiles } from "./fixtures/active-profiles.js";
 
 const PRIVATE_VALUE = "private-active-diagnostics-value";
 const PRIVATE_BODY_VALUE = "rawjsonx";
@@ -308,6 +315,7 @@ describe("active diagnostics privacy", () => {
     config.creditReport.url = "";
     config.log.file = "";
     config.clickhouse.enabled = false;
+    configureActiveProfiles(config);
     config.opik.enabled = false;
     config.langfuse.enabled = false;
     vi.stubGlobal("fetch", vi.fn(async () => {

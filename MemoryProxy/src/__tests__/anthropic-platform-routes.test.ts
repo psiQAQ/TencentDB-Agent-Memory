@@ -1,8 +1,7 @@
-// Keep route/identity assertions independent of instance configuration discovery.
-// The discovery and override paths are covered by instance-upstream-merge.test.ts.
+// Only configuration discovery is mocked; profile readiness and credentials remain real.
 vi.mock("../instance-upstream-cache.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../instance-upstream-cache.js")>();
-  return { ...actual, getInstanceUpstreamConfigs: async () => [] };
+  return { ...actual, getInstanceUpstreamConfigs: vi.fn() };
 });
 
 import { Hono } from "hono";
@@ -12,7 +11,7 @@ import { resolveAgentAdapter } from "../agent-adapters/index.js";
 import { handleAnthropicMessages } from "../anthropicHandler.js";
 import { initAuth } from "../auth.js";
 import { DEFAULT_CONFIG } from "../config.js";
-import { createApp } from "../server.js";
+import { createConfiguredApp as createApp } from "./fixtures/active-profiles.js";
 import { _resetSystemUsersForTest, initSystemUsers } from "../systemUser.js";
 import type { ProxyConfig } from "../types.js";
 
@@ -185,7 +184,7 @@ describe("native Anthropic platform routes", () => {
     expect(headers?.get("accept")).toBe("application/json");
   });
 
-  it("passes the client key for a URL-only agent override", async () => {
+  it("uses the active model Key instead of the client Key for a URL-only deployment entry", async () => {
     const config = configWithAuth();
     config.upstream.apiKey = "global-server-key";
     config.upstream.agents.opencode = { url: "https://opencode.upstream.invalid/anthropic/v1" };
@@ -199,10 +198,10 @@ describe("native Anthropic platform routes", () => {
 
     expect(response.status).toBe(200);
     expect(upstreamHeaders).toHaveLength(1);
-    expect(upstreamHeaders[0]?.get("x-api-key")).toBe("memory-user-key");
+    expect(upstreamHeaders[0]?.get("x-api-key")).toBe("global-server-key");
   });
 
-  it("passes the client key when no server key is configured", async () => {
+  it("rejects conversation without an active model Key before forwarding", async () => {
     const config = configWithAuth();
     config.upstream.apiKey = "";
     config.upstream.agents.pi = { url: "https://pi.upstream.invalid/anthropic/v1" };
@@ -214,11 +213,11 @@ describe("native Anthropic platform routes", () => {
       messagesRequest("ses_missing_server_key"),
     );
 
-    expect(response.status).toBe(200);
-    expect(calls).toHaveLength(2);
-    expect(upstreamHeaders).toHaveLength(1);
-    expect(upstreamHeaders[0]?.get("x-api-key")).toBe("memory-user-key");
-    expect(upstreamHeaders[0]?.has("x-session-id")).toBe(false);
+    expect(response.status).toBe(503);
+    expect(await response.json()).toEqual({ error: "model_not_configured_or_protocol_unavailable" });
+    expect(calls).toEqual(["https://memory-core.invalid/v3/meta/auth/verify"]);
+    expect(upstreamHeaders).toHaveLength(0);
+
   });
 
   it("replaces a system user's caller credential with the global server key", async () => {
@@ -251,7 +250,7 @@ describe("native Anthropic platform routes", () => {
     expect(headers?.has("x-team-id")).toBe(false);
   });
 
-  it("passes the client key for a system-user request when no server key is configured", async () => {
+  it("rejects system-user extraction without an active model Key before forwarding", async () => {
     const config = configWithAuth();
     config.upstream.apiKey = "";
     initAuth(config.auth);
@@ -263,11 +262,11 @@ describe("native Anthropic platform routes", () => {
       messagesRequest("system_user_missing_key"),
     );
 
-    expect(response.status).toBe(200);
-    expect(calls).toHaveLength(2);
-    expect(upstreamHeaders).toHaveLength(1);
-    expect(upstreamHeaders[0]?.get("x-api-key")).toBe("memory-user-key");
-    expect(upstreamHeaders[0]?.has("x-session-id")).toBe(false);
+    expect(response.status).toBe(503);
+    expect(await response.json()).toEqual({ error: "model_not_configured_or_protocol_unavailable" });
+    expect(calls).toEqual(["https://memory-core.invalid/v3/meta/auth/verify"]);
+    expect(upstreamHeaders).toHaveLength(0);
+
   });
 
   it.each([

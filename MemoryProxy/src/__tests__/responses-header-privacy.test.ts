@@ -1,15 +1,14 @@
-// Keep route/identity assertions independent of instance configuration discovery.
-// The discovery and override paths are covered by instance-upstream-merge.test.ts.
+// Only configuration discovery is mocked; profile readiness and credentials remain real.
 vi.mock("../instance-upstream-cache.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../instance-upstream-cache.js")>();
-  return { ...actual, getInstanceUpstreamConfigs: async () => [] };
+  return { ...actual, getInstanceUpstreamConfigs: vi.fn() };
 });
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { initAuth } from "../auth.js";
 import { DEFAULT_CONFIG } from "../config.js";
-import { createApp } from "../server.js";
+import { createConfiguredApp as createApp } from "./fixtures/active-profiles.js";
 
 type ResponsesSource = "codex" | "workbuddy";
 
@@ -96,8 +95,7 @@ describe("Responses upstream credential boundary", () => {
       expect(fetchMock).toHaveBeenCalledTimes(1);
       expect(String(fetchMock.mock.calls[0][0])).toBe("https://other-upstream.invalid/v1/responses");
       const headers = new Headers(fetchMock.mock.calls[0][1]?.headers);
-      expect(headers.get("authorization")).toBe(source === "codex"
-        ? "Bearer client-memory-key" : "Bearer server-upstream-key");
+      expect(headers.get("authorization")).toBe("Bearer server-upstream-key");
       expect(headers.has("x-session-id")).toBe(false);
     },
   );

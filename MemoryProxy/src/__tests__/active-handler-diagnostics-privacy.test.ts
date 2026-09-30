@@ -1,8 +1,14 @@
+// Only configuration discovery is mocked; profile readiness and credentials remain real.
+vi.mock("../instance-upstream-cache.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../instance-upstream-cache.js")>();
+  return { ...actual, getInstanceUpstreamConfigs: vi.fn() };
+});
+
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { initAuth } from "../auth.js";
 import { DEFAULT_CONFIG } from "../config.js";
-import { createApp } from "../server.js";
+import { createConfiguredApp as createApp } from "./fixtures/active-profiles.js";
 import { __resetSessionStoreForTests, getSessionStore } from "../session/store.js";
 
 const PRIVATE_VALUE = "private-active-handler-value";
@@ -46,6 +52,7 @@ describe("active handler diagnostics privacy", () => {
   ])("keeps %s mem-command diagnostics private", async (agentSource, stream) => {
     const consoleLog = vi.spyOn(console, "log").mockImplementation(() => {});
     const config = structuredClone(DEFAULT_CONFIG);
+    config.upstream.apiKey = "profile-test-key";
     config.memCommand = { enabled: true, allowedCommands: [] };
     config.sessionInit.enabled = false;
     config.injection.enabled = false;
@@ -99,6 +106,7 @@ describe("active handler diagnostics privacy", () => {
       },
     });
     const config = structuredClone(DEFAULT_CONFIG);
+    config.upstream.apiKey = "profile-test-key";
     config.memCommand = { enabled: true, allowedCommands: [] };
     config.sessionInit.enabled = true;
     config.injection.enabled = false;

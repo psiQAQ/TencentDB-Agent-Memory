@@ -1,8 +1,7 @@
-// Keep route/identity assertions independent of instance configuration discovery.
-// The discovery and override paths are covered by instance-upstream-merge.test.ts.
+// Only configuration discovery is mocked; profile readiness and credentials remain real.
 vi.mock("../instance-upstream-cache.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../instance-upstream-cache.js")>();
-  return { ...actual, getInstanceUpstreamConfigs: async () => [] };
+  return { ...actual, getInstanceUpstreamConfigs: vi.fn() };
 });
 
 import { createServer, type Server } from "node:http";
@@ -37,7 +36,7 @@ vi.mock("../guard-adapter.js", async (importOriginal) => {
 import { initAuth } from "../auth.js";
 import { DEFAULT_CONFIG } from "../config.js";
 import { resolveForwardTarget } from "../guard-adapter.js";
-import { createApp } from "../server.js";
+import { createConfiguredApp as createApp } from "./fixtures/active-profiles.js";
 
 function listen(server: Server): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -85,6 +84,8 @@ describe("Anthropic retry header privacy", () => {
 
   it("rebuilds retry authentication without caller or identity headers", async () => {
     const config = structuredClone(DEFAULT_CONFIG);
+    config.upstream.url = "https://primary.invalid";
+    config.upstream.apiKey = "server-primary-key";
     config.auth = { enabled: true, url: "https://auth.invalid", timeoutMs: 1_000 };
     config.rateLimit = { tpm: 0, qpm: 0 };
     config.extraction = { enabled: false, extractors: [] };
@@ -164,8 +165,9 @@ describe("Anthropic retry header privacy", () => {
     });
 
     const config = structuredClone(DEFAULT_CONFIG);
-    config.auth = { enabled: true, url: "https://auth.invalid", timeoutMs: 1_000 };
+    config.upstream.url = "https://primary.invalid";
     config.upstream.apiKey = "server-primary-key";
+    config.auth = { enabled: true, url: "https://auth.invalid", timeoutMs: 1_000 };
     config.rateLimit = { tpm: 0, qpm: 0 };
     config.extraction = { enabled: false, extractors: [] };
     config.log.backend = "noop";
@@ -192,7 +194,7 @@ describe("Anthropic retry header privacy", () => {
     expect(upstreamHeaders).toEqual([]);
   });
 
-  it("rejects a cross-origin primary target without an explicit server credential", async () => {
+  it("keeps the active model destination instead of a cross-origin router destination", async () => {
     vi.mocked(resolveForwardTarget).mockResolvedValueOnce({
       url: "https://extension-controlled.invalid/messages",
       model: "primary-model",
@@ -209,9 +211,9 @@ describe("Anthropic retry header privacy", () => {
     });
 
     const config = structuredClone(DEFAULT_CONFIG);
-    config.auth = { enabled: true, url: "https://auth.invalid", timeoutMs: 1_000 };
     config.upstream.url = "https://configured.invalid/anthropic/v1";
     config.upstream.apiKey = "server-primary-key";
+    config.auth = { enabled: true, url: "https://auth.invalid", timeoutMs: 1_000 };
     config.rateLimit = { tpm: 0, qpm: 0 };
     config.extraction = { enabled: false, extractors: [] };
     config.log.backend = "noop";
@@ -233,9 +235,10 @@ describe("Anthropic retry header privacy", () => {
       }),
     });
 
-    expect(response.status).toBe(503);
-    expect(upstreamUrls).toEqual([]);
-    expect(upstreamHeaders).toEqual([]);
+    expect(response.status).toBe(401);
+    expect(upstreamUrls).toEqual(["https://configured.invalid/anthropic/v1/messages"]);
+    expect(upstreamHeaders[0]?.get("x-api-key")).toBe("server-primary-key");
+    expect(upstreamHeaders[0]?.get("x-session-id")).toBeNull();
   });
 
   it("may reuse the primary server credential for a same-origin retry", async () => {
@@ -259,6 +262,8 @@ describe("Anthropic retry header privacy", () => {
     });
 
     const config = structuredClone(DEFAULT_CONFIG);
+    config.upstream.url = "https://primary.invalid";
+    config.upstream.apiKey = "server-primary-key";
     config.auth = { enabled: true, url: "https://auth.invalid", timeoutMs: 1_000 };
     config.rateLimit = { tpm: 0, qpm: 0 };
     config.extraction = { enabled: false, extractors: [] };
@@ -289,6 +294,30 @@ describe("Anthropic retry header privacy", () => {
     expect(upstreamHeaders[1]?.get("x-api-key")).toBe("server-primary-key");
   });
 
+  it("does not attach another destination's router Key to the active profile", async () => {
+    vi.mocked(resolveForwardTarget).mockResolvedValueOnce({
+      url: "https://another.invalid/messages", model: "router-model",
+      authHeaders: { "x-api-key": "another-destination-key" }, bodyOverrides: null,
+      retryTarget: null, turnSeq: 0, logLine: "", logLineExtra: "", tags: [],
+      analyzerTrace: null, logMeta: {}, routedFrom: "",
+    });
+    const config = structuredClone(DEFAULT_CONFIG);
+    config.upstream = { url: "https://selected.invalid", apiKey: "selected-profile-key", agents: {} };
+    config.auth = { enabled: false, url: "", timeoutMs: 1000 };
+    config.injection.enabled = false;
+    config.extraction = { enabled: false, extractors: [] };
+    config.creditReport.url = "";
+    const response = await createApp(config).request("http://proxy/claude-code/space-1/v1/messages", {
+      method: "POST", headers: { "content-type": "application/json", "x-api-key": "caller-key", "x-session-id": "selected-key-test" },
+      body: JSON.stringify({ model: "test-model", messages: [{ role: "user", content: "hello" }], max_tokens: 32 }),
+    });
+    expect(response.status).toBe(401);
+    expect(upstreamUrls).toEqual(["https://selected.invalid/messages"]);
+    expect(upstreamHeaders[0]?.get("x-api-key")).toBe("selected-profile-key");
+    expect([...upstreamHeaders[0]!.values()]).not.toContain("another-destination-key");
+    expect([...upstreamHeaders[0]!.values()]).not.toContain("caller-key");
+  });
+
   it("returns a controlled error instead of following a retry redirect", async () => {
     const redirects: Array<RequestRedirect | undefined> = [];
     vi.mocked(fetch).mockImplementation(async (input, init) => {
@@ -309,6 +338,8 @@ describe("Anthropic retry header privacy", () => {
     });
 
     const config = structuredClone(DEFAULT_CONFIG);
+    config.upstream.url = "https://primary.invalid";
+    config.upstream.apiKey = "server-primary-key";
     config.auth = { enabled: true, url: "https://auth.invalid", timeoutMs: 1_000 };
     config.rateLimit = { tpm: 0, qpm: 0 };
     config.extraction = { enabled: false, extractors: [] };
@@ -384,6 +415,8 @@ describe("Anthropic retry header privacy", () => {
         routedFrom: "",
       });
       const config = structuredClone(DEFAULT_CONFIG);
+      config.upstream.url = "https://primary.invalid";
+      config.upstream.apiKey = "server-primary-key";
       config.auth = { enabled: true, url: upstreamOrigin, timeoutMs: 1_000 };
       config.rateLimit = { tpm: 0, qpm: 0 };
       config.extraction = { enabled: false, extractors: [] };

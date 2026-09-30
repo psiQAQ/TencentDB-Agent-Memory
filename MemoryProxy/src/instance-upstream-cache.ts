@@ -9,7 +9,6 @@
 import type { CoreSkillConfig } from "./types.js";
 import type { ProxyConfig } from "./types.js";
 
-const TAG = "[instance-upstream-cache]";
 const DEFAULT_TTL_MS = 0; // Every request observes activation and deletion.
 const MAX_ENTRIES = 256;
 
@@ -39,6 +38,30 @@ interface CacheEntry {
 
 const cache = new Map<string, CacheEntry>();
 
+export type UpstreamConfigFailureCategory = "transport_error" | "timeout" | "core_rejected" | "invalid_response";
+
+/** Contains no endpoint, credentials, response body, or original error cause. */
+export class UpstreamConfigReadError extends Error {
+  constructor(readonly category: UpstreamConfigFailureCategory) {
+    super("Instance upstream configuration is unavailable");
+    this.name = "UpstreamConfigReadError";
+  }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isConfigEntry(value: unknown): value is InstanceUpstreamConfigEntry {
+  return isRecord(value) && typeof value.agent_source === "string" &&
+    (value.type === "conversation" || value.type === "extraction") &&
+    (value.mode === "custom_unified" || value.mode === "official" || value.mode === "custom_passthrough") &&
+    typeof value.base_url === "string" && typeof value.api_key === "string" && typeof value.model_id === "string" &&
+    (value.credential_ref === undefined || typeof value.credential_ref === "string") &&
+    (value.ready_protocols === undefined || (Array.isArray(value.ready_protocols) &&
+      value.ready_protocols.every((protocol) => typeof protocol === "string")));
+}
+
 // ── Fetch from Core ──────────────────────────────────────────────────────────
 
 async function fetchFromCore(
@@ -46,26 +69,38 @@ async function fetchFromCore(
   spaceId: string,
 ): Promise<InstanceUpstreamConfigEntry[]> {
   const url = `${config.endpoint.replace(/\/$/, "")}/v3/internal/meta/instance-upstream/list`;
-  const resp = await fetch(url, {
-    method: "POST",
-    headers: {
-      "Authorization": `Bearer ${config.serviceToken}`,
-      "x-tdai-service-id": spaceId,
-      "Content-Type": "application/json",
-    },
-    body: "{}",
-    signal: AbortSignal.timeout(config.timeoutMs || 3000),
-  });
+  let resp: Response;
+  try {
+    resp = await fetch(url, {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${config.serviceToken}`,
+        "x-tdai-service-id": spaceId,
+        "Content-Type": "application/json",
+      },
+      body: "{}",
+      signal: AbortSignal.timeout(config.timeoutMs || 3000),
+    });
+  } catch (error) {
+    const timeout = error instanceof Error && (error.name === "TimeoutError" || error.name === "AbortError");
+    throw new UpstreamConfigReadError(timeout ? "timeout" : "transport_error");
+  }
 
   if (!resp.ok) {
-    throw new Error(`${TAG} HTTP ${resp.status} from ${url}`);
+    throw new UpstreamConfigReadError("core_rejected");
   }
 
-  const env = await resp.json() as { code?: number; data?: { items?: InstanceUpstreamConfigEntry[] } };
-  if (env.code !== 0) {
-    throw new Error(`${TAG} envelope error code=${env.code}`);
+  let env: unknown;
+  try { env = await resp.json(); }
+  catch { throw new UpstreamConfigReadError("invalid_response"); }
+  if (!isRecord(env) || typeof env.code !== "number") {
+    throw new UpstreamConfigReadError("invalid_response");
   }
-  return env.data?.items ?? [];
+  if (env.code !== 0) throw new UpstreamConfigReadError("core_rejected");
+  if (!isRecord(env.data) || !Array.isArray(env.data.items) || !env.data.items.every(isConfigEntry)) {
+    throw new UpstreamConfigReadError("invalid_response");
+  }
+  return env.data.items;
 }
 
 /** Force a fresh Core read after a Panel save; failed reads leave the prior cache intact. */
@@ -114,11 +149,12 @@ export async function getInstanceUpstreamConfigs(
     return fresh;
   }
 
-  throw fetchErr ?? new Error(`${TAG} configuration unavailable`);
+  throw fetchErr ?? new UpstreamConfigReadError("invalid_response");
 }
 
 export function isReadyForProtocol(cfg: InstanceUpstreamConfigEntry | null, protocol: string): boolean {
-  return !!cfg && cfg.mode === "custom_unified" && !!cfg.api_key &&
+  return !!cfg && cfg.mode === "custom_unified" && !!cfg.api_key.trim() &&
+    !!cfg.base_url.trim() && !!cfg.model_id.trim() &&
     (cfg.ready_protocols ?? []).includes(protocol);
 }
 
@@ -128,7 +164,7 @@ export function isReadyForProtocol(cfg: InstanceUpstreamConfigEntry | null, prot
  * Match priority:
  *   1. Exact (agentSource, type) match
  *   2. Fallback ("default", type) match
- *   3. null (= no config = official behavior)
+ *   3. null (= no active model; callers reject before forwarding)
  */
 export function resolveUpstreamConfig(
   items: InstanceUpstreamConfigEntry[],
