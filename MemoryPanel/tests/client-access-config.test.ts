@@ -6,6 +6,15 @@ import {
 } from '../web/src/pages/ApiKeysPage/client-access-config.js';
 
 describe('API Key client access configuration', () => {
+  it('uses each Agent model group and omits disabled or unassigned Agents', () => {
+    const configs = buildClientAccessConfigs('http://proxy:8096', 'instance-a', {
+      codex: 'responses-model', 'claude-code': 'claude-model', pi: 'pi-model', dsh: null,
+    });
+    expect(configs.map((config) => config.id)).toEqual(['claude-code', 'codex']);
+    expect(configs.find((config) => config.id === 'codex')!.content).toContain('responses-model');
+    expect(configs.find((config) => config.id === 'claude-code')!.content).toContain('claude-model');
+    expect(configs.find((config) => config.id === 'codex')!.content).not.toContain('claude-model');
+  });
   it('builds all eight documented client configurations with the runtime model', () => {
     const configs = buildClientAccessConfigs(
       'http://127.0.0.1:8096/',

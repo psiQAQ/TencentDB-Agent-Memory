@@ -5,7 +5,7 @@ import { request } from "node:https";
 import { isIP } from "node:net";
 import type { Context } from "hono";
 import type { ProxyConfig } from "./types.js";
-import { refreshInstanceUpstreamConfigs, resolveInstanceCredential, resolveInstanceTargetUrl, type InstanceUpstreamConfigEntry } from "./instance-upstream-cache.js";
+import { refreshInstanceUpstreamConfigs, resolveInstanceTargetUrl } from "./instance-upstream-cache.js";
 
 type Protocol = "chat" | "responses" | "anthropic";
 const PROTOCOLS = new Set<Protocol>(["chat", "responses", "anthropic"]);
@@ -109,7 +109,7 @@ export async function handleUpstreamProbe(c: Context, config: ProxyConfig): Prom
   const model = input.model_id;
   const protocols = input.protocols;
   const local = input.local === true;
-  const hasDeploymentKey = input.credential_ref === "deployment_default" && input.api_key === undefined;
+  const hasDeploymentKey = false;
   const hasIndependentKey = input.credential_ref === undefined && typeof input.api_key === "string" && !!input.api_key.trim();
   if (typeof baseUrl !== "string" || baseUrl.length > 2048 || typeof model !== "string" || !model.trim() || model.length > 200 ||
       !Array.isArray(protocols) || !protocols.length || protocols.length > 3 || protocols.some((p) => !PROTOCOLS.has(p as Protocol)) ||
@@ -122,13 +122,8 @@ export async function handleUpstreamProbe(c: Context, config: ProxyConfig): Prom
       base.username || base.password || base.search || base.hash) {
     return c.json({ error: "invalid_endpoint" }, 400);
   }
-  const cfg: InstanceUpstreamConfigEntry = {
-    agent_source: "default", type: "conversation", mode: "custom_unified", base_url: baseUrl,
-    api_key: hasIndependentKey ? input.api_key as string : "",
-    credential_ref: hasDeploymentKey ? "deployment_default" : "", model_id: model,
-  };
-  const key = resolveInstanceCredential(cfg, config);
-  if (!key) return c.json({ error: "deployment_credential_unavailable" }, 400);
+  const cfg = { base_url: baseUrl };
+  const key = input.api_key as string;
   try { await pinnedAddress(base.hostname, local); }
   catch { return c.json({ error: local ? "non_private_target" : "non_public_target" }, 400); }
   const rateKey = `${instanceId}:${input.type}`;
@@ -164,20 +159,8 @@ export async function handleUpstreamRefresh(c: Context, config: ProxyConfig): Pr
   let input: Record<string, unknown>;
   try { input = await c.req.json() as Record<string, unknown>; }
   catch { return c.json({ error: "invalid_input" }, 400); }
-  if (input.agent_source !== "default" || !["conversation", "extraction"].includes(String(input.type)) ||
-      typeof input.base_url !== "string" || typeof input.model_id !== "string" ||
-      typeof input.credential_ref !== "string") return c.json({ error: "invalid_input" }, 400);
   try {
-    const rows = await refreshInstanceUpstreamConfigs(config.coreSkill, instanceId);
-    const active = rows.find((row) => row.agent_source === "default" && row.type === input.type);
-    const adopted = input.credential_ref === "none"
-      ? !active || active.mode === "official"
-      : active?.mode === "custom_unified" && active.base_url === input.base_url &&
-        active.model_id === input.model_id && (input.credential_ref === "stored"
-          ? !!active.api_key && !active.credential_ref
-          : active.credential_ref === input.credential_ref);
-    return c.json({ adopted });
-  } catch {
-    return c.json({ error: "core_unavailable" }, 502);
-  }
+    await refreshInstanceUpstreamConfigs(config.coreSkill, instanceId);
+    return c.json({ adopted: true });
+  } catch { return c.json({ error: "core_unavailable" }, 502); }
 }

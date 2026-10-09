@@ -11,7 +11,7 @@ import { resolveForwardTarget } from "../guard-adapter.js";
 import {
   clearCache,
   getInstanceUpstreamConfigs,
-  type InstanceUpstreamConfigEntry,
+  type InstanceUpstreamRow,
 } from "../instance-upstream-cache.js";
 import { createApp } from "../server.js";
 import { __resetSessionStoreForTests } from "../session/store.js";
@@ -32,13 +32,13 @@ function configuration() {
   return config;
 }
 
-function entry(type: "conversation" | "extraction" = "conversation"): InstanceUpstreamConfigEntry {
+function entry(type: "conversation" | "extraction" = "conversation"): InstanceUpstreamRow {
   return {
-    agent_source: "default", type, mode: "custom_unified",
+    group_id: type, group_type: type === "extraction" ? "extraction" : "custom", name: type,
+    agents: type === "extraction" ? [] : ["claude-code", "codebuddy", "codex", "workbuddy", "pi", "dsh", "opencode"], enabled: true, mode: "custom_unified",
     base_url: "https://instance.invalid/v1",
     api_key: "instance-model-key",
     model_id: "instance-model",
-    ready_protocols: type === "extraction" ? ["chat"] : ["chat", "responses", "anthropic"],
   };
 }
 
@@ -151,12 +151,12 @@ describe("selected Panel upstream", () => {
   });
 });
 
-it("returns unconfigured without a selected conversation profile", async () => {
+it("rejects an explicitly disabled conversation group", async () => {
   const config = configuration();
   initAuth(config.auth);
   const fetchMock = vi.fn(async (input: string | URL | Request) => {
     if (String(input).endsWith("/v3/internal/meta/instance-upstream/list")) {
-      return Response.json({ code: 0, data: { items: [] } });
+      return Response.json({ code: 0, data: { items: [{ ...entry(), enabled: false }] } });
     }
     throw new Error("unexpected supplier call");
   });
@@ -165,16 +165,16 @@ it("returns unconfigured without a selected conversation profile", async () => {
     method: "POST", headers: { "content-type": "application/json", authorization: "Bearer user-key" },
     body: JSON.stringify(requestBody("chat/completions")),
   });
-  expect(response.status).toBe(503);
+  expect(response.status).toBe(400);
   expect(fetchMock).toHaveBeenCalledTimes(1);
 });
 
-it("rejects a protocol that did not pass activation", async () => {
+it("rejects an Agent that is not assigned to any configured group", async () => {
   const config = configuration();
   initAuth(config.auth);
   const fetchMock = vi.fn(async (input: string | URL | Request) => {
     if (String(input).endsWith("/v3/internal/meta/instance-upstream/list")) {
-      return Response.json({ code: 0, data: { items: [{ ...entry(), ready_protocols: ["chat"] }] } });
+      return Response.json({ code: 0, data: { items: [{ ...entry(), agents: ["claude-code"] }] } });
     }
     throw new Error("unexpected supplier call");
   });
@@ -183,11 +183,11 @@ it("rejects a protocol that did not pass activation", async () => {
     method: "POST", headers: { "content-type": "application/json", authorization: "Bearer user-key" },
     body: JSON.stringify(requestBody("responses")),
   });
-  expect(response.status).toBe(503);
+  expect(response.status).toBe(400);
   expect(fetchMock).toHaveBeenCalledTimes(1);
 });
 
-it("fails closed when Core becomes unavailable", async () => {
+it("retains the last good model groups when Core becomes unavailable", async () => {
   const config = configuration();
   const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
   const rows = [entry()];
@@ -197,7 +197,7 @@ it("fails closed when Core becomes unavailable", async () => {
   expect(await getInstanceUpstreamConfigs(config.coreSkill, "private-space")).toEqual(rows);
   const now = Date.now();
   vi.spyOn(Date, "now").mockReturnValue(now + 6 * 60 * 1000);
-  await expect(getInstanceUpstreamConfigs(config.coreSkill, "private-space")).rejects.toThrow();
+  expect(await getInstanceUpstreamConfigs(config.coreSkill, "private-space")).toEqual(rows);
   expect(fetchMock).toHaveBeenCalledTimes(2);
   expect(JSON.stringify(warn.mock.calls)).not.toContain("private-");
 });

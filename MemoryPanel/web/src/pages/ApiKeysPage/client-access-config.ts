@@ -20,13 +20,19 @@ function quoted(value: string): string {
 
 /**
  * 与 INSTALL_CN.md 及各 agents 子目录 README 对齐的客户端接入配置。
- * Key 始终使用占位符；model 由实例公开元数据中的实际 PROXY_UPSTREAM_MODEL 注入。
+ * Key 始终使用占位符；model 由实例公开元数据中的 Agent 模型组注入。
  */
 export function buildClientAccessConfigs(
   base: string,
   instanceId: string,
-  model: string,
+  model: string | Record<string, string | null>,
 ): ClientAccessConfig[] {
+  if (typeof model !== 'string') {
+    return buildClientAccessConfigs(base, instanceId, 'model-placeholder').flatMap((config) => {
+      const modelId = model[config.id];
+      return modelId ? buildClientAccessConfigs(base, instanceId, modelId).filter((entry) => entry.id === config.id) : [];
+    });
+  }
   const claudeEndpoint = endpoint(base, 'claude-code', instanceId);
   const codeBuddyEndpoint = endpoint(base, 'codebuddy', instanceId);
   const workBuddyEndpoint = endpoint(base, 'workbuddy', instanceId);

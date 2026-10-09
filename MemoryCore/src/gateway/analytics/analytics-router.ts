@@ -34,12 +34,7 @@ import { createHash } from "node:crypto";
 // Public types
 // ---------------------------------------------------------------------------
 
-type Logger = {
-  debug?: (...args: unknown[]) => void;
-  info?: (...args: unknown[]) => void;
-  warn?: (...args: unknown[]) => void;
-  error?: (...args: unknown[]) => void;
-};
+type Logger = Partial<import("../../core/types.js").Logger>;
 
 export const V3_ANALYTICS_PREFIX = "/v3/analytics";
 
@@ -186,7 +181,7 @@ export async function handleV3AnalyticsRoute(
     if (msg.startsWith("VALIDATION:")) {
       sendJson(res, 400, errorEnvelope(400, msg.slice(11), requestId));
     } else {
-      deps.logger.error?.("[analytics]", pathname, msg);
+      deps.logger.error?.(`[analytics] ${pathname}: ${msg}`);
       sendJson(res, 500, errorEnvelope(500, "internal_error", requestId));
     }
   }

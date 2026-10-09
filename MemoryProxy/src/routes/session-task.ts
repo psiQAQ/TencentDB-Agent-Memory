@@ -200,16 +200,16 @@ const DEFAULT_TASK_DRAFT_TIMEOUT_MS = 20000;
 
 /** Task drafts use the selected Panel conversation profile passed by the handler. */
 export function resolveTaskDraftConfig(
-  upstream: TaskDraftUpstream,
+  input: TaskDraftUpstream & { config?: ProxyConfig; agentSource?: string },
 ): { cfg: TaskDraftConfig } | { error: string } {
-  const { model, upstreamUrl, protocol, apiKey } = upstream;
+  const td = input.config?.memCommand?.taskDraft;
 
-  const effectiveModel = model;
-  const effectiveUrl = upstreamUrl;
-  const effectiveApiKey = apiKey;
-  const effectiveProtocol = protocol;
+  const model = input.model ?? "";
+  const url = input.upstreamUrl ?? "";
+  const apiKey = input.apiKey ?? "";
+  const protocol = input.protocol;
 
-  if (!effectiveModel || !effectiveUrl || !effectiveApiKey) {
+  if (!model || !url || !apiKey) {
     return {
       error:
         "task_draft is not configured (missing model / upstream url / apiKey). " +
@@ -220,11 +220,11 @@ export function resolveTaskDraftConfig(
   return {
     cfg: {
       enabled: true,
-      model: effectiveModel,
-      url: effectiveUrl,
-      apiKey: effectiveApiKey,
-      timeoutMs: DEFAULT_TASK_DRAFT_TIMEOUT_MS,
-      ...(effectiveProtocol ? { protocol: effectiveProtocol } : {}),
+      model,
+      url,
+      apiKey,
+      timeoutMs: td?.timeoutMs ?? DEFAULT_TASK_DRAFT_TIMEOUT_MS,
+      ...(protocol ? { protocol } : {}),
     },
   };
 }

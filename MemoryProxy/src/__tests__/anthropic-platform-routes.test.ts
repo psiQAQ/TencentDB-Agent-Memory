@@ -8,7 +8,7 @@ import { Hono } from "hono";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { resolveAgentAdapter } from "../agent-adapters/index.js";
-import { handleAnthropicMessages } from "../anthropicHandler.js";
+import { runAnthropicPipeline } from "../pipeline/runners/anthropic.js";
 import { initAuth } from "../auth.js";
 import { DEFAULT_CONFIG } from "../config.js";
 import { createConfiguredApp as createApp } from "./fixtures/active-profiles.js";
@@ -329,7 +329,7 @@ describe("native Anthropic platform routes", () => {
     const config = configWithAuth();
     initAuth(config.auth);
     const app = new Hono();
-    app.post("/opencode/:spaceId/v1/messages", (c) => handleAnthropicMessages(c, config));
+    app.post("/opencode/:spaceId/v1/messages", (c) => runAnthropicPipeline(c, config));
 
     const response = await app.request(
       "http://proxy/opencode/space-1/v1/messages",
@@ -345,7 +345,7 @@ describe("native Anthropic platform routes", () => {
     initAuth(config.auth);
     const app = new Hono();
     app.post("/opencode/:spaceId/v1/messages", (c) =>
-      handleAnthropicMessages(c, config, "pi"),
+      runAnthropicPipeline(c, config, "pi"),
     );
 
     const response = await app.request(

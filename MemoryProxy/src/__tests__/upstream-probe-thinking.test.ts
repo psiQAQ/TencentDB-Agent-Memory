@@ -52,7 +52,7 @@ it('gets final text from DeepSeek across Chat, Responses and Anthropic probes', 
     },
     body: JSON.stringify({
       agent_source: 'default', type: 'conversation', base_url: 'https://api.deepseek.com',
-      model_id: 'deepseek-flash', credential_ref: 'deployment_default',
+      model_id: 'deepseek-flash', api_key: 'server-secret',
       protocols: ['chat', 'responses', 'anthropic'],
     }),
   });

@@ -23,14 +23,18 @@ export const META_LIST_ACTIONS = new Set([
 ]);
 
 export const META_ACTIONS = [
-  'upstream-profile/list',
-  'upstream-profile/save',
-  'upstream-profile/activate',
-  'upstream-profile/delete',
-  'instance-upstream/list',
-  'instance-upstream/get-for-edit',
-  'instance-upstream/set',
-  'instance-upstream/reset',
+  'upstream/supported-agents',
+  'instance-upstream/groups/list',
+  'instance-upstream/groups/create',
+  'instance-upstream/groups/update',
+  'instance-upstream/groups/toggle',
+  'instance-upstream/groups/delete',
+  'instance-upstream/extraction/get',
+  'instance-upstream/extraction/create',
+  'instance-upstream/extraction/update',
+  'instance-upstream/extraction/toggle',
+  'instance-upstream/extraction/delete',
+
   'user/create',
   // 姊妹接口：system_admin 建号时显式指定 user_key，其他行为与 user/create 完全对称。
   'user/create-with-key',

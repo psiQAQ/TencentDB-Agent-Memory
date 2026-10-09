@@ -10,7 +10,7 @@
 
 import type { ClickHouseConfig } from "../config.js";
 
-type Logger = { info?: (...args: unknown[]) => void; warn?: (...args: unknown[]) => void; error?: (...args: unknown[]) => void };
+type Logger = Partial<Pick<import("../../core/types.js").Logger, "info" | "warn" | "error">>;
 
 export interface AnalyticsChClient {
   query<T = Record<string, unknown>>(params: {
@@ -49,7 +49,7 @@ export async function createAnalyticsChClientAsync(
   try {
     chModule = await import("@clickhouse/client");
   } catch (err) {
-    logger.warn?.(TAG, "@clickhouse/client not available:", (err as Error).message);
+    logger.warn?.(`${TAG} @clickhouse/client not available: ${(err as Error).message}`);
     return null;
   }
 
@@ -79,7 +79,7 @@ export async function createAnalyticsChClientAsync(
         const result = await client.ping();
         return result.success;
       } catch (err) {
-        logger.warn?.(TAG, "ping failed:", (err as Error).message);
+        logger.warn?.(`${TAG} ping failed: ${(err as Error).message}`);
         return false;
       }
     },

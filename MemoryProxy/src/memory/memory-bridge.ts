@@ -77,7 +77,19 @@ interface SessionIdFields {
    * `config.coreSkill.serviceId` 只作为老 session（迁移前缓存）的兜底。
    */
   space_id?: string;
-}
+  /**
+   * Composite key actually used to load state from SessionStore
+   * (`${agentSource}:${sessionId}`). 用于埋点侧对齐 session_init_logs 的
+   * session_key —— 埋点不能猜前缀，必须用真实命中的 key。
+   */
+  composite_key?: string;
+  /**
+   * 客户端族群标签（claude-code / codebuddy / codex / workbuddy / dsh / opencode / pi）。
+   * 从 session composite key 的前缀取 → 用于 emitBridgeRejectTelemetry 的
+   * `agent_source` 字段，对齐 session_init_logs 侧的客户端维度。
+   * 不是必填：老 session 没拆 key 时为 undefined，埋点落空值可接受。
+   */
+  agent_source?: string;}
 
 function toIdFields(
   state: import("../session/types.js").SessionInitState | undefined,

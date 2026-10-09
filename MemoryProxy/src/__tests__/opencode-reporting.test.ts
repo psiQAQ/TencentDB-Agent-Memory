@@ -13,14 +13,12 @@ vi.mock("../logger.js", async (importOriginal) => ({
 }));
 vi.mock("../instance-upstream-cache.js", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../instance-upstream-cache.js")>()),
-  getInstanceUpstreamConfigs: async (): Promise<import("../instance-upstream-cache.js").InstanceUpstreamConfigEntry[]> => [{
-    agent_source: "default",
-    type: "conversation",
+  getInstanceUpstreamConfigs: async (): Promise<import("../instance-upstream-cache.js").InstanceUpstreamRow[]> => [{
+    group_id: "main", group_type: "custom", name: "Main", agents: ["opencode"], enabled: true,
     mode: "custom_unified",
     base_url: "http://upstream.test/v1",
     api_key: "synthetic-test-key",
     model_id: "test-model",
-    ready_protocols: ["chat"],
   }],
 }));
 vi.mock("../tdai/recorder.js", async (importOriginal) => ({

@@ -58,85 +58,41 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-describe.each(cases)("configuration read failure: %s", (kind) => {
-  it.each(routes)("returns a private-safe 503 without model traffic on %s", async (path) => {
+describe.each(cases)("configuration failure: %s", (kind) => {
+  it.each(routes)("uses the official fallback without exposing errors on %s", async (path) => {
     const diagnostics = [vi.spyOn(console, "error"), vi.spyOn(console, "warn"), vi.spyOn(log, "warn")];
-    const fetchMock = vi.fn(async (input: string | URL | Request) => {
-      expect(String(input)).toBe("https://core.invalid/v3/internal/meta/instance-upstream/list");
-      return failure(kind);
-    });
-    vi.stubGlobal("fetch", fetchMock);
-    const response = await createApp(configuration()).request(`http://proxy${path}`, request());
-    expect(response.status).toBe(503);
-    expect(await response.json()).toEqual({ error: "upstream_config_unavailable" });
-    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const calls: string[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request) => {
+      const url = String(input); calls.push(url);
+      if (url.includes("core.invalid")) return failure(kind);
+      return Response.json({ id: "ok", output: [], content: [], choices: [], usage: {} });
+    }));
+    const config = configuration(); config.creditPricing.models = []; config.costGuard.enabled = false;
+    const response = await createApp(config).request(`http://proxy${path}`, request());
+    expect(response.status).toBe(200);
+    expect(calls.some((url) => url.startsWith("https://deployment.invalid"))).toBe(true);
     expect(JSON.stringify(diagnostics.map((spy) => spy.mock.calls))).not.toContain(PRIVATE);
   });
-
-  it("fails closed for extraction and keeps refresh's existing 502 contract", async () => {
-    const config = configuration();
-    config.auth = { enabled: true, url: "https://auth.invalid", timeoutMs: 1000 };
-    initSystemUsers([{ name: "extractor", userId: "system-test-user", displayName: "Extractor" }]);
-    initAuth(config.auth);
-    const urls: string[] = [];
-    vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request) => {
-      const url = String(input);
-      urls.push(url);
-      if (url.endsWith("/v3/meta/auth/verify")) return Response.json({ code: 0, data: { valid: true, user: { user_id: "system-test-user" } } });
-      expect(url).toBe("https://core.invalid/v3/internal/meta/instance-upstream/list");
-      return failure(kind);
-    }));
-    const app = createApp(config);
-    const response = await app.request("http://proxy/codebuddy/test/v1/chat/completions", request());
-    expect(response.status).toBe(503);
-    expect(await response.json()).toEqual({ error: "upstream_config_unavailable" });
-    const refreshed = await app.request("http://proxy/internal/upstream/refresh", {
-      method: "POST", headers: { "content-type": "application/json", authorization: `Bearer ${PRIVATE}`, "x-tdai-service-id": "test" },
-      body: JSON.stringify({ agent_source: "default", type: "conversation", base_url: "https://supplier.invalid", model_id: "model", credential_ref: "stored" }),
+  it("keeps refresh failures private and explicit", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => failure(kind)));
+    const response = await createApp(configuration()).request("http://proxy/internal/upstream/refresh", {
+      method: "POST", headers: { "content-type": "application/json", authorization: `Bearer ${PRIVATE}`, "x-tdai-service-id": "test" }, body: "{}",
     });
-    expect(refreshed.status).toBe(502);
-    expect(await refreshed.json()).toEqual({ error: "core_unavailable" });
-    expect(urls).toHaveLength(3);
+    expect(response.status).toBe(502);
+    expect(await response.json()).toEqual({ error: "core_unavailable" });
   });
 });
 
-it("never reuses a previous successful configuration after Core becomes unavailable", async () => {
-  const row = { agent_source: "default", type: "conversation", mode: "custom_unified",
-    base_url: "https://supplier.invalid/v1", api_key: "supplier-test-key", model_id: "model", ready_protocols: ["chat"] };
-  const fetchMock = vi.fn().mockResolvedValueOnce(Response.json({ code: 0, data: { items: [row] } }))
-    .mockRejectedValue(new Error(PRIVATE));
+it("uses the last good groups after the 30-second cache expires and Core fails", async () => {
+  const row = { group_id: "main", group_type: "custom", name: "Main", agents: ["codebuddy"], enabled: true,
+    mode: "custom_unified", base_url: "https://supplier.invalid/v1", api_key: "supplier-test-key", model_id: "model" };
+  const fetchMock = vi.fn().mockResolvedValueOnce(Response.json({ code: 0, data: { items: [row] } })).mockRejectedValue(new Error(PRIVATE));
   vi.stubGlobal("fetch", fetchMock);
   const config = configuration();
   expect(await getInstanceUpstreamConfigs(config.coreSkill, "test")).toEqual([row]);
-  const response = await createApp(config).request("http://proxy/codebuddy/test/v1/chat/completions", request());
-  expect(response.status).toBe(503);
-  expect(await response.json()).toEqual({ error: "upstream_config_unavailable" });
+  expect(await getInstanceUpstreamConfigs(config.coreSkill, "test")).toEqual([row]);
+  expect(fetchMock).toHaveBeenCalledTimes(1);
+  const now = Date.now(); vi.spyOn(Date, "now").mockReturnValue(now + 31000);
+  expect(await getInstanceUpstreamConfigs(config.coreSkill, "test")).toEqual([row]);
   expect(fetchMock).toHaveBeenCalledTimes(2);
 });
-
-describe.each(["none", "protocol", "key", "whitespace-key", "legacy-reference", "passthrough", "official", "target", "model"])(
-  "inactive profile: %s", (kind) => {
-    it.each(routes)("rejects before supplier traffic on %s", async (path) => {
-      const row = { agent_source: "default", type: "conversation", mode: "custom_unified",
-        base_url: "https://supplier.invalid/v1", api_key: "supplier-test-key", model_id: "model",
-        credential_ref: "", ready_protocols: ["chat", "anthropic", "responses"] };
-      if (kind === "protocol") row.ready_protocols = [];
-      if (kind === "key" || kind === "legacy-reference") row.api_key = "";
-      if (kind === "whitespace-key") row.api_key = "   ";
-      if (kind === "legacy-reference") row.credential_ref = "deployment_default";
-      if (kind === "passthrough") row.mode = "custom_passthrough";
-      if (kind === "official") row.mode = "official";
-      if (kind === "target") row.base_url = "";
-      if (kind === "model") row.model_id = "";
-      const fetchMock = vi.fn(async (input: string | URL | Request) => {
-        expect(String(input)).toBe("https://core.invalid/v3/internal/meta/instance-upstream/list");
-        return Response.json({ code: 0, data: { items: kind === "none" ? [] : [row] } });
-      });
-      vi.stubGlobal("fetch", fetchMock);
-      const response = await createApp(configuration()).request(`http://proxy${path}`, request());
-      expect(response.status).toBe(503);
-      expect(await response.json()).toEqual({ error: "model_not_configured_or_protocol_unavailable" });
-      expect(fetchMock).toHaveBeenCalledTimes(1);
-    });
-  },
-);

@@ -7,7 +7,7 @@ vi.mock("../instance-upstream-cache.js", async (importOriginal) => {
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { initAuth } from "../auth.js";
-import { extractCodexSessionId } from "../codexHandler.js";
+import { extractCodexSessionId } from "../pipeline/runners/codex.js";
 import { DEFAULT_CONFIG } from "../config.js";
 import { createConfiguredApp as createApp } from "./fixtures/active-profiles.js";
 import {
@@ -15,7 +15,7 @@ import {
   getSessionStore,
   sessionStoreKey,
 } from "../session/store.js";
-import { extractWorkbuddySessionId } from "../workbuddyHandler.js";
+import { extractWorkbuddySessionId } from "../pipeline/runners/workbuddy.js";
 
 afterEach(() => {
   initAuth(DEFAULT_CONFIG.auth);
@@ -27,9 +27,22 @@ afterEach(() => {
 describe("Responses session binding and DSH legacy route", () => {
   it("prefers the explicit Codex conversation binding over the SDK session", () => {
     expect(extractCodexSessionId(
-      { "x-conversation-id": "explicit-session", "session-id": "sdk-session" },
+      { "x-conversation-id": "explicit-session", "x-parent-conversation-id": "parent-session", "session-id": "sdk-session" },
       { client_metadata: { session_id: "body-session" } },
     )).toBe("explicit-session");
+  });
+
+  it("prefers the Codex parent conversation over client session IDs", () => {
+    expect(extractCodexSessionId(
+      { "x-parent-conversation-id": "parent-session", "session-id": "sdk-session" },
+      { client_metadata: { session_id: "body-session" } },
+    )).toBe("parent-session");
+  });
+
+  it("uses the Codex client session when explicit and parent bindings are absent", () => {
+    expect(extractCodexSessionId(
+      { "session-id": "sdk-session" }, { client_metadata: { session_id: "body-session" } },
+    )).toBe("sdk-session");
   });
 
   it("prefers the explicit WorkBuddy conversation binding over the SDK session", () => {

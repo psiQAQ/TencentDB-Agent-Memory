@@ -172,7 +172,13 @@ build_image() {
 # 抽查镜像文件系统里有没有混进敏感文件
 spot_check() {
   local image="$1" cid
-  cid=$(docker create "$image")
+  cid=$(docker create \
+    --name "tdai-tmp-image-inspection-$(date -u +%Y%m%dT%H%M%S)-$$" \
+    --label com.tencentdb-agent-memory.owner=memory-assist \
+    --label com.tencentdb-agent-memory.lifecycle=temporary \
+    --label com.tencentdb-agent-memory.purpose=image-filesystem-inspection \
+    --label com.tencentdb-agent-memory.cleanup-after=inspection-complete \
+    "$image")
   # shellcheck disable=SC2064
   trap "docker rm -f '$cid' >/dev/null 2>&1 || true" RETURN
   if docker export "$cid" | tar -t 2>/dev/null \

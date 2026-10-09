@@ -17,6 +17,7 @@ vi.mock("../credit-reporter.js", async (importOriginal) => {
   return { ...original, tryReportCreditFromPath };
 });
 
+import { getInstanceUpstreamConfigs } from "../instance-upstream-cache.js";
 import { initAuth } from "../auth.js";
 import { DEFAULT_CONFIG } from "../config.js";
 import { log } from "../report/log.js";
@@ -114,7 +115,9 @@ describe("auxiliary diagnostic privacy", () => {
     const value = config();
     initAuth(value.auth);
 
-    const response = await createApp(value).request(
+    const app = createApp(value);
+    vi.mocked(getInstanceUpstreamConfigs).mockResolvedValue([]);
+    const response = await app.request(
       `http://proxy/claude-code/${PRIVATE_VALUE}/v1/messages/count_tokens`,
       request(),
     );

@@ -29,7 +29,7 @@ import {
   internalSkillTransferOwnerSchema,
   internalListUsersByInstanceSchema,
   initAdminSchema,
-  instanceUpstreamListSchema,
+  instanceUpstreamInternalListSchema,
 } from "./v3-meta-schemas.js";
 import {
   createMetaApiTraceContext,
@@ -51,6 +51,15 @@ export interface InternalMetaRouterDeps {
   getMetadataService: (instanceId: string) => MetadataService | undefined | Promise<MetadataService | undefined>;
   getSkillCore: (instanceId: string) => SkillCore | undefined | Promise<SkillCore | undefined>;
   logger: Logger;
+  /**
+   * v2 InstanceUpstream:Proxy 拉数据时会触发 seed default 组,seed 逻辑依赖 supported-agents 数据源。
+   * 与 v3-meta-router 的 deps.getSupportedAgents 是同一份数据(Core 启动时从 gateway yaml 读)。
+   */
+  getSupportedAgents: () => import("../types.js").SupportedAgent[];
+}
+
+interface InternalRuntimeDeps {
+  getSupportedAgents: () => import("../types.js").SupportedAgent[];
 }
 
 type InternalHandler = (
@@ -142,13 +151,15 @@ const routeTable: Record<string, InternalHandler> = {
       return { ok: true };
     },
   ),
+  // §6.D:Proxy 拉全量配置(明文 api_key),同时触发 seed default 组。
   [`${V3_INTERNAL_PREFIX}/instance-upstream/list`]: bind(
-    instanceUpstreamListSchema,
-    async (_d, svc) => svc.listActiveUpstreamProfilesInternal(),
+    instanceUpstreamInternalListSchema,
+    async (_d, svc, _instanceId, runtime) =>
+      svc.listInstanceUpstreamGroupsInternal(runtime.getSupportedAgents()),
   ),
   [`${V3_INTERNAL_PREFIX}/instance-upstream/model`]: bind(
-    instanceUpstreamListSchema,
-    async (_d, svc) => svc.getActiveConversationModelInternal(),
+    instanceUpstreamInternalListSchema,
+    async (_d, svc, _instanceId, deps) => svc.getConversationModelsInternal(deps.getSupportedAgents()),
   ),
 };
 

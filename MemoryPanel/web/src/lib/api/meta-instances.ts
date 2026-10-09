@@ -19,6 +19,7 @@ export interface MetadataInstance {
   proxy_endpoint?: string;
   /** Proxy 当前实际转发使用的模型 ID；公开配置，不含凭据。 */
   upstream_model?: string;
+  upstream_models?: Record<string, string | null>;
 }
 
 /** 面板级能力开关（随实例列表顺带下发，用于菜单/路由可见性控制）。 */

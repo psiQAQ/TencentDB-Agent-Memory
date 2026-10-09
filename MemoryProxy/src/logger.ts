@@ -108,6 +108,8 @@ export function writeLog(config: ProxyConfig, entry: LogEntry): void {
         "upstreamRequestId" in entry ? entry.upstreamRequestId : undefined,
       extensionStats:
         "extensionStats" in entry ? entry.extensionStats : undefined,
+      requestReceivedAt:
+        "requestReceivedAt" in entry ? entry.requestReceivedAt : undefined,
       pricingConfig: config.creditPricing,
     });
   }
@@ -165,8 +167,14 @@ export interface Pipeline {
   requestReceived(msgCount: number, isStream: boolean): void;
   /** Forwarding to upstream started. */
   forwardStart(upstreamUrl?: string): void;
-  /** Upstream responded (initial response received). */
-  forwardDone(status: number): void;
+  /**
+   * Upstream responded (initial response received).
+   *
+   * `upstreamRequestId` is the upstream's `x-request-id`. Passing it here is
+   * what lets a proxy.log line be joined to the upstream's own logs — the
+   * structured sink never saw that id before, only JSONL/ClickHouse did.
+   */
+  forwardDone(status: number, upstreamRequestId?: string): void;
   /** Streaming response being forwarded to client. */
   streamStart(): void;
   /** Stream fully consumed, usage extracted. */
@@ -179,6 +187,22 @@ export interface Pipeline {
   error(stage: string, err: unknown): void;
   /** Complete pipeline summary. */
   summary(): void;
+  /**
+   * Correlation ids for this request, for sinks that log outside the pipeline
+   * (credit reporting, rate limiting). `upstreamRequestId` is only populated
+   * after `forwardDone`.
+   */
+  ids(): PipelineIds;
+}
+
+/** Correlation ids carried by one request through every log sink. */
+export interface PipelineIds {
+  /** Short `[xxxxxxxx]` tag used by the console pipeline lines. */
+  requestId: string;
+  /** Full internal trace id — the same value Opik / Langfuse traces use. */
+  traceId: string;
+  /** Upstream `x-request-id`; empty until the upstream responds. */
+  upstreamRequestId: string;
 }
 
 const SAFE_PIPELINE_STAGES = new Set([
@@ -225,6 +249,12 @@ export function createPipeline(
   const stages: string[] = [];
   let forwardMs = 0;
   let forwardStartMs = 0;
+  let upstreamRequestId = "";
+
+  /** Correlation fields stamped onto every structured line this pipeline emits. */
+  function ids(): PipelineIds {
+    return { requestId: tag, traceId: requestId, upstreamRequestId };
+  }
 
   function pipeLog(stage: string, detail: string): void {
     // Also write to stderr for real-time tail observation
@@ -248,13 +278,15 @@ export function createPipeline(
       pipeLog("  → FORWARD", `upstream_configured=${url.length > 0}`);
     },
 
-    forwardDone(status) {
+    forwardDone(status, respRequestId) {
       forwardMs = Date.now() - forwardStartMs;
+      if (respRequestId) upstreamRequestId = respRequestId;
+      log.debug("pipeline.forward.done", { ...ids(), status, forwardMs });
       pipeLog("  ← FORWARD", `status=${status} ${forwardMs}ms`);
     },
 
     streamStart() {
-      log.debug("pipeline.stream.start", { requestId: tag });
+      log.debug("pipeline.stream.start", { ...ids() });
       pipeLog("  ⇄ STREAM", "forwarding to client...");
     },
 
@@ -299,5 +331,7 @@ export function createPipeline(
       });
       pipeLog("  SUMMARY", `path=[${path}] total=${total} forward=${forwardMs}ms`);
     },
+
+    ids,
   };
 }

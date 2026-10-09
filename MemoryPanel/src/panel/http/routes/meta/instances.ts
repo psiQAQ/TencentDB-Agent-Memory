@@ -17,9 +17,12 @@ export function registerMetaInstanceRoutes(api: Hono, deps: PanelDeps): void {
             'content-type': 'application/json' }, body: '{}',
         });
         if (!response.ok) return publicEntry;
-        const json = await response.json() as { data?: { model_id?: string | null } };
-        const model = json.data?.model_id;
-        return model ? { ...publicEntry, upstream_model: model } : publicEntry;
+        const json = await response.json() as { data?: { model_id?: string | null; model_ids?: Record<string, string | null>; official_agents?: string[] } };
+        const models = { ...json.data?.model_ids };
+        for (const agent of json.data?.official_agents ?? []) models[agent] = _configuredModel ?? null;
+        const unique = [...new Set(Object.values(models))];
+        const model = unique.length === 1 ? unique[0] : json.data?.model_id;
+        return { ...publicEntry, ...(model ? { upstream_model: model } : {}), upstream_models: models };
       } catch { return publicEntry; }
     }));
     return c.json({

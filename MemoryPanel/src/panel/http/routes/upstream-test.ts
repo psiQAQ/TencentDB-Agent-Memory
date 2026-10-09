@@ -10,19 +10,11 @@ const input = z.object({
   type: z.enum(['conversation', 'extraction']),
   base_url: z.string().max(2048),
   model_id: z.string().trim().min(1).max(200),
-  credential_ref: z.literal('deployment_default').optional(),
-  api_key: z.string().trim().min(1).max(4096).optional(),
+  api_key: z.string().trim().min(1).max(4096),
   local: z.boolean().optional(),
   protocols: z.array(z.enum(['chat', 'responses', 'anthropic'])).min(1).max(3).optional(),
-}).refine((value) => Boolean(value.credential_ref) !== Boolean(value.api_key))
-  .refine((value) => !value.local || Boolean(value.api_key));
-const refreshInput = z.object({
-  agent_source: z.literal('default'),
-  type: z.enum(['conversation', 'extraction']),
-  base_url: z.string().max(2048),
-  model_id: z.string().max(200),
-  credential_ref: z.enum(['deployment_default', 'stored', 'none']),
-}).refine((value) => value.credential_ref === 'none' || value.model_id.trim().length > 0);
+});
+const refreshInput = z.object({});
 
 interface ProbeResult { protocol: string; status: string; httpStatus?: number }
 

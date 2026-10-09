@@ -8,7 +8,7 @@ import { Hono } from "hono";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { AnthropicMessageSource } from "../agent-adapters/anthropic-platform.js";
-import { handleAuxiliaryEndpoint } from "../auxiliaryHandler.js";
+import { runUtilityPipeline } from "../pipeline/runners/utility.js";
 import { initAuth } from "../auth.js";
 import { DEFAULT_CONFIG } from "../config.js";
 import { createConfiguredApp as createApp } from "./fixtures/active-profiles.js";
@@ -75,7 +75,6 @@ describe("route-bound Anthropic count_tokens", () => {
     expect(calls.map((call) => call.url)).toEqual([
       "https://auth.invalid/v3/meta/auth/verify",
       `https://${source}.upstream.invalid/anthropic/v1/messages/count_tokens`,
-      "https://credit.invalid/report",
     ]);
     const forwarded = calls.find((call) => call.url === `https://${source}.upstream.invalid/anthropic/v1/messages/count_tokens`);
     expect(forwarded).toBeDefined();
@@ -196,7 +195,7 @@ describe("route-bound Anthropic count_tokens", () => {
     initAuth(config.auth);
     const app = new Hono();
     app.post("/opencode/:spaceId/v1/messages/count_tokens", (c) =>
-      handleAuxiliaryEndpoint(c, config));
+      runUtilityPipeline(c, config));
 
     const response = await app.request(
       "http://proxy/opencode/space-1/v1/messages/count_tokens",
@@ -212,7 +211,7 @@ describe("route-bound Anthropic count_tokens", () => {
     initAuth(config.auth);
     const app = new Hono();
     app.post("/opencode/:spaceId/v1/messages/count_tokens", (c) =>
-      handleAuxiliaryEndpoint(c, config, "pi" as AnthropicMessageSource));
+      runUtilityPipeline(c, config, "pi" as AnthropicMessageSource));
 
     const response = await app.request(
       "http://proxy/opencode/space-1/v1/messages/count_tokens",

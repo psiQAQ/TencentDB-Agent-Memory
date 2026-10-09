@@ -52,7 +52,7 @@ export default function ApiKeyPanel() {
   const [keys, setKeys] = useState<ManagedUserKey[]>([]);
   const [loading, setLoading] = useState(true);
   const [clientBaseUrl, setClientBaseUrl] = useState<string | null>(null);
-  const [clientUpstreamModel, setClientUpstreamModel] = useState<string | null>(null);
+  const [clientUpstreamModel, setClientUpstreamModel] = useState<string | Record<string, string | null> | null>(null);
   const [showCreate, setShowCreate] = useState(false);
   const [newKeyName, setNewKeyName] = useState('');
   const [newExpiresAt, setNewExpiresAt] = useState<Moment | null>(null);
@@ -72,7 +72,7 @@ export default function ApiKeyPanel() {
         if (cancelled) return;
         const hit = list.find((instance) => instance.instance_id === auth.instance_id);
         setClientBaseUrl(hit?.proxy_endpoint ?? hit?.gateway_endpoint ?? null);
-        setClientUpstreamModel(hit?.upstream_model ?? null);
+        setClientUpstreamModel(hit?.upstream_models ?? hit?.upstream_model ?? null);
       })
       .catch(() => {
         if (!cancelled) {
@@ -308,7 +308,7 @@ export default function ApiKeyPanel() {
               {clientUpstreamModel && (
                 <>
                   <span style={{ marginLeft: 12 }}>{t('apiKey.endpoint.model')}</span>
-                  <code>{clientUpstreamModel}</code>
+                  <code>{typeof clientUpstreamModel === 'string' ? clientUpstreamModel : '按客户端模型组生成'}</code>
                 </>
               )}
             </div>
@@ -318,7 +318,7 @@ export default function ApiKeyPanel() {
               <Text theme="weak" style={{ fontSize: 11 }}>
                 {t('apiKey.endpoint.loading')}
               </Text>
-            ) : !clientUpstreamModel ? (
+            ) : !clientAccessConfigs.length ? (
               <Alert type="warning">{t('apiKey.endpoint.modelMissing')}</Alert>
             ) : (
               clientAccessConfigs.map((config) => (

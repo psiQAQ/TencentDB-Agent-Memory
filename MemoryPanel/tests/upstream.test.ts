@@ -10,7 +10,7 @@ const proxyFetch = vi.fn();
 let app: Hono;
 const draft = {
   agent_source: 'default', type: 'conversation', base_url: 'https://api.deepseek.com',
-  model_id: 'deepseek-v4-flash', credential_ref: 'deployment_default',
+  model_id: 'deepseek-v4-flash', api_key: 'model-secret',
 };
 const call = (body: unknown = draft, action = 'test') => app.request('/meta/instance-upstream/' + action, {
   method: 'POST',
@@ -35,7 +35,7 @@ beforeEach(() => {
 });
 afterEach(() => { vi.unstubAllGlobals(); vi.unstubAllEnvs(); });
 
-it('delegates a bounded draft probe to Proxy without a supplier key in the body', async () => {
+it('delegates an independent model credential only to the protected Proxy probe', async () => {
   const response = await call();
   expect(response.status).toBe(200);
   const [url, init] = proxyFetch.mock.calls[0];
@@ -43,6 +43,8 @@ it('delegates a bounded draft probe to Proxy without a supplier key in the body'
   expect(init.headers.authorization).toBe('Bearer gateway-secret');
   expect(init.headers['x-tdai-service-id']).toBe('a');
   expect(JSON.parse(init.body).protocols).toEqual(['chat', 'responses', 'anthropic']);
+  expect(JSON.parse(init.body).api_key).toBe('model-secret');
+  expect(JSON.stringify(await response.clone().json())).not.toContain('model-secret');
   expect(JSON.stringify(init.body)).not.toContain('gateway-secret');
   expect(JSON.stringify(await response.json())).not.toContain('gateway-secret');
 });
@@ -83,23 +85,11 @@ it('requests an authenticated Proxy refresh and relays the adoption result', asy
   expect((await response.json()).data.adopted).toBe(true);
 });
 
-it('checks adoption of a stored independent credential without sending it again', async () => {
+it('refreshes model groups without resending credentials', async () => {
   proxyFetch.mockResolvedValueOnce(Response.json({ adopted: true }));
-  const response = await call({
-    agent_source: 'default', type: 'conversation', base_url: 'https://api.openai.com/v1',
-    model_id: 'gpt-5.6-sol', credential_ref: 'stored',
-  }, 'refresh');
+  const response = await call({}, 'refresh');
   expect(response.status).toBe(200);
-  expect(JSON.parse(proxyFetch.mock.calls[0][1].body).credential_ref).toBe('stored');
-});
-
-it('allows a reset refresh with no model or endpoint', async () => {
-  proxyFetch.mockResolvedValueOnce(Response.json({ adopted: true }));
-  const response = await call({
-    agent_source: 'default', type: 'extraction', base_url: '', model_id: '', credential_ref: 'none',
-  }, 'refresh');
-  expect(response.status).toBe(200);
-  expect((await response.json()).data.adopted).toBe(true);
+  expect(JSON.parse(proxyFetch.mock.calls[0][1].body)).toEqual({});
 });
 
 it('blocks a non-admin caller before making a Proxy request', async () => {
@@ -108,7 +98,7 @@ it('blocks a non-admin caller before making a Proxy request', async () => {
   expect(proxyFetch).not.toHaveBeenCalled();
 });
 
-it.each([{ ...draft, credential_ref: 'other' }, { ...draft, agent_source: 'pi' }, { ...draft, model_id: '' }])(
+it.each([{ ...draft, api_key: undefined }, { ...draft, agent_source: 'pi' }, { ...draft, model_id: '' }])(
   'rejects an unsupported draft without a Proxy request', async (body) => {
     expect((await call(body)).status).toBe(400);
     expect(proxyFetch).not.toHaveBeenCalled();
@@ -121,7 +111,7 @@ it('fails clearly when the local Proxy probe endpoint is unavailable', async () 
   expect(proxyFetch).not.toHaveBeenCalled();
 });
 
-it.each(['list', 'set', 'reset', 'get-for-edit'])('forwards Core %s under the caller identity', async (action) => {
+it.each(['groups/list', 'groups/create', 'groups/update', 'groups/delete', 'groups/toggle', 'extraction/get', 'extraction/create', 'extraction/update', 'extraction/toggle', 'extraction/delete'])('forwards Core %s under the caller identity', async (action) => {
   invoke.mockResolvedValue({ code: 0, data: { items: [] } });
   const response = await call({ agent_source: 'default', type: 'conversation' }, action);
   expect(response.status).toBe(200);

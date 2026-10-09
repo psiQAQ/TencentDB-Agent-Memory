@@ -283,6 +283,7 @@ export function GuidePage() {
   const [manualOpen, setManualOpen] = useState(false);
   const [manualIdeId, setManualIdeId] = useState<ManualIdeId>('claude');
   const [modelId, setModelId] = useState('');
+  const [groupModels, setGroupModels] = useState<Record<string, string | null>>({});
 
   useEffect(() => {
     const session = getPanelSession();
@@ -297,6 +298,7 @@ export function GuidePage() {
         if (current) {
           setInstanceId(current.instance_id);
           setProxyBase((current.proxy_endpoint || fallback).replace(/\/$/, ''));
+          setGroupModels(current.upstream_models ?? {});
           setModelId(current.upstream_model ?? '');
           setUrlHint(
             current.proxy_endpoint
@@ -326,9 +328,11 @@ export function GuidePage() {
 
   const manualIde = MANUAL_IDES.find((item) => item.id === manualIdeId) ?? MANUAL_IDES[0];
   const proxyFallback = t('guide.proxyFallback');
+  const assignedModel = groupModels[manualIdeId === 'claude' ? 'claude-code' : manualIdeId];
+  const selectedModel = assignedModel === undefined ? modelId : assignedModel ?? '';
   const manualConfig = useMemo(
-    () => modelId ? manualIde.config(proxyBase || proxyFallback, instanceId, proxyMode, modelId) : '',
-    [manualIde, modelId, proxyBase, proxyMode, instanceId, proxyFallback],
+    () => selectedModel ? manualIde.config(proxyBase || proxyFallback, instanceId, proxyMode, selectedModel) : '',
+    [manualIde, selectedModel, proxyBase, proxyMode, instanceId, proxyFallback],
   );
   const practiceSteps = PRACTICE_STEPS[practice];
   const activePracticeStep = practiceSteps[practiceStep] ?? practiceSteps[0];
@@ -552,8 +556,8 @@ export function GuidePage() {
                     <label>
                       <b>{t('guide.manual.model')}</b>
                       <input
-                        value={modelId}
-                        onChange={(event) => setModelId(event.target.value.toLowerCase())}
+                        value={selectedModel}
+                        onChange={(event) => setGroupModels({ ...groupModels, [manualIdeId === 'claude' ? 'claude-code' : manualIdeId]: event.target.value })}
                       />
                       <small>{t('guide.manual.modelHint')}</small>
                     </label>

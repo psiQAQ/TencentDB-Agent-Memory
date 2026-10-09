@@ -20,8 +20,8 @@ vi.mock("../guard-adapter.js", async (importOriginal) => {
 import { initAuth } from "../auth.js";
 import { DEFAULT_CONFIG } from "../config.js";
 import { resolveForwardTarget, type ForwardTarget } from "../guard-adapter.js";
-import { handleAuxiliaryEndpoint } from "../auxiliaryHandler.js";
-import { handleChatCompletions } from "../handler.js";
+import { runUtilityPipeline } from "../pipeline/runners/utility.js";
+import { runOpenaiChatPipeline } from "../pipeline/runners/openai-chat.js";
 import { createConfiguredApp as createApp } from "./fixtures/active-profiles.js";
 
 const configuredOrigin = "https://configured.invalid";
@@ -200,7 +200,7 @@ describe("OpenAI upstream header privacy", () => {
   it.each([
     "/proxy/space-1/v1/chat/completions",
     "/v1/chat/completions",
-  ])("requires an active instance on the source-less OpenAI route %s", async (path) => {
+  ])("uses configured groups or official fallback on the source-less OpenAI route %s", async (path) => {
     const value = config();
     initAuth(value.auth);
     const response = await createApp(value).request(
@@ -208,12 +208,6 @@ describe("OpenAI upstream header privacy", () => {
       { method: "POST", headers: privateHeaders(), body: requestBody() },
     );
 
-    if (path.startsWith("/v1/")) {
-      expect(response.status).toBe(503);
-      expect(await response.json()).toEqual({ error: "model_not_configured_or_protocol_unavailable" });
-      expect(upstreamHeaders).toEqual([]);
-      return;
-    }
     expect(response.status).toBe(200);
     expect(upstreamHeaders).toHaveLength(1);
     assertSafe(upstreamHeaders[0]!, "Bearer server-global-key");
@@ -242,7 +236,7 @@ describe("OpenAI upstream header privacy", () => {
     initAuth(value.auth);
     const app = new Hono();
     app.post("/codebuddy/:spaceId/v1/chat/completions", (c) =>
-      handleChatCompletions(c, value),
+      runOpenaiChatPipeline(c, value),
     );
 
     const response = await app.request(
@@ -260,7 +254,7 @@ describe("OpenAI upstream header privacy", () => {
     initAuth(value.auth);
     const app = new Hono();
     app.post("/cursor/:spaceId/v1/chat/completions", (c) =>
-      handleChatCompletions(c, value, "codebuddy"),
+      runOpenaiChatPipeline(c, value, "codebuddy"),
     );
 
     const response = await app.request(
@@ -275,7 +269,6 @@ describe("OpenAI upstream header privacy", () => {
 
   it.each([
     "/v1/responses",
-    "/proxy/space-1/v1/responses",
     "/unknown/space-1/v1/responses",
   ])("rejects the non-whitelisted catch-all endpoint %s before auth or body parsing", async (path) => {
     const value = config();
@@ -300,7 +293,7 @@ describe("OpenAI upstream header privacy", () => {
     "/codebuddy/space-1/v1/moderations",
     "/opencode/space-1/v1/embeddings",
     "/pi/space-1/v1/completions",
-  ])("requires an active instance on the OpenAI auxiliary route %s", async (path) => {
+  ])("uses configured groups or official fallback on the OpenAI auxiliary route %s", async (path) => {
     const value = config();
     initAuth(value.auth);
 
@@ -309,12 +302,6 @@ describe("OpenAI upstream header privacy", () => {
       { method: "POST", headers: privateHeaders(), body: requestBody() },
     );
 
-    if (path.startsWith("/v1/")) {
-      expect(response.status).toBe(503);
-      expect(await response.json()).toEqual({ error: "model_not_configured_or_protocol_unavailable" });
-      expect(upstreamUrls).toEqual([]);
-      return;
-    }
     expect(response.status).toBe(200);
     expect(upstreamUrls).toHaveLength(1);
     assertSafe(upstreamHeaders[0]!, "Bearer server-global-key");
@@ -347,7 +334,7 @@ describe("OpenAI upstream header privacy", () => {
     const bodyRead = vi.spyOn(Request.prototype, "arrayBuffer");
     const app = new Hono();
     app.post("/claude-code/:spaceId/v1/embeddings", (c) =>
-      handleAuxiliaryEndpoint(c, value, "claude-code"));
+      runUtilityPipeline(c, value, "claude-code"));
 
     const response = await app.request(
       "http://proxy/claude-code/space-1/v1/embeddings",

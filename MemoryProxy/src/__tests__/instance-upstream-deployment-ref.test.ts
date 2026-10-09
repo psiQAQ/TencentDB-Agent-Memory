@@ -1,9 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import { DEFAULT_CONFIG } from '../config.js';
-import { resolveInstanceCredential, resolveInstanceTargetUrl, type InstanceUpstreamConfigEntry } from '../instance-upstream-cache.js';
+import { resolveInstanceTargetUrl } from '../instance-upstream-cache.js';
 import { createApp } from '../server.js';
 
-const configured: InstanceUpstreamConfigEntry = {
+const configured = {
   agent_source: 'default', type: 'conversation', mode: 'custom_unified',
   base_url: 'https://api.deepseek.com', api_key: '', credential_ref: 'deployment_default',
   model_id: 'deepseek-v4-flash',
@@ -16,27 +16,11 @@ const config = {
   coreSkill: { ...DEFAULT_CONFIG.coreSkill, serviceToken: 'service-secret' },
 };
 
-describe('deployment upstream reference', () => {
-  it('resolves the deployment credential only for the same HTTPS origin', () => {
-    expect(resolveInstanceCredential(configured, config)).toBe('deployment-secret');
-    expect(resolveInstanceCredential(configured, config, 'claude-code')).toBe('deployment-secret');
-    expect(resolveInstanceCredential({ ...configured, base_url: 'https://elsewhere.example' }, config)).toBeNull();
-    expect(resolveInstanceCredential({ ...configured, base_url: 'http://api.deepseek.com' }, config)).toBeNull();
-    expect(resolveInstanceCredential({ ...configured, base_url: 'https://user:pass@api.deepseek.com' }, config)).toBeNull();
-  });
-
+describe('independent upstream probe credential', () => {
   it('uses DeepSeek protocol endpoints behind one default conversation row', () => {
     expect(resolveInstanceTargetUrl(configured, 'https://api.deepseek.com/v1/chat/completions')).toBe('https://api.deepseek.com/chat/completions');
     expect(resolveInstanceTargetUrl(configured, 'https://api.deepseek.com/v1/responses')).toBe('https://api.deepseek.com/responses');
     expect(resolveInstanceTargetUrl(configured, 'https://api.deepseek.com/v1/messages')).toBe('https://api.deepseek.com/anthropic/v1/messages');
-  });
-
-  it('uses an independent key for its configured address and never substitutes the deployment key', () => {
-    const independent = { ...configured, base_url: 'http://192.168.1.20:11434/v1', api_key: 'local-secret', credential_ref: '' };
-    expect(resolveInstanceCredential(independent, config)).toBe('local-secret');
-    expect(resolveInstanceCredential({ ...independent, api_key: '' }, config)).toBeNull();
-    expect(resolveInstanceTargetUrl({ ...independent, base_url: 'https://api.deepseek.com/v1' },
-      'https://api.deepseek.com/v1/messages')).toBe('https://api.deepseek.com/anthropic/v1/messages');
   });
 
   it('requires an independent key and a private host for a local probe', async () => {
@@ -70,7 +54,7 @@ describe('deployment upstream reference', () => {
       'content-type': 'application/json', 'x-tdai-service-id': 'probe-b', authorization: 'Bearer service-secret',
     } });
     expect(denied.status).toBe(400);
-    expect((await denied.json()).error).toBe('non_public_target');
+    expect((await denied.json()).error).toBe('invalid_input');
   });
 
   it('protects the cache refresh endpoint with the service token', async () => {

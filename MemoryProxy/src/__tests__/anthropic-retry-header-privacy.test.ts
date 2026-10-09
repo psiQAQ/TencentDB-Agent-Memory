@@ -132,7 +132,7 @@ describe("Anthropic retry header privacy", () => {
     expect(response.status).toBe(200);
     expect(upstreamHeaders).toHaveLength(2);
     expect(upstreamUrls).toEqual([
-      "https://primary.invalid/messages",
+      "https://primary.invalid/v1/messages",
       "https://retry.invalid/messages",
     ]);
     expect(upstreamHeaders[0]?.get("x-api-key")).toBe("server-primary-key");
@@ -288,7 +288,7 @@ describe("Anthropic retry header privacy", () => {
 
     expect(response.status).toBe(200);
     expect(upstreamUrls).toEqual([
-      "https://primary.invalid/messages",
+      "https://primary.invalid/v1/messages",
       "https://primary.invalid/retry/messages",
     ]);
     expect(upstreamHeaders[1]?.get("x-api-key")).toBe("server-primary-key");
@@ -312,7 +312,7 @@ describe("Anthropic retry header privacy", () => {
       body: JSON.stringify({ model: "test-model", messages: [{ role: "user", content: "hello" }], max_tokens: 32 }),
     });
     expect(response.status).toBe(401);
-    expect(upstreamUrls).toEqual(["https://selected.invalid/messages"]);
+    expect(upstreamUrls).toEqual(["https://selected.invalid/v1/messages"]);
     expect(upstreamHeaders[0]?.get("x-api-key")).toBe("selected-profile-key");
     expect([...upstreamHeaders[0]!.values()]).not.toContain("another-destination-key");
     expect([...upstreamHeaders[0]!.values()]).not.toContain("caller-key");

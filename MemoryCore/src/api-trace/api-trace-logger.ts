@@ -4,6 +4,7 @@
 import { getApiRequestContext } from "./api-request-context.js";
 import { getApiTraceConfig, isApiTraceActive } from "./api-log-config.js";
 import { buildStdoutPayload, writeApiTraceStdout } from "./api-trace-stdout.js";
+import { sanitizeApiPayload } from "./api-sanitize.js";
 
 export type ApiTraceLayer = "http" | "service" | "store" | "db" | "remote";
 export type ApiTraceLevel = "info" | "warn" | "error";
@@ -42,7 +43,8 @@ export function logApiTrace(
     if (ctx?.internal) merged.internal = true;
 
     const levelUpper = level.toUpperCase();
-    const payload = buildStdoutPayload(levelUpper, event, cfg.policy.profile, merged);
+    const safeAttrs = sanitizeApiPayload(merged, cfg.policy.maxFieldChars) as Record<string, string | number | boolean>;
+    const payload = buildStdoutPayload(levelUpper, event, cfg.policy.profile, safeAttrs);
     writeApiTraceStdout(payload);
   } catch {
     // 静默失败
