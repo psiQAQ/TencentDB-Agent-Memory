@@ -9,6 +9,7 @@
 
 import type { IStorageBackend, StorageBackendConfig, StorageLogger } from "./types.js";
 import { LocalStorageBackend } from "./local-backend.js";
+import { loadCosIntegration } from "./cos-integration.js";
 
 const TAG = "[storage][factory]";
 
@@ -31,11 +32,9 @@ export async function createStorageBackend(
         throw new Error(`${TAG} COS backend requires a credentialProvider`);
       }
 
-      let CosStorageBackendCtor: typeof import("../../integrations/cos/cos-backend.js").CosStorageBackend;
+      let CosStorageBackendCtor: Awaited<ReturnType<typeof loadCosIntegration>>["CosStorageBackend"];
       try {
-        ({ CosStorageBackend: CosStorageBackendCtor } = await import(
-          "../../integrations/cos/cos-backend.js"
-        ));
+        ({ CosStorageBackend: CosStorageBackendCtor } = await loadCosIntegration());
       } catch (err) {
         throw new Error(
           `${TAG} COS backend is not available in this build; ` +

@@ -14,7 +14,6 @@ import fsSync from "node:fs";
 import path from "node:path";
 import os from "node:os";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import type { OpenClawPluginApi } from "openclaw/plugin-sdk/core";
 import { getEnv } from "./env.js";
 import { report } from "../core/report/reporter.js";
 import type { Logger } from "../core/types.js";
@@ -52,12 +51,33 @@ const TAG = "[memory-tdai] [runner]";
 
 type RunnerLogger = Logger;
 
-// Dynamic import type — runEmbeddedPiAgent is an internal API
-// Prefer the public plugin runtime signature so host-injected runtimes stay assignable.
-type RunEmbeddedPiAgentFn = OpenClawPluginApi["runtime"]["agent"]["runEmbeddedPiAgent"];
+// Internal capability: older public SDKs do not expose runtime.agent.
+// Keep the consumed call contract here for injected and dist-loaded runners.
+type RunEmbeddedPiAgentFn = (params: {
+  sessionId: string;
+  sessionFile: string;
+  workspaceDir: string;
+  config: unknown;
+  prompt: string;
+  timeoutMs: number;
+  runId: string;
+  provider?: string;
+  model?: string;
+  disableTools: boolean;
+  extraSystemPrompt: string;
+  streamParams: { maxTokens?: number };
+}) => Promise<unknown>;
 
 export interface EmbeddedAgentRuntimeLike {
   runEmbeddedPiAgent?: RunEmbeddedPiAgentFn;
+}
+
+export function getEmbeddedAgentRuntime(runtime: unknown): EmbeddedAgentRuntimeLike | undefined {
+  if (!runtime || typeof runtime !== "object" || !("agent" in runtime)) return undefined;
+  const agent = runtime.agent;
+  if (!agent || typeof agent !== "object" || !("runEmbeddedPiAgent" in agent)) return undefined;
+  if (typeof agent.runEmbeddedPiAgent !== "function") return undefined;
+  return agent as EmbeddedAgentRuntimeLike;
 }
 
 let _preferredAgentRuntime: EmbeddedAgentRuntimeLike | undefined;

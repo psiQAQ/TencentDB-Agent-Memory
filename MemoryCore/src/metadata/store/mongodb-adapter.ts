@@ -85,7 +85,7 @@ import type {
 import { DEFAULT_GROUP_NAME, InstanceUpstreamWriteConflictError } from "../types.js";
 import { DEFAULT_PAGINATION } from "../pagination.js";
 import { buildChatMemoryAssetId } from "../utils/chat-memory-asset.js";
-import { DuplicateUserKeyError, LifecycleTransactionsRequiredError } from "./interface.js";
+import { DuplicateUserKeyError, LifecycleTransactionsRequiredError, type IMetadataStore } from "./interface.js";
 
 function nowIso(): string {
   return new Date().toISOString();
@@ -524,11 +524,12 @@ export class MongoMetadataStore implements IMetadataStore {
     const now = nowIso();
     const defaultKeyValue = input.default_key_value ?? generateUserKey();
     for (let attempt = 0; attempt < PK_RETRY_LIMIT; attempt++) {
+      const userId = input.user_id ?? generateId(ID_PREFIX.user);
       const doc: UserEntity = {
-        user_id: input.user_id ?? generateId(ID_PREFIX.user),
+        user_id: userId,
         password: input.password ?? null,
-        auth_provider: input.auth_provider,
-        external_id: input.external_id,
+        auth_provider: input.auth_provider ?? "local",
+        external_id: input.external_id ?? userId,
         username: input.username,
         display_name: input.display_name ?? null,
         raw_profile_json: input.raw_profile_json ?? "{}",
@@ -2025,7 +2026,7 @@ export class MongoMetadataStore implements IMetadataStore {
     // 类型过滤：先按 asset_type 拿 asset_id 集合，再用它过滤 binding。
     const assetIds = await this.col("meta_assets")
       .find({ asset_type: { $in: [...types] } } as Document, { projection: { asset_id: 1 } })
-      .map((d) => (d as { asset_id: string }).asset_id)
+      .map((d) => String(d.asset_id))
       .toArray();
     if (assetIds.length === 0) {
       return { items: [], total: 0 };

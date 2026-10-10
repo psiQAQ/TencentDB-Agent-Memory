@@ -16,6 +16,7 @@
 # local development, but inside the image we generate an npm lockfile on the
 # fly to keep the image free of pnpm/corepack and to align with team CI/CD
 # conventions. A small package.json patch is applied to:
+#   - drop development dependencies before npm resolves the runtime graph.
 #   - drop optional peerDependencies (`openclaw`, `node-llama-cpp`) which
 #     pull in transitive packages that ship broken `workspace:*` refs to
 #     unpublished sub-packages (e.g. @jimp/config-typescript).
@@ -57,6 +58,7 @@ RUN npm install -g npm@11 --no-audit --no-fund
 COPY package.json ./
 
 # Patch package.json for npm-friendly install:
+#   Development tools and the OpenClaw SDK are not part of the runtime graph.
 #   1. Strip optional peerDependencies (openclaw, node-llama-cpp) — these
 #      pull in @whiskeysockets/baileys → jimp@1.6.1, whose published manifest
 #      contains a broken `workspace:*` ref to @jimp/config-typescript that
@@ -66,6 +68,7 @@ COPY package.json ./
 RUN node -e " \
         const fs=require('fs'); \
         const p=JSON.parse(fs.readFileSync('package.json','utf8')); \
+        delete p.devDependencies; \
         delete p.peerDependencies; \
         delete p.peerDependenciesMeta; \
         p.overrides=Object.assign({},p.overrides,{ \

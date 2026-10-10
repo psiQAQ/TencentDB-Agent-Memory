@@ -17,8 +17,15 @@
 
 import { FileLogger } from "./file-logger.js";
 import { getObservabilityBackend } from "./factory.js";
+import type { LogAttrs as BackendLogAttrs } from "./types.js";
 
-export type LogAttrs = Record<string, string | number | boolean>;
+export type LogAttrs = Record<string, string | number | boolean | null | undefined>;
+
+function presentAttrs(attrs: LogAttrs): BackendLogAttrs {
+  return Object.fromEntries(
+    Object.entries(attrs).filter((entry): entry is [string, string | number | boolean] => entry[1] != null),
+  );
+}
 
 // 初始化文件写入器（降级策略：初始化失败不影响业务）
 const obsFileLogger = new FileLogger({
@@ -38,9 +45,10 @@ export const obsLogger = {
    */
   info(eventName: string, attrs: LogAttrs = {}): void {
     try {
-      getObservabilityBackend().log.info(eventName, attrs);
+      const attributes = presentAttrs(attrs);
+      getObservabilityBackend().log.info(eventName, attributes);
       // 同时写入本地日志文件
-      obsFileLogger.write("INFO", eventName, attrs as Record<string, unknown>);
+      obsFileLogger.write("INFO", eventName, attributes);
     } catch {
       // 静默失败，不影响业务
     }
@@ -51,9 +59,10 @@ export const obsLogger = {
    */
   warn(eventName: string, attrs: LogAttrs = {}): void {
     try {
-      getObservabilityBackend().log.warn(eventName, attrs);
+      const attributes = presentAttrs(attrs);
+      getObservabilityBackend().log.warn(eventName, attributes);
       // 同时写入本地日志文件
-      obsFileLogger.write("WARN", eventName, attrs as Record<string, unknown>);
+      obsFileLogger.write("WARN", eventName, attributes);
     } catch {
       // 静默失败，不影响业务
     }
@@ -67,9 +76,10 @@ export const obsLogger = {
       if (error) {
         attrs = { ...attrs, "error.message": error.message, "error.type": error.name };
       }
-      getObservabilityBackend().log.error(eventName, attrs, error);
+      const attributes = presentAttrs(attrs);
+      getObservabilityBackend().log.error(eventName, attributes, error);
       // 同时写入本地日志文件
-      obsFileLogger.write("ERROR", eventName, attrs as Record<string, unknown>);
+      obsFileLogger.write("ERROR", eventName, attributes);
     } catch {
       // 静默失败，不影响业务
     }

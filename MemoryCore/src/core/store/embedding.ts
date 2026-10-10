@@ -183,7 +183,10 @@ export type ImportLlamaFn = () => Promise<{
   LlamaLogLevel: { error: number };
 }>;
 
-const defaultImportLlama: ImportLlamaFn = () => import("node-llama-cpp") as unknown as ReturnType<ImportLlamaFn>;
+const defaultImportLlama: ImportLlamaFn = () => {
+  const moduleName = "node-llama-cpp";
+  return import(moduleName);
+};
 
 export class LocalEmbeddingService implements EmbeddingService {
   private readonly modelPath: string;

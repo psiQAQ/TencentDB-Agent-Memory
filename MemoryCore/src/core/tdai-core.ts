@@ -837,11 +837,7 @@ export class TdaiCore {
       const tcvdbHasCreds = !!(
         this.cfg.tcvdb?.url && this.cfg.tcvdb?.apiKey && this.cfg.tcvdb?.database
       );
-      const cosHasCreds = !!(
-        this.cfg.cos?.secretId &&
-        this.cfg.cos?.secretKey &&
-        this.cfg.cos?.bucket
-      );
+      const cosHasCreds = this.storage.type === "cos";
       const probe: SkillEnvProbe = {
         outerStoreBackend: this.cfg.storeBackend,
         hasTcvdbCredentials: tcvdbHasCreds,
@@ -856,9 +852,11 @@ export class TdaiCore {
       const resolverLogger = {
         info: (m: string) => this.logger.info(m),
         warn: (m: string) => this.logger.warn(m),
+        error: (m: string) => this.logger.error(m),
       };
       const resolved = resolveSkillConfig(this.cfg.skill, probe, resolverLogger);
-      this.resolvedSkillConfig = resolved;
+      this.resolvedSkillConfig = resolved ?? undefined;
+      if (!resolved) return;
 
       // Open the underlying DatabaseSync (raw handle escape hatch — see
       // VectorStore.getRawDb() docstring). Skill tables (skill_meta /
@@ -1096,7 +1094,7 @@ export class TdaiCore {
       storage: storage ?? this.getStorage(),
       checkpointLock,
     });
-    const result = await runner({ sessionKey, msg: [], bg_msg: [] });
+    const result = await runner({ sessionKey });
 
     // Read accumulated credit from the tracking runner (原始浮点数，与监控侧严格一致)
     const creditUsed: number = (llmRunner as any)?.accumulatedCredit ?? 0;

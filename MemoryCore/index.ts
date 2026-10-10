@@ -32,6 +32,7 @@ import type { IStorageBackend } from "./src/core/storage/types.js";
 import { registerOffload } from "./src/offload/index.js";
 import { registerOffloadClient } from "./src/offload-client/index.js";
 import {
+  getEmbeddedAgentRuntime,
   setPreferredEmbeddedAgentRuntime,
   prewarmEmbeddedAgent,
 } from "./src/utils/clean-context-runner.js";
@@ -156,7 +157,7 @@ export default function register(api: OpenClawPluginApi) {
   // ─── CLI metadata mode: register CLI commands only, skip all runtime init ───
   // In this mode, runtime is `{} as PluginRuntime` (empty object).
   // OpenClaw calls this to discover CLI subcommands without starting the full plugin.
-  if (api.registrationMode === "cli-metadata") {
+  if ("registrationMode" in api && api.registrationMode === "cli-metadata") {
     api.registerCli(
       ({ program, config, logger: cliLogger }) => {
         const memoryTdai = program
@@ -184,7 +185,7 @@ export default function register(api: OpenClawPluginApi) {
   }
 
   pluginStartTimestamp = Date.now();
-  setPreferredEmbeddedAgentRuntime(api.runtime.agent);
+  setPreferredEmbeddedAgentRuntime(getEmbeddedAgentRuntime(api.runtime));
   // Reset reporter singleton so config changes take effect on hot-reload.
   resetReporter();
   const _require = createRequire(import.meta.url);
@@ -849,7 +850,7 @@ export default function register(api: OpenClawPluginApi) {
 
         // Pre-warm the embedded agent on first conversation
         if (!core.isSchedulerStarted()) {
-          prewarmEmbeddedAgent(api.logger, api.runtime.agent);
+          prewarmEmbeddedAgent(api.logger, getEmbeddedAgentRuntime(api.runtime));
         }
 
         const captureResult = await core.handleTurnCommitted({

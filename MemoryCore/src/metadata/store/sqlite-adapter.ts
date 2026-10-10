@@ -81,7 +81,7 @@ import type {
 } from "../types.js";
 import { DEFAULT_PAGINATION } from "../pagination.js";
 import { buildChatMemoryAssetId } from "../utils/chat-memory-asset.js";
-import { DuplicateUserKeyError } from "./interface.js";
+import { DuplicateUserKeyError, type IMetadataStore } from "./interface.js";
 
 const require = createRequire(import.meta.url);
 function requireNodeSqlite(): typeof import("node:sqlite") {
@@ -593,8 +593,8 @@ export class SqliteMetadataStore implements IMetadataStore {
              VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
             userId,
             input.password ?? null,
-            input.auth_provider as string,
-            input.external_id as string,
+            input.auth_provider ?? "local",
+            input.external_id ?? userId,
             input.username as string,
             input.display_name ?? null,
             input.email ?? null,

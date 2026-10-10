@@ -13,6 +13,7 @@
 
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk/core";
 import { OpenClawLLMRunnerFactory } from "./llm-runner.js";
+import { getEmbeddedAgentRuntime } from "../../utils/clean-context-runner.js";
 import type {
   HostAdapter,
   RuntimeContext,
@@ -52,7 +53,7 @@ export class OpenClawHostAdapter implements HostAdapter {
 
     this.runnerFactory = new OpenClawLLMRunnerFactory({
       config: opts.openclawConfig,
-      agentRuntime: opts.api.runtime.agent,
+      agentRuntime: getEmbeddedAgentRuntime(opts.api.runtime),
       logger: opts.api.logger,
     });
   }

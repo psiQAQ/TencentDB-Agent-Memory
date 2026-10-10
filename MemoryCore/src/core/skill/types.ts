@@ -9,10 +9,22 @@
 // Configuration types (input from user / openclaw.json)
 // ============================
 
-/**
- * User-facing skill configuration. All fields optional; defaults applied
- * by `resolveSkillConfig`.
- */
+/** Parsed SKILL.md frontmatter and body. */
+export interface SkillFile {
+  frontmatter: {
+    name: string;
+    description: string;
+    category?: string;
+    created_at?: string;
+    updated_at?: string;
+    source?: "auto" | "manual";
+    resources?: Array<{ path: string; type: "text" | "executable" | "binary" }>;
+  };
+  body: string;
+  raw: string;
+}
+
+/** User-facing configuration; defaults are applied by resolveSkillConfig. */
 export interface SkillConfigInput {
   enabled?: boolean;
 
@@ -369,7 +381,7 @@ export interface ExtractorLLMRunner {
     prompt: string;
     systemPrompt?: string;
     /** Tool dict (Vercel AI SDK shape). 当 enableTools=true 时驱动 tool-call 循环。 */
-    tools?: Record<string, unknown>;
+    tools?: import("ai").ToolSet;
     enableTools?: boolean;
     maxIterations?: number;
     taskId: string;

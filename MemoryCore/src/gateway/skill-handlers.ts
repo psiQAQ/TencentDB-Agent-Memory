@@ -1061,6 +1061,7 @@ export async function handleExtract(body: unknown, auth: V2AuthContext, requestI
   const skillCfg = deps.getResolvedSkillConfig?.();
   const compressOpts = skillCfg
     ? {
+        ...DEFAULT_COMPRESS_OPTIONS,
         toolContentThresholdBytes: skillCfg.compress.toolContentThresholdBytes,
         headBytes: skillCfg.compress.headBytes,
         tailBytes: skillCfg.compress.tailBytes,
@@ -1068,6 +1069,7 @@ export async function handleExtract(body: unknown, auth: V2AuthContext, requestI
     : DEFAULT_COMPRESS_OPTIONS;
   const oversizeOpts = skillCfg
     ? {
+        ...DEFAULT_OVERSIZE_OPTIONS,
         chunkMaxBytes: skillCfg.extraction.chunkMaxBytes,
         headKeepBytes: skillCfg.extraction.headKeepBytes,
         tailKeepBytes: skillCfg.extraction.tailKeepBytes,

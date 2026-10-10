@@ -2174,13 +2174,13 @@ export class MetadataService {
       throw new MetadataError("team_name_confirmation_mismatch", "team name confirmation does not match");
     }
     if (!preview.ready || preview.revision !== input.revision) {
-      throw new MetadataError("team_not_ready_for_deletion", "team is not empty or preview is stale", preview);
+      throw new MetadataError("team_not_ready_for_deletion", "team is not empty or preview is stale", { ...preview });
     }
     try {
       const deleted = await this.store.deleteEmptyTeam(input.team_id, this.requireCallerId(ctx), input.revision);
       if (!deleted) {
         const latest = await this.store.getTeamDeletePreview(input.team_id);
-        throw new MetadataError("team_not_ready_for_deletion", "team changed after preview", latest ?? undefined);
+        throw new MetadataError("team_not_ready_for_deletion", "team changed after preview", latest ? { ...latest } : undefined);
       }
       return { deleted_ids: [input.team_id], failed: [] };
     } catch (err) {

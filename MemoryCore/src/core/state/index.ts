@@ -51,9 +51,15 @@ export async function createStateBackend(config: StateBackendConfig): Promise<IS
     const redisCfg = config.redis;
     if (!redisCfg) throw new Error("redis config is required when state_backend=redis");
 
-    let RedisStateBackendCtor: typeof import("../../integrations/redis/index.js").RedisStateBackend;
+    let RedisStateBackendCtor: new (options: {
+      client: import("ioredis").Redis;
+      keyPrefix?: string;
+      consumerGroup?: string;
+    }) => IStateBackend & Required<Pick<IStateBackend, "initialize">>;
     try {
-      ({ RedisStateBackend: RedisStateBackendCtor } = await import("../../integrations/redis/index.js"));
+      const modulePath = "../../integrations/redis/index.js";
+      ({ RedisStateBackend: RedisStateBackendCtor } = await import(modulePath));
+      if (typeof RedisStateBackendCtor !== "function") throw new Error("Redis integration must export RedisStateBackend");
     } catch (err) {
       throw new Error(
         "[state-backend] Redis integration is not available — install or initialize " +
@@ -64,7 +70,7 @@ export async function createStateBackend(config: StateBackendConfig): Promise<IS
     }
 
     // Dynamically import the remote backend client only when needed.
-    const { default: Redis } = await import("ioredis");
+    const { Redis } = await import("ioredis");
 
     let client;
     if (redisCfg.url) {
@@ -79,7 +85,7 @@ export async function createStateBackend(config: StateBackendConfig): Promise<IS
     }
 
     const backend = new RedisStateBackendCtor({
-      client: client as never,
+      client,
       keyPrefix: redisCfg.keyPrefix,
       consumerGroup: redisCfg.consumerGroup,
     });

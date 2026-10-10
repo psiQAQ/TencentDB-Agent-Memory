@@ -79,7 +79,7 @@ export interface LLMRunParams {
    * SkillExtractor to inject skill_list / skill_view / skill_manage
    * without polluting the runner's permanent configuration.
    */
-  tools?: Record<string, unknown>;
+  tools?: import("ai").ToolSet;
   /**
    * Per-call override of the runner's `enableTools` setting. When true
    * and `tools` is provided, the runner drives an automatic tool-call

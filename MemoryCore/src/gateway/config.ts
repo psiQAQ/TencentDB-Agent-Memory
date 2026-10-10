@@ -370,7 +370,7 @@ export interface GatewayConfig {
   /** State backend type. env: STATE_BACKEND. yaml: stateBackend */
   stateBackend?: "redis" | "local";
   /** Default instance ID for standalone pipeline. env: TDAI_INSTANCE_ID. yaml: instanceId */
-  instanceId: string;
+  instanceId?: string;
   redis: RedisConfig;
   shark: SharkConfig;
   scanner: ScannerConfig;

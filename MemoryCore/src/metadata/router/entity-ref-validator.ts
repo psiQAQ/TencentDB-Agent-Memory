@@ -27,8 +27,8 @@ const LOOKUP: Record<EntityType, (svc: MetadataService, id: string) => Promise<u
   [EntityType.Agent]: (svc, id) => svc.getAgentById(id),
   [EntityType.Task]: (svc, id) => svc.getTaskById(id),
   [EntityType.Asset]: (svc, id) => svc.getAssetById(id),
-  [EntityType.UserKey]: (svc, id) => svc.rawStore.getUserKeyById(id),
-  [EntityType.Acl]: (svc, id) => svc.rawStore.getAclById(id),
+  [EntityType.UserKey]: async (svc, id) => svc.rawStore.getUserKeyById(id),
+  [EntityType.Acl]: async (svc, id) => svc.rawStore.getAclById(id),
 };
 
 const ERROR_CODE: Record<EntityType, string> = {

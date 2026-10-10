@@ -53,7 +53,6 @@ export {
 export type {
   ConversationRole,
   Pagination,
-  ConversationAddRequest,
   ConversationAddData,
   ConversationQueryRequest,
   ConversationQueryData,

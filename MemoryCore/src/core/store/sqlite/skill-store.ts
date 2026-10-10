@@ -14,7 +14,7 @@
  * 本文件改名为 `skill-store.ts`。
  */
 
-import type { DatabaseSync } from "node:sqlite";
+import type { DatabaseSync, SQLInputValue, SQLOutputValue } from "node:sqlite";
 
 import { randomBase62 } from "../../../utils/short-id.js";
 import { SKILLS_DDL, SKILL_FTS_DDL, SKILL_VEC_DDL_TEMPLATE, FTS_CONTENT_MAX } from "../../skill/skill-store-ddl.js";
@@ -69,7 +69,7 @@ function defaultUlid(): string {
   return randomBase62(12);
 }
 
-interface SkillRowRaw {
+interface SkillRowRaw extends Record<string, SQLOutputValue> {
   row_id: string;
   skill_id: string;
   version: number;
@@ -374,7 +374,7 @@ export class SqliteSkillStore implements ISkillStore {
   // ────────────────────────────────────────────────────────────────────
   async archiveHead(skillId: string, teamId?: string): Promise<{ archived: boolean }> {
     const where = teamId ? "skill_id=? AND team_id=? AND is_head=1" : "skill_id=? AND is_head=1";
-    const args: unknown[] = teamId ? [this.now(), skillId, teamId] : [this.now(), skillId];
+    const args: SQLInputValue[] = teamId ? [this.now(), skillId, teamId] : [this.now(), skillId];
     const r = this.db
       .prepare(`UPDATE skills SET status='archived', updated_at_ms=? WHERE ${where}`)
       .run(...args);
@@ -518,7 +518,7 @@ export class SqliteSkillStore implements ISkillStore {
     const offset = Math.max(opts.offset ?? 0, 0);
 
     const where: string[] = ["is_head=1"];
-    const args: unknown[] = [];
+    const args: SQLInputValue[] = [];
 
     // 四个 ID：传了就过滤，不传不限制
     if (opts.team_id) {
@@ -689,9 +689,9 @@ export class SqliteSkillStore implements ISkillStore {
    */
   async deleteAllVersions(skillId: string, teamId?: string): Promise<number> {
     const where = teamId ? "skill_id=? AND team_id=?" : "skill_id=?";
-    const args: unknown[] = teamId ? [skillId, teamId] : [skillId];
+    const args: SQLInputValue[] = teamId ? [skillId, teamId] : [skillId];
     const r = this.db.prepare(`DELETE FROM skills WHERE ${where}`).run(...args);
-    const changes = r.changes ?? 0;
+    const changes = Number(r.changes ?? 0);
     // 仅当主表真的删掉了行时才 DELETE 附属表 —— 避免跨 team 校验失败时误清 fts
     if (changes > 0) {
       try {

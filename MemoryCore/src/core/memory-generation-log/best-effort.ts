@@ -4,7 +4,7 @@ export async function writeGenerationProvenanceBestEffort(params: {
   layer: "l1" | "l2" | "l3";
   logger?: Logger;
   writeLog: () => Promise<void>;
-  writeRefs?: () => Promise<void>;
+  writeRefs?: () => void | Promise<void>;
 }): Promise<void> {
   const { layer, logger, writeLog, writeRefs } = params;
   try {

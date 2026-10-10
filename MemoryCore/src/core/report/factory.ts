@@ -30,7 +30,8 @@ const TAG = "[observability][factory]";
  */
 async function loadInternalBackend(): Promise<{ createInternalObservabilityBackend: (config: ObservabilityConfig) => Promise<IObservabilityBackend> } | null> {
   try {
-    return await import("../../integrations/observability/index.js");
+    const modulePath = "../../integrations/observability/index.js";
+    return await import(modulePath);
   } catch {
     return null;
   }

@@ -52,8 +52,8 @@ const MAX_TOOL_ITERATIONS = 20;
  *
  * 未传对应字段时，metadata 里也不出现该键 —— 保持与旧行为完全一致。
  */
-function buildTelemetryMetadata(params: LLMRunParams): Record<string, unknown> {
-  const meta: Record<string, unknown> = {
+function buildTelemetryMetadata(params: LLMRunParams): Record<string, import("@opentelemetry/api").AttributeValue> {
+  const meta: Record<string, import("@opentelemetry/api").AttributeValue> = {
     instanceId: params.instanceId ?? "unknown",
   };
   if (params.traceName) {
@@ -304,7 +304,6 @@ export class StandaloneLLMRunner implements LLMRunner {
     const provider = createOpenAI({
       baseURL: this.config.baseUrl,
       apiKey: this.config.apiKey,
-      compatibility: "compatible",
     });
 
     // Select tools based on mode + storage
@@ -313,7 +312,7 @@ export class StandaloneLLMRunner implements LLMRunner {
     // enableTools=false: omit tools entirely so the model cannot hallucinate calls.
     // Caller-provided tools (params.tools) override the defaults — used by
     // SkillExtractor to inject domain-specific tools (skill_list, etc.).
-    let tools: Record<string, unknown> | undefined;
+    let tools: import("ai").ToolSet | undefined;
     if (callerProvidedTools && effectiveEnableTools) {
       tools = params.tools;
       this.logger?.debug?.(`${TAG} Using caller-provided tools: [${Object.keys(tools!).join(", ")}]`);

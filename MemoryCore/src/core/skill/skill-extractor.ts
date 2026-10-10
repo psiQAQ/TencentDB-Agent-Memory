@@ -28,7 +28,7 @@ export interface ExtractorRunner {
   run(params: {
     prompt: string;
     systemPrompt?: string;
-    tools?: Record<string, unknown>;
+    tools?: import("ai").ToolSet;
     enableTools?: boolean;
     maxIterations?: number;
     /** Output token 上限；不填由 runner 兜底 (标准 runner 走 llm.maxTokens)。 */
@@ -604,10 +604,6 @@ function toLegacyCandidates(items: ExtractedSkillCandidate[]): ExtractedCandidat
     skill_id: c.skill_id,
     version: c.version,
     description: c.description,
-    confidence: c.confidence,
-    reason: c.reason,
-    file_path: c.file_path,
-    file_type: c.file_type,
   }));
 }
 

@@ -119,17 +119,6 @@ export async function initOTelSDK(options: OTelSDKInitOptions = {}): Promise<boo
       import("@opentelemetry/context-async-hooks"),
     ]);
 
-    // 兼容新旧版本 @opentelemetry/resources
-    // 新版使用 resourceFromAttributes()，旧版使用 new Resource()
-    const createResource = (attrs: Record<string, string>) => {
-      if ("resourceFromAttributes" in resourcesModule) {
-        return (resourcesModule as { resourceFromAttributes: (a: Record<string, string>) => unknown }).resourceFromAttributes(attrs);
-      }
-      // 旧版 fallback
-      const ResourceClass = (resourcesModule as { Resource: new (a: Record<string, string>) => unknown }).Resource;
-      return new ResourceClass(attrs);
-    };
-
     const logsApiModule = "@opentelemetry/api-logs";
     const { logs } = await import(logsApiModule);
 
@@ -164,14 +153,20 @@ export async function initOTelSDK(options: OTelSDKInitOptions = {}): Promise<boo
     if (tenantId) {
       resourceAttrs["tps.tenant.id"] = tenantId;
     }
-    const resource = createResource(resourceAttrs);
+    const resource = resourcesModule.resourceFromAttributes(resourceAttrs);
+    let metadata: import("@grpc/grpc-js").Metadata | undefined;
+    if (hasMainOtel && protocol === "grpc") {
+      const { Metadata } = await import("@grpc/grpc-js");
+      metadata = new Metadata();
+      for (const [key, value] of Object.entries(headers)) metadata.set(key, value);
+    }
 
     // Trace Exporter（仅当有主 OTel endpoint 时创建）
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     let traceExporter: any = null;
     if (hasMainOtel) {
       traceExporter = protocol === "grpc"
-        ? new GrpcTraceExporter({ url: endpoint, headers })
+        ? new GrpcTraceExporter({ url: endpoint, metadata })
         : new HttpTraceExporter({ url: `${endpoint}/v1/traces`, headers });
     }
 
@@ -182,7 +177,7 @@ export async function initOTelSDK(options: OTelSDKInitOptions = {}): Promise<boo
     let logExporter: any = null;
     if (hasMainOtel) {
       logExporter = protocol === "grpc"
-        ? new GrpcLogExporter({ url: endpoint, headers })
+        ? new GrpcLogExporter({ url: endpoint, metadata })
         : new HttpLogExporter({ url: `${endpoint}/v1/logs`, headers });
     }
 

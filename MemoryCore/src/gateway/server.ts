@@ -33,6 +33,9 @@ import { SessionFilter } from "../utils/session-filter.js";
 import { WorkerPermitPool } from "../services/worker-permit-pool.js";
 import { createExtractorAdapter, SkillExtractor as SkillExtractorClass } from "../core/skill/skill-extractor.js";
 import type { SkillCore as SkillCoreType } from "../core/skill/skill-core.js";
+import { SkillCoreError } from "../core/skill/skill-core.js";
+import type { IMemoryStore } from "../core/store/types.js";
+import { loadCosIntegration, type SharedCosClient } from "../core/storage/cos-integration.js";
 import type {
   HealthResponse,
   RecallRequest,
@@ -160,12 +163,12 @@ function nowLocalIso(): string {
   return dayjs().format("YYYY-MM-DDTHH:mm:ss.SSSZ");
 }
 
-function createConsoleLogger(): Logger {
+function createConsoleLogger() {
   return {
-    debug: (msg: string) => console.debug(`${nowLocalIso()} DEBUG ${TAG} ${msg}`),
-    info: (msg: string) => console.info(`${nowLocalIso()} INFO  ${TAG} ${msg}`),
-    warn: (msg: string) => console.warn(`${nowLocalIso()} WARN  ${TAG} ${msg}`),
-    error: (msg: string) => console.error(`${nowLocalIso()} ERROR ${TAG} ${msg}`),
+    debug: (msg: unknown, ...details: unknown[]) => console.debug(`${nowLocalIso()} DEBUG ${TAG} ${msg}`, ...details),
+    info: (msg: unknown, ...details: unknown[]) => console.info(`${nowLocalIso()} INFO  ${TAG} ${msg}`, ...details),
+    warn: (msg: unknown, ...details: unknown[]) => console.warn(`${nowLocalIso()} WARN  ${TAG} ${msg}`, ...details),
+    error: (msg: unknown, ...details: unknown[]) => console.error(`${nowLocalIso()} ERROR ${TAG} ${msg}`, ...details),
   };
 }
 
@@ -297,7 +300,7 @@ function safeEqual(a: string, b: string): boolean {
 
 export class TdaiGateway {
   private config: GatewayConfig;
-  private logger: Logger;
+  private logger: ReturnType<typeof createConsoleLogger>;
   private core: TdaiCore;
   private server: http.Server | null = null;
   private startTime = Date.now();
@@ -324,7 +327,7 @@ export class TdaiGateway {
   private statefulPipelineManager: StatefulPipelineManager | null = null;
 
   // ── COS: global shared client singleton + per-instance StorageAdapter cache ──
-  private sharedCosClient: import("../integrations/cos/cos-backend.js").SharedCosClient | null = null;
+  private sharedCosClient: SharedCosClient | null = null;
   private cosStorageCache: Map<string, StorageAdapter> | null = null;
 
   // ── Metadata (v3): shared store pool + per-instance MetadataService ──
@@ -666,11 +669,11 @@ export class TdaiGateway {
               ])
             : false,
           langfuse: obsCfg.langfuse.enabled
-            ? Object.fromEntries([
-                ["host", obsCfg.langfuse.host],
-                ["publicKey", obsCfg.langfuse.publicKey],
-                ["secretKey", obsCfg.langfuse.secretKey],
-              ])
+            ? {
+                host: obsCfg.langfuse.host,
+                publicKey: obsCfg.langfuse.publicKey,
+                secretKey: obsCfg.langfuse.secretKey,
+              }
             : false,
         });
         this.logger.info(`OTel SDK initialized: ${otelOk ? "enabled" : "skipped (deps not available)"}`);
@@ -1147,7 +1150,7 @@ export class TdaiGateway {
         resolveStorage: v2Deps.resolveStorage,
         getStorage: v2Deps.getStorage ?? (() => undefined),
         logger: this.logger,
-        stateBackend: this.stateBackend,
+        stateBackend: this.stateBackend ?? undefined,
         config: { ...this.config.offload, l1Model: "", l15Model: "", l2Model: "" },
       };
       const offloadHandled = await handleOffloadV2Route(req, res, pathname, method, parseJsonBody, sendJson, offloadDeps);
@@ -1450,7 +1453,7 @@ export class TdaiGateway {
       try {
         const cosConfig = await this.configProvider.resolveCos();
         if (cosConfig?.cosUrl) {
-          const { CosStorageBackend } = await import("../integrations/cos/cos-backend.js");
+          const { CosStorageBackend } = await loadCosIntegration();
           const prefix = `${cosConfig.pathPrefix.replace(/\/$/, '')}/${instanceId}/`;
           const backend = new CosStorageBackend({
             sharedClient: this.sharedCosClient,
@@ -1882,7 +1885,8 @@ export class TdaiGateway {
     // mode fails fast because it requires deployment-specific adapters.
     let adapterDeps: { configSource: import("../core/abstractions/index.js").IConfigSource; quotaReporter: import("../core/abstractions/index.js").IQuotaReporter };
     try {
-      const { createAdapterDeps } = await import("../integrations/factory.js");
+      const modulePath = "../integrations/factory.js";
+      const { createAdapterDeps } = await import(modulePath);
       adapterDeps = await createAdapterDeps({
         deployMode: this.config.deployMode,
         sharkBaseUrl: this.config.shark.baseUrl,
@@ -2729,7 +2733,7 @@ export class TdaiGateway {
     }
 
     // Per-instance CosStorageBackend: lightweight, only holds prefix
-    const { CosStorageBackend } = await import("../integrations/cos/cos-backend.js");
+    const { CosStorageBackend } = await loadCosIntegration();
     const prefix = `${cosConfig.pathPrefix.replace(/\/$/, '')}/${instanceId}/`;
     const backend = new CosStorageBackend({
       sharedClient: this.sharedCosClient,
@@ -2803,7 +2807,7 @@ export class TdaiGateway {
           return;
         }
 
-        const { CosStorageBackend, SharedCosClient } = await import("../integrations/cos/cos-backend.js");
+        const { CosStorageBackend, SharedCosClient } = await loadCosIntegration();
         const { CachedCredentialProvider, parseCosUrl } = await import("../core/storage/credential-provider.js");
         const { bucket, region } = parseCosUrl(cosConfig.cosUrl);
         const cosHost = cosConfig.cosUrl.replace(/^https?:\/\//, "").replace(/\/+$/, "");

@@ -62,8 +62,12 @@ MemoryCore 以 Standalone Runtime 形式开源，适合本地开发、单机部�
 ```bash
 cd MemoryCore
 npm install
+npm run typecheck
 npm run build
 ```
+
+`npm run typecheck` 对插件入口和 `src/` 生产源码执行严格类型检查；`npm test` 运行回归测试。
+OpenClaw SDK 是插件兼容性检查使用的开发依赖，Standalone 服务无需启动 OpenClaw。
 
 ### 2. 启动 Standalone Gateway
 

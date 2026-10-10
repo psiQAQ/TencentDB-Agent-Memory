@@ -11,7 +11,7 @@
  *   - service:    由部署环境注入远程配额 reporter
  */
 
-import type { Logger } from "../logger.js";
+import type { Logger } from "../types.js";
 import type { IQuotaReporter } from "../abstractions/index.js";
 
 export interface QuotaConfig {

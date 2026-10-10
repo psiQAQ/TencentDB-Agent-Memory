@@ -1323,7 +1323,17 @@ class OffloadContextEngine {
   private _disposeL15: () => void;
 
   constructor(opts: any) {
-    this.update(opts);
+    this._sessions = opts.sessions;
+    this._logger = opts.logger;
+    this._pCfg = opts.pCfg;
+    this._getContextWindow = opts.getContextWindow;
+    this._notifyL2NewNullEntries = opts.notifyL2NewNullEntries;
+    this._clearL2Timeout = opts.clearL2Timeout;
+    this._l4State = opts.l4State;
+    this._flushL1 = opts.flushL1;
+    this._backendClient = opts.backendClient;
+    this._judgeL15 = opts.judgeL15;
+    this._disposeL15 = opts.disposeL15 ?? (() => {});
   }
 
   /**

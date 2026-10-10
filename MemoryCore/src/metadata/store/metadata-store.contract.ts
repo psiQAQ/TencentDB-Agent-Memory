@@ -64,6 +64,13 @@ export function runMetadataStoreContract(
 
     // ── User ──
     describe("User", () => {
+      it("defaults local authentication and external identity to the generated user ID", async () => {
+        const user = await store.createUser({ username: `default-auth-${++userSeq}` });
+        expect(user.auth_provider).toBe("local");
+        expect(user.external_id).toBe(user.user_id);
+        expect(await store.getUserByUsername("local", user.username)).toMatchObject({ user_id: user.user_id });
+      });
+
       it("createUser 自动生成 user_id / 默认 key 并可按 id/key 查回", async () => {
         const u = await store.createUser(uniqueUserInput());
         expect(u.user_id).toMatch(/^usr-/);

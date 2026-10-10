@@ -11,8 +11,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import readline from "node:readline";
-import type { Command } from "commander";
-import type { SeedCliContext } from "../index.ts";
+import type { Command, SeedCliContext } from "../index.js";
 import type { SeedCommandOptions } from "../../core/seed/types.js";
 import { loadAndValidateInput, fillTimestamps, SeedValidationError } from "../../core/seed/input.js";
 import { executeSeed } from "../../core/seed/seed-runtime.js";

@@ -122,7 +122,7 @@ async function initOTelSDK(config: OTelConfig): Promise<boolean> {
 
     // 动态加载 SDK 组件
     const { NodeSDK } = await import("@opentelemetry/sdk-node");
-    const { Resource } = await import("@opentelemetry/resources");
+    const { resourceFromAttributes } = await import("@opentelemetry/resources");
     const { ATTR_SERVICE_NAME } = await import("@opentelemetry/semantic-conventions");
 
     // 根据协议选择 exporter
@@ -158,7 +158,7 @@ async function initOTelSDK(config: OTelConfig): Promise<boolean> {
 
     // 构建 SDK 配置
     const sdkConfig: any = {
-      resource: new Resource({
+      resource: resourceFromAttributes({
         [ATTR_SERVICE_NAME]: serviceName,
       }),
       traceExporter,
