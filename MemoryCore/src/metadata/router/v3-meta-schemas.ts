@@ -545,7 +545,7 @@ export const upstreamGroupsListSchema = z.object({}).catchall(z.unknown());
 export const upstreamGroupsCreateSchema = z.object({
   group_type: z.literal("custom"),
   name: z.string().min(1),
-  agents: z.array(z.string().min(1)).min(1),
+  agents: z.array(z.string().min(1)),
   enabled: z.boolean().optional(),
   mode: z.enum(["custom_unified", "custom_passthrough"]),
   base_url: z.string().min(1),

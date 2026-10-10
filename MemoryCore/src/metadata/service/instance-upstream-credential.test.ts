@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { supported, upstreamFixture } from "./upstream-group-test-fixture.js";
 import { decryptUpstreamKey } from "./upstream-profile-library.js";
+import { upstreamGroupsCreateSchema } from "../router/v3-meta-schemas.js";
 
 describe("model-group credential isolation", () => {
   let f: ReturnType<typeof upstreamFixture>;
@@ -51,5 +52,45 @@ describe("model-group credential isolation", () => {
     expect(JSON.stringify(before)).not.toContain("summary-secret");
     f.store.close(); f.store.init();
     expect(await f.service.getInstanceUpstreamExtraction(supported)).toEqual(before);
+  });
+  it("saves a model group before assigning clients without changing current routing", async () => {
+    const before = await f.service.getConversationModelsInternal(supported);
+    const input = upstreamGroupsCreateSchema.parse({ group_type: "custom", name: "Ready to assign", agents: [],
+      mode: "custom_unified", base_url: "https://provider.example/v1", model_id: "model-a", api_key: "supplier-secret" });
+    const result = await f.service.createInstanceUpstreamCustomGroup(input, supported);
+    expect(result.agents).toEqual([]);
+    expect(await f.service.getConversationModelsInternal(supported)).toEqual(before);
+    f.store.close(); f.store.init();
+    expect((await f.service.listInstanceUpstreamGroups(supported)).items).toContainEqual(result);
+  });
+  it("can release the last client from a custom group while retaining its model and encrypted credential", async () => {
+    const result = await create();
+    const groupId = String(result.group_id);
+    const before = f.store.getInstanceUpstreamGroup(groupId)!;
+    const updated = await f.service.updateInstanceUpstreamGroup({ group_id: groupId, group_type: "custom",
+      agents: [], expected_version: before.version }, supported);
+    expect(updated.agents).toEqual([]);
+    expect(f.store.getInstanceUpstreamGroup(groupId)!.api_key).toBe(before.api_key);
+    const def = f.store.listInstanceUpstreamGroups().find((row) => row.group_type === "default")!;
+    await f.service.updateInstanceUpstreamGroup({ group_id: def.group_id, group_type: "default", agents: ["codex"] }, supported);
+    expect((await f.service.getConversationModelsInternal(supported)).official_agents).toEqual(["codex"]);
+  });
+  it("removes a stored supplier credential when switching to client credential passthrough", async () => {
+    const result = await create();
+    const groupId = String(result.group_id);
+    await f.service.updateInstanceUpstreamGroup({ group_id: groupId, group_type: "custom",
+      mode: "custom_passthrough", base_url: "https://other.example/v1" }, supported);
+    expect(f.store.getInstanceUpstreamGroup(groupId)!.api_key).toBe("");
+    await expect(f.service.updateInstanceUpstreamGroup({ group_id: groupId, group_type: "custom",
+      mode: "custom_unified" }, supported)).rejects.toThrow("own api_key");
+  });
+  it("does not save an unused supplier credential for a new passthrough group", async () => {
+    await f.service.listInstanceUpstreamGroups(supported);
+    const def = f.store.listInstanceUpstreamGroups()[0];
+    await f.service.updateInstanceUpstreamGroup({ group_id: def.group_id, group_type: "default", agents: [] }, supported);
+    const result = await f.service.createInstanceUpstreamCustomGroup({ name: "Client credentials", agents: ["codex"],
+      mode: "custom_passthrough", base_url: "https://provider.example/v1", api_key: "unused-secret" }, supported);
+    expect(result.api_key_masked).toBe("");
+    expect(f.store.getInstanceUpstreamGroup(String(result.group_id))!.api_key).toBe("");
   });
 });

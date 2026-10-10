@@ -3179,7 +3179,7 @@ export class MetadataService {
   // 校验矩阵(§5.3):
   //   default: name 固定 / mode='official' / base_url/api_key/model_id/description 必空;
   //            agents 可 0~N,允许 update
-  //   custom:  name 非空 ≤64;agents ≥1;mode ∈ {custom_unified,custom_passthrough};
+  //   custom:  name 非空 ≤64;agents 可 0~N;mode ∈ {custom_unified,custom_passthrough};
   //            base_url 非空;custom_unified 时 api_key 非空
   //   extraction: agents=[];mode='custom_unified';base_url + api_key 都必填
 
@@ -3238,7 +3238,7 @@ export class MetadataService {
   ): Promise<Record<string, unknown>> {
     this.assertUpstreamEndpoint(input.base_url);
     this.assertGroupName(input.name);
-    this.assertAgents(input.agents, supportedAgents, "custom");
+    this.assertAgents(input.agents, supportedAgents);
     this.assertModeForGroupType("custom", input.mode);
     if (!input.base_url?.trim()) {
       throw new MetadataError("MISSING_BASE_URL", "base_url is required for custom group");
@@ -3259,7 +3259,7 @@ export class MetadataService {
         enabled: input.enabled !== false,
         mode: input.mode,
         base_url: input.base_url.trim(),
-        api_key: input.api_key ? encryptUpstreamKey(input.api_key) : "",
+        api_key: input.mode === "custom_unified" && input.api_key ? encryptUpstreamKey(input.api_key) : "",
         model_id: input.model_id ?? "",
         description: input.description ?? "",
       });
@@ -3311,17 +3311,19 @@ export class MetadataService {
     // custom 组字段校验(仅在传入时才校验)
     if (input.group_type === "custom") {
       if (input.name !== undefined) this.assertGroupName(input.name);
-      if (input.agents !== undefined) this.assertAgents(input.agents, supportedAgents, "custom");
+      if (input.agents !== undefined) this.assertAgents(input.agents, supportedAgents);
       if (input.mode !== undefined) this.assertModeForGroupType("custom", input.mode);
       if (input.base_url !== undefined && !input.base_url.trim()) {
         throw new MetadataError("MISSING_BASE_URL", "base_url must be non-empty");
       }
     }
 
+    let effectiveMode = input.mode;
     if (input.group_type === "custom") {
       const existing = await this.store.getInstanceUpstreamGroup(input.group_id);
       if (input.base_url !== undefined) this.assertUpstreamEndpoint(input.base_url);
       const mode = input.mode ?? existing?.mode;
+      effectiveMode = mode;
       if (mode === "custom_unified" && (!existing?.api_key || (input.base_url !== undefined &&
           !this.sameUpstreamOrigin(existing.base_url, input.base_url))) && !input.api_key?.trim()) {
         throw new MetadataError("MISSING_API_KEY", "a new supplier origin requires its own api_key");
@@ -3343,7 +3345,8 @@ export class MetadataService {
         enabled: input.enabled,
         mode: input.mode,
         base_url: input.base_url?.trim(),
-        api_key: input.api_key === undefined ? undefined : input.api_key ? encryptUpstreamKey(input.api_key) : "",
+        api_key: effectiveMode === "custom_passthrough" ? ""
+          : input.api_key === undefined ? undefined : input.api_key ? encryptUpstreamKey(input.api_key) : "",
         model_id: input.model_id,
         description: input.description,
       });
@@ -3606,10 +3609,7 @@ export class MetadataService {
     }
   }
 
-  private assertAgents(agents: string[], supported: SupportedAgent[], groupType: GroupType): void {
-    if (groupType === "custom" && agents.length === 0) {
-      throw new MetadataError("INVALID_AGENTS", "custom group must have at least 1 agent");
-    }
+  private assertAgents(agents: string[], supported: SupportedAgent[]): void {
     if (supported.length === 0) return; // 无 supported 列表时跳过枚举校验(仅 boot-time 极端情况)
     const supportedSet = new Set(supported.map((a) => a.agent_source));
     const unknown = agents.filter((a) => !supportedSet.has(a));
