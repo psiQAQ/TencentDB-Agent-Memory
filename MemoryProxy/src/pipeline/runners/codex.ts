@@ -1,3 +1,4 @@
+import { guardSubscriptionResponse, subscriptionResponsesRequest } from "../../chatgpt-subscription.js";
 /**
  * Codex Responses API handler.
  *
@@ -218,11 +219,8 @@ export function detectDefaultModeGate(input: unknown): boolean {
 // ── Asset injection (exported for unit tests) ────────────────────────────────
 
 /**
- * Inject `<tdai_injections>` wrapper into codex body.input[0].content[].
- *
- * Appends the injection block to the developer message (input[0]) content.
- * Defensive: if input[0] is not a message with an array content, returns
- * the body unchanged.
+ * Append assets to a developer/system message, preserving native metadata and
+ * tool items. Create a developer message when the input has no instruction message.
  *
  * Returns a shallow copy — original body is not mutated.
  */
@@ -230,22 +228,29 @@ export function injectCodexAssets(
   body: Record<string, unknown>,
   assets: CodexInjectionInput,
 ): Record<string, unknown> {
-  const input = body.input;
-  if (!Array.isArray(input) || input.length === 0) return body;
-
-  const devMsg = input[0] as Record<string, unknown> | null;
-  if (!devMsg || typeof devMsg !== "object") return body;
-  if (devMsg.type !== "message") return body;
-
-  const content = devMsg.content;
-  if (!Array.isArray(content)) return body;
-
+  const input = typeof body.input === "string"
+    ? [{ type: "message", role: "user", content: body.input }]
+    : body.input;
+  if (!Array.isArray(input)) return body;
   const injectionBlock = buildCodexInjectionBlock(assets);
-
-  // Shallow-copy chain: body → input → input[0] → content
-  const newContent = [...content, injectionBlock];
-  const newDevMsg = { ...devMsg, content: newContent };
-  const newInput = [newDevMsg, ...input.slice(1)];
+  const index = input.findIndex((item) => item && typeof item === "object"
+    && (item.type === undefined || item.type === "message")
+    && (item.role === "developer" || item.role === "system")
+    && (typeof item.content === "string" || Array.isArray(item.content)));
+  const newInput = [...input];
+  if (index >= 0) {
+    const message = input[index];
+    const content = typeof message.content === "string"
+      ? [{ type: "input_text", text: message.content }]
+      : message.content;
+    newInput[index] = { ...message, content: [...content, injectionBlock] };
+  } else {
+    // Keep native additional_tools metadata ahead of the conversation.
+    const firstConversationItem = input.findIndex((item) => item?.type !== "additional_tools");
+    newInput.splice(firstConversationItem < 0 ? input.length : firstConversationItem, 0, {
+      type: "message", role: "developer", content: [injectionBlock],
+    });
+  }
   return { ...body, input: newInput };
 }
 
@@ -994,6 +999,9 @@ async function forwardToUpstream(
 
   pipe.forwardStart(upstreamUrl);
 
+  const subscriptionClientTools = body.tools;
+  if (_upstreamResolve.subscription) body = subscriptionResponsesRequest(body);
+
   // ── Opik: create trace (bug B7 fix 迁移时丢失, 本次补回) ──────────────────
   // 与 anthropic.ts / openai-chat.ts 对齐: 必须在 span 之前 create trace,
   // 否则收尾的 opikCreateLlmSpan 会带着空 trace_id 被 Opik 拒 (422 traceId
@@ -1089,6 +1097,9 @@ async function forwardToUpstream(
     return c.json({ error: "Upstream redirect blocked" }, 502);
   }
 
+  if (_upstreamResolve.subscription) {
+    upstreamResp = guardSubscriptionResponse(upstreamResp, subscriptionClientTools);
+  }
   pipe.forwardDone(upstreamResp.status, upstreamResp.headers.get("x-request-id") ?? undefined);
 
   // Log usage
@@ -1242,6 +1253,7 @@ async function forwardToUpstream(
 
   const [rawClientStream, tapStream] = upstreamResp.body.tee();
   consumeCodexStream(tapStream, {
+    requireCompleted: _upstreamResolve.subscription,
     lf,
     modelId,
     startTime,
@@ -1298,6 +1310,7 @@ function buildCodexLangfuseInput(body: Record<string, unknown>): unknown {
 }
 
 export interface CodexTapContext {
+  requireCompleted?: boolean;
   /**
    * langfuse trace context; null 表示 aux 场景不上报 langfuse 但可能仍需
    * 归档 (理论上 aux 不会带 archiveCtx, 两者同时 null 时上游 tap 干脆不启动)。
@@ -1357,6 +1370,7 @@ export function consumeCodexStream(stream: ReadableStream<Uint8Array>, ctx: Code
     let toolCalls: UpstreamToolCall[] = [];
     let stopReason: string | undefined;
     let streamCompleted = false;
+    let responseCompleted = false;
     // 5 分钟兜底：客户端断开可能让上游流卡住，这里超时也强制收尾一次。
     const timeoutHandle = setTimeout(() => {
       if (!streamCompleted) {
@@ -1369,6 +1383,11 @@ export function consumeCodexStream(stream: ReadableStream<Uint8Array>, ctx: Code
       if (streamCompleted) return;
       streamCompleted = true;
       clearTimeout(timeoutHandle);
+
+      if (ctx.requireCompleted && !responseCompleted) {
+        pipe.error("CHATGPT_STREAM_INTERRUPTED", "Subscription response did not complete; no successful-turn archive was written");
+        return;
+      }
 
       const endTime = new Date().toISOString();
       if (ctx.config && lf) {
@@ -1553,13 +1572,18 @@ export function consumeCodexStream(stream: ReadableStream<Uint8Array>, ctx: Code
               const item = evt.item as Record<string, unknown> | undefined;
               if (item?.type === "function_call") toolUseCount++;
             } else if (evtType === "response.completed") {
+              responseCompleted = true;
               const resp = evt.response as Record<string, unknown> | undefined;
               if (resp?.usage) {
                 Object.assign(usage, resp.usage as Record<string, unknown>);
               }
               // 终态 `output[]` 带完整的 call_id 与逐字 arguments，比累积
               // response.function_call_arguments.delta 更可靠。
-              if (resp?.output) toolCalls = collectResponsesToolCalls(resp.output);
+              if (resp?.output) {
+                toolCalls = collectResponsesToolCalls(resp.output);
+                toolUseCount = Math.max(toolUseCount, toolCalls.length);
+                outputText = collectResponsesOutputText(resp) || outputText;
+              }
               stopReason = (resp?.status as string) ?? "completed";
             } else if (evtType === "response.incomplete") {
               // max_output_tokens / 其它中断（Responses API 标准）

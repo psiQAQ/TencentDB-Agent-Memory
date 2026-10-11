@@ -28,6 +28,7 @@ import { dbChoiceToStoreConfigs, LocalBackendResolver } from "../core/backend-se
 import type { BackendResolver } from "../core/backend-selection/index.js";
 import { applyMetadataEnvFromGatewayConfig } from "./metadata-env.js";
 import { applyTaskSourceEnvFromGatewayConfig } from "./task-source-env.js";
+import { configureEnvironmentProxy } from "./environment-proxy.js";
 import { initDataDirectories } from "../utils/pipeline-factory.js";
 import { SessionFilter } from "../utils/session-filter.js";
 import { WorkerPermitPool } from "../services/worker-permit-pool.js";
@@ -551,6 +552,8 @@ export class TdaiGateway {
    * Start the Gateway HTTP server.
    */
   async start(): Promise<void> {
+    configureEnvironmentProxy();
+
     // Initialize data directories
     initDataDirectories(this.config.data.baseDir);
 

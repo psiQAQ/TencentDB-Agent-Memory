@@ -58,3 +58,8 @@
   .upstream-card { padding: 14px; }
   .upstream-probe { align-items: start; flex-direction: column; }
 }
+.upstream-catalog { margin-bottom: 20px; }
+.upstream-catalog table { width: 100%; border-collapse: collapse; margin-top: 12px; }
+.upstream-catalog th, .upstream-catalog td { padding: 8px; border-bottom: 1px solid #e5e7eb; text-align: left; overflow-wrap: anywhere; }
+.upstream-catalog-picker { display: grid; gap: 16px; }
+.upstream-catalog-picker code { white-space: normal; overflow-wrap: anywhere; }

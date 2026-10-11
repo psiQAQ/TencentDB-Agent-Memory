@@ -109,7 +109,8 @@ export async function request<T>(
     const text = await res.text().catch(() => '');
     const env = parseMetaErrorEnvelope(text);
     // WOA 登录确认尚未建立业务会话，失败时不能清空整个登录页状态。
-    if (!path.endsWith('/auth/idp/woa/complete')) emitUnauthorized();
+    const modelCredentialError = /^(CHATGPT_|MODEL_AUTH_)/.test(env.rawMessage ?? '');
+    if (!path.endsWith('/auth/idp/woa/complete') && !modelCredentialError) emitUnauthorized();
     throw new ApiError(res.status, res.statusText, text || 'Unauthorized', env);
   }
   if (!res.ok) {

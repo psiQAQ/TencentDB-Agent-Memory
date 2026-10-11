@@ -536,6 +536,21 @@ export const supportedAgentsSchema = z.object({}).catchall(z.unknown());
 
 export const instanceUpstreamInternalListSchema = z.object({}).catchall(z.unknown());
 
+const modelAuthFields = {
+  provider_id: z.enum(["deepseek", "openai", "anthropic", "gemini", "local", "custom"]).optional(),
+  credential_kind: z.enum(["api_key", "chatgpt_oauth"]).optional(),
+  credential_ref: z.string().max(128).optional(),
+};
+export const modelCatalogEmptySchema = z.object({});
+export const modelCatalogDiscoverSchema = z.object({ ...modelAuthFields,
+  base_url: z.string().max(2048).optional(), api_key: z.string().max(8192).optional(), group_id: z.string().max(128).optional(),
+});
+export const chatgptStartSchema = z.object({ reference: z.string().max(128).optional(), callback_port: z.number().int().min(1024).max(65535).default(8125) });
+export const chatgptCompleteSchema = z.object({ reference: z.string().min(1).max(128), state: z.string().min(1).max(128),
+  authorization_code: z.string().max(8192).optional(), client_id: z.string().max(256).optional(), error: z.string().max(256).optional() });
+export const chatgptDisconnectSchema = z.object({ reference: z.string().min(1).max(128) });
+export const subscriptionResolveSchema = z.object({ group_id: z.string().max(128).optional(), credential_ref: z.string().max(128).optional(), model_id: z.string().min(1).max(256) });
+
 // ── B 类:conversation groups ──
 
 /** B1 groups/list */
@@ -543,6 +558,7 @@ export const upstreamGroupsListSchema = z.object({}).catchall(z.unknown());
 
 /** B2 groups/create: 只允许 custom */
 export const upstreamGroupsCreateSchema = z.object({
+  ...modelAuthFields,
   group_type: z.literal("custom"),
   name: z.string().min(1),
   agents: z.array(z.string().min(1)),
@@ -556,6 +572,7 @@ export const upstreamGroupsCreateSchema = z.object({
 
 /** B3 groups/update: PATCH; default 只能改 agents/enabled(其他字段传值 → immutable error) */
 export const upstreamGroupsUpdateSchema = z.object({
+  ...modelAuthFields,
   group_id: z.string().min(1),
   group_type: upstreamGroupTypeConvOnly,
   expected_version: z.number().int().nonnegative().optional(),
@@ -586,14 +603,16 @@ export const upstreamGroupsDeleteSchema = z.object({
 export const upstreamExtractionGetSchema = z.object({}).catchall(z.unknown());
 
 export const upstreamExtractionCreateSchema = z.object({
+  ...modelAuthFields,
   base_url: z.string().min(1),
-  api_key: z.string().min(1),
+  api_key: z.string().optional(),
   model_id: z.string().optional(),
   enabled: z.boolean().optional(),
   description: z.string().optional(),
 });
 
 export const upstreamExtractionUpdateSchema = z.object({
+  ...modelAuthFields,
   expected_version: z.number().int().nonnegative().optional(),
   base_url: z.string().optional(),
   api_key: z.string().optional(),
@@ -610,6 +629,13 @@ export const upstreamExtractionToggleSchema = z.object({
 export const upstreamExtractionDeleteSchema = z.object({}).catchall(z.unknown());
 
 export const V3_SCHEMAS = {
+  "/v3/meta/model-catalog/list": modelCatalogEmptySchema,
+  "/v3/meta/model-catalog/refresh": modelCatalogEmptySchema,
+  "/v3/meta/model-catalog/discover": modelCatalogDiscoverSchema,
+  "/v3/meta/model-connections/chatgpt/start": chatgptStartSchema,
+  "/v3/meta/model-connections/chatgpt/complete": chatgptCompleteSchema,
+  "/v3/meta/model-connections/chatgpt/disconnect": chatgptDisconnectSchema,
+
   "/v3/meta/user/create": userCreateSchema,
   "/v3/meta/user/create-with-key": userCreateWithKeySchema,
   "/v3/meta/user/get": userGetSchema,

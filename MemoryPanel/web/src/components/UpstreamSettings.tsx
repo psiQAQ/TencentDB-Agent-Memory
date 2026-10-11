@@ -10,6 +10,7 @@ import {
   type DraftErrors, type ExtractionModel, type ModelDraft, type ModelGroup,
 } from '@/lib/upstream-settings-form';
 import './UpstreamSettings.css';
+import { ModelCatalogPicker, ModelCatalogStatus, useModelCatalog } from './ModelCatalogPicker';
 
 type Agent = { agent_source: string; display_name: string; protocol: string };
 type Editor = 'group' | 'extraction' | 'assignment' | null;
@@ -22,6 +23,7 @@ export function UpstreamPage() {
 }
 
 function GroupSettings() {
+  const catalog = useModelCatalog();
   const [groups, setGroups] = useState<ModelGroup[]>([]);
   const [agents, setAgents] = useState<Agent[]>([]);
   const [extraction, setExtraction] = useState<ExtractionModel>({ configured: false, enabled: false });
@@ -78,11 +80,15 @@ function GroupSettings() {
   }
   function openEditor(kind: Exclude<Editor, null>, group?: ModelGroup) {
     setEditor(kind); setError(''); setNotice(''); setErrors({}); setProbe(null);
-    setDraft(kind === 'extraction' ? draftFromExtraction(extraction) : group ? draftFromGroup(group) : emptyModelDraft());
+    const next = kind === 'extraction' ? draftFromExtraction(extraction) : group ? draftFromGroup(group) : emptyModelDraft();
+    if (catalog.catalog?.public_catalog.models.some((model) => model.provider_id === next.provider && model.id === next.model_id)
+      || catalog.catalog?.connections.some((connection) => connection.provider_id === next.provider
+        && connection.snapshot?.models.some((model) => model.id === next.model_id))) next.custom_model = false;
+    setDraft(next);
   }
-  function change(patch: Partial<ModelDraft>) {
+  const change = useCallback((patch: Partial<ModelDraft>) => {
     setDraft((previous) => ({ ...previous, ...patch })); setErrors({}); setProbe(null); setError('');
-  }
+  }, []);
   function selectAgent(source: string) {
     change({ agents: draft.agents.includes(source) ? draft.agents.filter((agent) => agent !== source) : [...draft.agents, source] });
   }
@@ -113,9 +119,11 @@ function GroupSettings() {
     setTesting(true); setError(''); setProbe(null);
     try {
       const result = await metaPost<ProbeResult>('instance-upstream/test', {
+        credential_kind: draft.credential_kind,
+        ...(draft.credential_kind === 'chatgpt_oauth' ? { credential_ref: draft.credential_ref } : {}),
         agent_source: 'default', type: editor === 'extraction' ? 'extraction' : 'conversation',
         base_url: draft.base_url.trim(), model_id: draft.model_id.trim(), api_key: draft.api_key.trim(),
-        local: draft.provider === 'local', protocols: editor === 'extraction' ? ['chat'] : preset?.protocols ?? ['chat'],
+        local: draft.provider === 'local', protocols: editor === 'extraction' ? ['chat'] : draft.credential_kind === 'chatgpt_oauth' ? ['responses'] : preset?.protocols ?? ['chat'],
       });
       setProbe(result);
     } catch (cause) { setError(modelFailureMessage(cause)); }
@@ -134,6 +142,7 @@ function GroupSettings() {
   const reusingKey = canReuseModelKey(draft, saved);
 
   return <div className="upstream-settings">
+    <ModelCatalogStatus state={catalog} />
     <div className="upstream-intro">
       <div><h2>为客户端选择模型</h2><p>自定义组将供应商、模型和凭据保存在一起，再分配给 Claude Code、Codex、Pi 等客户端。配置对当前记忆实例生效。</p></div>
       <div className="upstream-actions">
@@ -159,7 +168,7 @@ function GroupSettings() {
             {group.group_type === 'default' ? <p>使用部署默认模型</p> : <dl className="upstream-current">
               <dt>模型</dt><dd>{group.model_id || '未指定'}</dd>
               <dt>API 地址</dt><dd>{group.base_url}</dd>
-              <dt>供应商 Key</dt><dd>{group.mode === 'custom_passthrough' ? '由客户端提供供应商凭据' : group.api_key_masked || '未保存'}</dd>
+              <dt>认证方式</dt><dd>{group.credential_kind === 'chatgpt_oauth' ? `ChatGPT 订阅 · ${catalog.catalog?.subscriptions.find((c) => c.reference === group.credential_ref)?.email ?? group.credential_ref}` : group.mode === 'custom_passthrough' ? '由客户端提供供应商凭据' : group.api_key_masked || '未保存'}</dd>
             </dl>}
             <div className="upstream-client-tags">{group.agents.length
               ? group.agents.map((source) => <span key={source}>{agentName(source)}</span>)
@@ -182,7 +191,7 @@ function GroupSettings() {
           {extraction.configured ? <dl className="upstream-current">
             <dt>模型</dt><dd>{extraction.model_id}</dd>
             <dt>API 地址</dt><dd>{extraction.base_url}</dd>
-            <dt>供应商 Key</dt><dd>{extraction.api_key_masked}</dd>
+            <dt>认证方式</dt><dd>{extraction.credential_kind === 'chatgpt_oauth' ? 'ChatGPT 订阅' : extraction.api_key_masked}</dd>
             <dt>状态</dt><dd>{extraction.enabled ? '已启用' : '已停用，使用部署默认总结配置'}</dd>
           </dl> : <p>未配置，使用部署默认总结模型。</p>}
           <div className="upstream-actions"><Button disabled={working} onClick={() => openEditor('extraction')}>{extraction.configured ? '编辑总结模型' : '配置总结模型'}</Button>
@@ -209,7 +218,7 @@ function GroupSettings() {
             const owner = occupied(agent.agent_source);
             const other = owner && owner.group_id !== draft.group_id;
             return <div className="upstream-client-option" key={agent.agent_source}>
-              <label><input type="checkbox" disabled={working || !!other} checked={draft.agents.includes(agent.agent_source)}
+              <label><input type="checkbox" disabled={working || !!other || (draft.credential_kind === 'chatgpt_oauth' && agent.agent_source !== 'codex')} checked={draft.agents.includes(agent.agent_source)}
                 onChange={() => selectAgent(agent.agent_source)} />
                 <span>{agent.display_name}<small>{owner ? `当前组：${owner.name}` : '尚未分配'}</small></span></label>
               {other && <Button type="text" disabled={working} onClick={() => openEditor('assignment', owner)}>调整原组</Button>}
@@ -218,7 +227,7 @@ function GroupSettings() {
           <p className="upstream-help">已有归属的客户端需先在原组移出并保存，再加入目标组。未分配期间该客户端无法调用模型。</p>
         </div> : <form id="upstream-model-form" className="upstream-editor-form" noValidate onSubmit={(event) => { event.preventDefault(); void save(); }}>
           {editor === 'group' && !draft.group_id && <Alert type="info">先填写并保存模型配置，再分配客户端。暂不分配客户端也可以创建组。</Alert>}
-          {editor === 'extraction' && <p>此配置供 Core 和 Knowledge 使用，需要供应商 API Key，不使用客户端透传凭据。</p>}
+          {editor === 'extraction' && <p>此配置供 Core 和 Knowledge 使用，选择供应商 API Key 或已登录的 ChatGPT 订阅。</p>}
           {editor === 'group' && <div className="upstream-field">
             <label htmlFor="upstream-group-name">组名 <span aria-hidden="true">*</span></label>
             <input id="upstream-group-name" value={draft.name} maxLength={64} required aria-invalid={!!errors.name} aria-describedby="upstream-name-help"
@@ -230,33 +239,31 @@ function GroupSettings() {
               <select id="upstream-provider" disabled={working} value={draft.provider} onChange={(event) => {
                 const provider = event.target.value as ProviderId;
                 const next = PROVIDERS.find((entry) => entry.id === provider);
-                change({ provider, base_url: next?.baseUrls[0] ?? '', model_id: next?.models[0] ?? '', api_key: '', custom_model: !next });
+                change({ provider, base_url: next?.baseUrls[0] ?? '', model_id: '', api_key: '', custom_model: !next, credential_kind: 'api_key', credential_ref: '' });
               }}>
                 {PROVIDERS.map((provider) => <option key={provider.id} value={provider.id}>{provider.name}</option>)}
                 <option value="local">本地模型</option><option value="custom">自定义供应商</option>
-              </select><small>选择供应商会预填地址和模型，可继续修改。</small>
+              </select><small>选择供应商会填写 API 地址，模型来自公共目录及账号发现。</small>
             </div>
-            <div className="upstream-field"><label htmlFor="upstream-model-choice">模型</label>
-              <select id="upstream-model-choice" disabled={working} value={draft.custom_model ? 'custom' : draft.model_id} onChange={(event) => {
-                const custom = event.target.value === 'custom'; change({ custom_model: custom, model_id: custom ? '' : event.target.value });
-              }}>
-                {preset?.models.map((model) => <option key={model} value={model}>{model}</option>)}<option value="custom">手动填写模型 ID</option>
-              </select><small>预设中没有所需模型时，选择“手动填写”。</small>
-            </div>
+
           </div>
-          {draft.custom_model && <div className="upstream-field"><label htmlFor="upstream-model-id">模型 ID <span aria-hidden="true">*</span></label>
+          <ModelCatalogPicker draft={draft} change={change} state={catalog} disabled={working} extraction={editor === 'extraction'}
+            protocols={agents.filter((agent) => draft.agents.includes(agent.agent_source)).map((agent) => agent.protocol)} />
+          {draft.credential_kind === 'chatgpt_oauth' && errors.api_key && <p role="alert" className="upstream-field-error">{errors.api_key}</p>}
+          {errors.model_id && <p role="alert" className="upstream-field-error">{errors.model_id}</p>}
+          {draft.custom_model && draft.credential_kind !== 'chatgpt_oauth' && <div className="upstream-field"><label htmlFor="upstream-model-id">模型 ID <span aria-hidden="true">*</span></label>
             <input id="upstream-model-id" value={draft.model_id} required aria-invalid={!!errors.model_id} disabled={working}
               placeholder="填写供应商提供的完整模型 ID" onChange={(event) => change({ model_id: event.target.value })} />
             {errors.model_id && <p role="alert" className="upstream-field-error">{errors.model_id}</p>}
           </div>}
           <div className="upstream-field"><label htmlFor="upstream-base-url">API 基础地址 <span aria-hidden="true">*</span></label>
-            <input id="upstream-base-url" type="url" value={draft.base_url} required aria-invalid={!!errors.base_url} aria-describedby="upstream-url-help" disabled={working}
+            <input id="upstream-base-url" type="url" value={draft.base_url} required aria-invalid={!!errors.base_url} aria-describedby="upstream-url-help" disabled={working || draft.credential_kind === 'chatgpt_oauth'}
               placeholder={draft.provider === 'local' ? 'http://host.docker.internal:11434/v1' : 'https://api.deepseek.com'}
               onChange={(event) => change({ base_url: event.target.value })} />
             <small id="upstream-url-help">{draft.provider === 'local' ? '填写 Docker 容器可以访问的地址；localhost 指向容器自身。' : '填写供应商文档中的 API 基础地址，无需追加 /chat/completions。'}</small>
             {errors.base_url && <p role="alert" className="upstream-field-error">{errors.base_url}</p>}
           </div>
-          {(editor === 'extraction' || draft.mode === 'custom_unified') && <div className="upstream-field">
+          {draft.credential_kind !== 'chatgpt_oauth' && (editor === 'extraction' || draft.mode === 'custom_unified') && <div className="upstream-field">
             <label htmlFor="upstream-api-key">供应商 API Key {reusingKey ? '（已保存，可留空）' : <span aria-hidden="true">*</span>}</label>
             <input id="upstream-api-key" type="password" autoComplete="new-password" value={draft.api_key} aria-invalid={!!errors.api_key} aria-describedby="upstream-key-help"
               disabled={working} placeholder={reusingKey ? '留空沿用此供应商已保存的 Key' : '粘贴模型供应商后台生成的 API Key'}
@@ -264,7 +271,7 @@ function GroupSettings() {
             <small id="upstream-key-help">供应商 Key 用于调用模型，与登录 Panel 的 User Key 不同。保存后加密存储，页面只显示掩码。{reusingKey ? '更换供应商地址后需要重新填写 Key。' : ''}</small>
             {errors.api_key && <p role="alert" className="upstream-field-error">{errors.api_key}</p>}
           </div>}
-          {editor === 'group' && <details className="upstream-advanced" open={draft.mode === 'custom_passthrough' ? true : undefined}><summary>高级设置：客户端透传凭据</summary>
+          {editor === 'group' && draft.credential_kind !== 'chatgpt_oauth' && <details className="upstream-advanced" open={draft.mode === 'custom_passthrough' ? true : undefined}><summary>高级设置：客户端透传凭据</summary>
             <div className="upstream-field"><label htmlFor="upstream-credential-mode">模型调用凭据</label>
               <select id="upstream-credential-mode" disabled={working} value={draft.mode} onChange={(event) => change({ mode: event.target.value as ModelDraft['mode'], api_key: '' })}>
                 <option value="custom_unified">服务器使用已保存的供应商 Key（推荐）</option><option value="custom_passthrough">由客户端透传供应商凭据</option>
@@ -273,16 +280,16 @@ function GroupSettings() {
           </details>}
           {editor === 'group' && <fieldset className="upstream-client-fieldset"><legend>客户端分配（可选）</legend>
             {availableAgents.length ? <div className="upstream-available-clients">{availableAgents.map((agent) => <label key={agent.agent_source}>
-              <input type="checkbox" disabled={working} checked={draft.agents.includes(agent.agent_source)} onChange={() => selectAgent(agent.agent_source)} />{agent.display_name}
+              <input type="checkbox" disabled={working || (draft.credential_kind === 'chatgpt_oauth' && agent.agent_source !== 'codex')} checked={draft.agents.includes(agent.agent_source)} onChange={() => selectAgent(agent.agent_source)} />{agent.display_name}
             </label>)}</div> : <p>所有客户端目前已有模型组，可以先保存此组，再通过“分配客户端”调整归属。</p>}
             <p className="upstream-help">此处只列出未分配或已属于本组的客户端。留空保存后，组会显示“待分配客户端”。</p>
           </fieldset>}
-          <div className="upstream-probe"><Button disabled={working || draft.mode === 'custom_passthrough' || !draft.api_key.trim()} loading={testing} onClick={() => void testConnection()}>测试连接</Button>
+          <div className="upstream-probe"><Button disabled={working || draft.mode === 'custom_passthrough' || (draft.credential_kind === 'chatgpt_oauth' ? !draft.credential_ref : !draft.api_key.trim())} loading={testing} onClick={() => void testConnection()}>测试连接</Button>
             <small>{draft.mode === 'custom_passthrough' ? '透传模式请从客户端发起模型调用验证。' : reusingKey && !draft.api_key.trim()
               ? '留空可沿用已保存 Key；重新输入供应商 Key 后可测试连接。' : '测试会向所填供应商发送最小模型请求；测试后仍需保存配置。'}</small>
           </div>
           {probe && <Alert type={probe.results.every((result) => result.status === 'ready') ? 'success' : 'warning'}>
-            {probe.results.map((result) => `${result.protocol}：${result.status === 'ready' ? '可用' : '未通过'}`).join('；')}。测试不会保存配置。
+            {probe.results.map((result) => `${result.protocol}：${result.status === 'ready' ? '可用' : result.status.startsWith('CHATGPT_') ? modelFailureMessage({ code: result.status }) : '未通过'}`).join('；')}。测试不会保存配置。
           </Alert>}
         </form>}
       </Modal.Body>

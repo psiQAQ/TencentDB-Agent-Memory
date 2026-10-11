@@ -10,7 +10,9 @@ const input = z.object({
   type: z.enum(['conversation', 'extraction']),
   base_url: z.string().max(2048),
   model_id: z.string().trim().min(1).max(200),
-  api_key: z.string().trim().min(1).max(4096),
+  api_key: z.string().trim().max(4096).optional(),
+  credential_kind: z.enum(['api_key', 'chatgpt_oauth']).optional(),
+  credential_ref: z.string().max(128).optional(),
   local: z.boolean().optional(),
   protocols: z.array(z.enum(['chat', 'responses', 'anthropic'])).min(1).max(3).optional(),
 });
@@ -24,6 +26,7 @@ export function registerUpstreamTestRoute(api: Hono, deps: PanelDeps): void {
     if (!(await isCallerSystemAdmin(deps, ctx))) return respondControlError(c, 403, 'permission_denied');
     const parsed = input.safeParse(await c.req.json().catch(() => null));
     if (!parsed.success) return respondControlError(c, 400, 'INVALID_PARAM');
+    if (parsed.data.credential_kind === 'chatgpt_oauth' ? !parsed.data.credential_ref || !!parsed.data.api_key : !parsed.data.api_key) return respondControlError(c, 400, 'INVALID_PARAM');
     const proxyBase = process.env.MODEL_PROBE_PROXY_URL;
     if (!proxyBase) return respondControlError(c, 503, 'PROXY_PROBE_NOT_CONFIGURED');
     const protocols = parsed.data.type === 'extraction' ? ['chat'] :
@@ -32,7 +35,7 @@ export function registerUpstreamTestRoute(api: Hono, deps: PanelDeps): void {
       const response = await fetch(`${proxyBase.replace(/\/+$/, '')}/internal/upstream/test`, {
         method: 'POST',
         redirect: 'error',
-        signal: AbortSignal.timeout(15_000),
+        signal: AbortSignal.timeout(parsed.data.credential_kind === 'chatgpt_oauth' ? 80_000 : 15_000),
         headers: {
           authorization: `Bearer ${ctx.gatewayApiKey}`,
           'x-tdai-service-id': ctx.instanceId,

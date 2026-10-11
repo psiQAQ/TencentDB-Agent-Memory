@@ -52,6 +52,10 @@ export interface TdaiMemoryToolsInjectorConfig {
   proxyBaseUrl: string;
 }
 
+function shellQuote(value: string): string {
+  return `'${value.replaceAll("'", "'\\''")}'`;
+}
+
 /** 渲染整段 `<tdai_memory_tools>` 文本，纯函数便于测试。 */
 export function renderTdaiMemoryToolsBlock(
   proxyBaseUrl: string,
@@ -60,14 +64,14 @@ export function renderTdaiMemoryToolsBlock(
   agentSource?: string,
 ): string {
   const base = proxyBaseUrl.replace(/\/$/, "");
-  const bridge = `${base}/memory-bridge/v3`;
+  const bridge = "${tdai_memory_base%/}/memory-bridge/v3";
   // Bridge authenticates every request before reading session state. The
   // credential stays in the client environment; only its variable reference
   // is rendered into the cached prompt.
   const credentialHeader = ` -H "x-api-key: \${TDAI_MEMORY_USER_KEY:?TDAI_MEMORY_USER_KEY is required}"`;
-  const sessionHeader = sessionId ? ` -H 'x-conversation-id: ${sessionId}'` : "";
-  const tenantHeader = spaceId ? ` -H 'x-tdai-service-id: ${spaceId}'` : "";
-  const sourceHeader = agentSource ? ` -H 'x-tdai-agent-source: ${agentSource}'` : "";
+  const sessionHeader = sessionId ? ` -H ${shellQuote(`x-conversation-id: ${sessionId}`)}` : "";
+  const tenantHeader = spaceId ? ` -H ${shellQuote(`x-tdai-service-id: ${spaceId}`)}` : "";
+  const sourceHeader = agentSource ? ` -H ${shellQuote(`x-tdai-agent-source: ${agentSource}`)}` : "";
   const authHeader = `${credentialHeader}${tenantHeader}${sourceHeader}${sessionHeader}`;
 
   const lines: string[] = [
@@ -78,6 +82,7 @@ export function renderTdaiMemoryToolsBlock(
     "禁止说\"我没有这个工具 / 需要 MCP / 只能查本地记忆\" —— 你有 TDAI 记忆工具，就用下面的 curl 命令。",
     "",
     "调用方式：Bash 里执行 curl 命中 proxy 的 memory-bridge 路径。客户端必须在 TDAI_MEMORY_USER_KEY 环境变量中保持自己的 Memory user key；proxy 验证它后从该用户的 session 注入 team_id/user_id/agent_id。body 只需业务字段。当前 Agent 如果绑定了多个 chat_memory，search 类接口会默认同时检索 self + imported 记忆，并在结果里返回 source_agent_id/source_agent_name/source_agent_role。",
+    "地址选择：每次 Bash 调用先按完整示例设置 tdai_memory_base。TDAI_PROXY_BASE_URL 若已设置，就是客户端可访问的完整 Proxy 基地址（包含所需路径前缀）；直接使用其值，不再追加 /proxy。不设置时使用示例中的部署地址。URL 必须用双引号包围，让 Shell 展开变量。",
     "",
     "覆盖范围：",
     "- L3（persona 长期画像）与 L2 场景索引（`<l2_scene_index>`）已直接注入 system，无需查询；",
@@ -85,39 +90,39 @@ export function renderTdaiMemoryToolsBlock(
     "- L0/L1（原始对话 / 原子记忆）**不再每轮自动召回**（会破坏 KV cache），需要时主动调工具检索。",
     "",
     "  <tool name=\"tdai_memory_search\">",
-    `    curl: ${bridge}/atomic/search`,
+    `    curl: "${bridge}/atomic/search"`,
     `    body: {"query": "<text>", "limit": 5}`,
     "    use:  搜索 L1 原子记忆（双路 hybrid: dense vector + BM25），按相关度排序。默认跨当前 Agent 的 self + imported 记忆检索；返回项里的 source_agent_* 表示来源。适合回忆用户偏好、历史结论、规则等。",
     "    returns: {code, data: {items: [...], searched_agents: [...]}} — 命中项在 data.items[]。",
     "  </tool>",
     "",
     "  <tool name=\"tdai_atomic_query\">",
-    `    curl: ${bridge}/atomic/query`,
+    `    curl: "${bridge}/atomic/query"`,
     `    body: {"type": "?episodic|persona|instruction", "limit": 20, "offset": 0, "time_start": "?ISO", "time_end": "?ISO"}`,
     "    use:  按 type / 时间窗 / 分页拉取 L1 记忆（不做语义检索）。",
     "  </tool>",
     "",
     "  <tool name=\"tdai_conversation_search\">",
-    `    curl: ${bridge}/conversation/search`,
+    `    curl: "${bridge}/conversation/search"`,
     `    body: {"query": "<text>", "limit": 5, "session_id": "?<sid>"}`,
     "    use:  在 L0 原始对话中检索（比 atomic_search 粒度更细，找具体消息原文 / 引用 / 时间线）。默认跨当前 Agent 的 self + imported 记忆检索；返回项里的 source_agent_* 表示来源。",
     "    returns: {code, data: {messages: [...], searched_agents: [...]}} — 命中项在 data.messages[]（注意：与 atomic_search 的 data.items 不同）。",
     "  </tool>",
     "",
     "  <tool name=\"tdai_conversation_query\">",
-    `    curl: ${bridge}/conversation/query`,
+    `    curl: "${bridge}/conversation/query"`,
     `    body: {"session_id": "<sid>", "limit": 50, "offset": 0}`,
     "    use:  按 session 顺序取 L0 历史消息。",
     "  </tool>",
     "",
     "  <tool name=\"tdai_scenario_ls\">",
-    `    curl: ${bridge}/scenario/ls`,
+    `    curl: "${bridge}/scenario/ls"`,
     `    body: {"path_prefix": "?可选前缀"}`,
     "    use:  列出 L2 scene_blocks 路径索引（含 summary，不含正文）。一般 system 已注入索引，需刷新/按前缀过滤时才用。",
     "  </tool>",
     "",
     "  <tool name=\"tdai_read_scene\">",
-    `    curl: ${bridge}/scenario/read`,
+    `    curl: "${bridge}/scenario/read"`,
     `    body: {"path": "<scene path>", "agent_id": "?来自 <agent agent_id=...>，读取 imported 记忆时传"}`,
     "    use:  按 path 读取 L2 场景文件全文。path 必须先从 `<l2_scene_index>` 或 tdai_scenario_ls 获取，不要凭空构造；读取 imported_from 分段的 path 时带上该分段 agent_id。",
     "  </tool>",
@@ -135,7 +140,9 @@ export function renderTdaiMemoryToolsBlock(
     "",
     "## 完整示例",
     "```bash",
-    `curl -sfk -X POST ${bridge}/atomic/search \\`,
+    `tdai_memory_base=${shellQuote(base)}`,
+    'tdai_memory_base="${TDAI_PROXY_BASE_URL:-$tdai_memory_base}"',
+    `curl -sfk -X POST "${bridge}/atomic/search" \\`,
     `  -H 'Content-Type: application/json'${authHeader} \\`,
     `  -d '{"query": "用户偏好的编程语言", "limit": 5}'`,
     "```",

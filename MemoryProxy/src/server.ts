@@ -3,6 +3,7 @@
 import { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { UpstreamConfigReadError } from "./instance-upstream-cache.js";
+import { SubscriptionError } from "./chatgpt-subscription.js";
 import { MissingUpstreamCredentialError } from "./upstream-headers.js";
 import { SessionContextUnavailableError, SessionIdentityConflictError, SessionStoreUnavailableError } from "./session/store.js";
 import { log } from "./report/log.js";
@@ -57,6 +58,7 @@ export function createApp(config: ProxyConfig): Hono {
   const app = new Hono();
 
   app.onError((error, c) => {
+    if (error instanceof SubscriptionError) return c.json({ error: { type: "subscription_error", code: error.code, message: error.code } }, error.status);
     if (error instanceof MissingUpstreamCredentialError) return c.json({ error: "model_not_configured_or_protocol_unavailable" }, 503);
     if (error instanceof SessionIdentityConflictError) return c.json({ error: "session_identity_conflict" }, 403);
     if (error instanceof SessionContextUnavailableError) return c.json({ error: "session_context_unavailable" }, 409);

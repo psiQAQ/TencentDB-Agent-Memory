@@ -6,6 +6,7 @@ import { isIP } from "node:net";
 import type { Context } from "hono";
 import type { ProxyConfig } from "./types.js";
 import { refreshInstanceUpstreamConfigs, resolveInstanceTargetUrl } from "./instance-upstream-cache.js";
+import { resolveSubscriptionToken, subscriptionToChat, SubscriptionError } from "./chatgpt-subscription.js";
 
 type Protocol = "chat" | "responses" | "anthropic";
 const PROTOCOLS = new Set<Protocol>(["chat", "responses", "anthropic"]);
@@ -105,6 +106,28 @@ export async function handleUpstreamProbe(c: Context, config: ProxyConfig): Prom
   catch { return c.json({ error: "invalid_input" }, 400); }
   const instanceId = c.req.header("x-tdai-service-id") ?? "";
   if (!instanceId || instanceId.length > 128) return c.json({ error: "invalid_instance" }, 400);
+  if (input.credential_kind === "chatgpt_oauth") {
+    if (input.base_url !== "https://api.openai.com/v1" || typeof input.model_id !== "string" || !input.model_id ||
+      typeof input.credential_ref !== "string" || !input.credential_ref || input.api_key ||
+      !Array.isArray(input.protocols) || input.protocols.some((p) => p !== "chat" && p !== "responses")) return c.json({ error: "invalid_input" }, 400);
+    const rateKey = `${instanceId}:${input.type}`;
+    if (Date.now() - (recent.get(rateKey) ?? 0) < 10_000) return c.json({ error: "probe_rate_limited" }, 429);
+    if (recent.size > 256) recent.clear();
+    recent.set(rateKey, Date.now());
+    try {
+      const token = await resolveSubscriptionToken(config.coreSkill, instanceId, { credential_ref: input.credential_ref, model_id: input.model_id });
+      const response = await fetch("https://api.openai.com/v1/responses", {
+        method: "POST", redirect: "error", signal: AbortSignal.timeout(30_000),
+        headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+        body: JSON.stringify({ model: input.model_id, input: [{ role: "user", content: "Reply OK." }], stream: true, store: false }),
+      });
+      const chat = await subscriptionToChat(response, false);
+      const ready = hasText("chat", await chat.json() as Record<string, unknown>);
+      return c.json({ results: input.protocols.map((protocol) => ({ protocol, status: ready ? "ready" : "invalid_response", httpStatus: 200 })) });
+    } catch (error) {
+      return c.json({ results: input.protocols.map((protocol) => ({ protocol, status: error instanceof SubscriptionError ? error.code : "CHATGPT_UPSTREAM_UNAVAILABLE" })) });
+    }
+  }
   const baseUrl = input.base_url;
   const model = input.model_id;
   const protocols = input.protocols;

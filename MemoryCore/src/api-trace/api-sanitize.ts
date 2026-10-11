@@ -37,6 +37,10 @@ export function sanitizeApiPayload(value: unknown, maxFieldChars: number, depth 
   const out: Record<string, unknown> = {};
   for (const [key, raw] of Object.entries(value as Record<string, unknown>)) {
     const lower = key.toLowerCase();
+    if (["access_token", "refresh_token", "id_token", "authorization_code", "authorization_url", "code_verifier", "state", "nonce"].includes(lower)) {
+      out[key] = "[redacted]";
+      continue;
+    }
     if (API_TRACE_SENSITIVE_KEYS.has(lower)) {
       out[key] = typeof raw === "string" && raw.length > 0 ? maskKeyValue(raw) : "[redacted]";
       continue;

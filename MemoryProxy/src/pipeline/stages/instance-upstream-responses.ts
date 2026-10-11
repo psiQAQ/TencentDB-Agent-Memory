@@ -1,4 +1,5 @@
 import { resolveInstanceTargetUrl } from "../../instance-upstream-cache.js";
+import { resolveSubscriptionToken, SubscriptionError } from "../../chatgpt-subscription.js";
 /**
  * stages/instance-upstream-responses.ts —— codex + workbuddy 专用的 instance
  * upstream 解析 + 400 早退 + override 应用 一次搞定 stage。
@@ -45,6 +46,7 @@ export interface InstanceUpstreamResponsesBlocked {
 }
 
 export interface InstanceUpstreamResponsesResult {
+  subscription?: boolean;
   /** override 应用后的新 upstream URL (无 override 时 = undefined) */
   overrideUrl?: string;
   effectiveApiKey?: string;
@@ -112,6 +114,13 @@ export async function stageInstanceUpstreamResponses(
 
   if (resolution.kind === "override") {
     const row = resolution.row;
+    if (row.credential_kind === "chatgpt_oauth") {
+      if (agent !== "codex" || !/\/responses$/.test(pathForOverride)) throw new SubscriptionError("CHATGPT_ENDPOINT_UNSUPPORTED", 400);
+      const token = await resolveSubscriptionToken(config.coreSkill, spaceId, { group_id: row.group_id, model_id: row.model_id });
+      return { overrideUrl: "https://api.openai.com/v1/responses", effectiveApiKey: token, subscription: true,
+        allowClientCredentials: false, headerUpdates: { authorization: `Bearer ${token}`, deleteXApiKey: true },
+        bodyModelOverride: row.model_id, skipCreditReport: true };
+    }
     const overrideUrl = resolveInstanceTargetUrl(row, joinUrl(row.base_url, pathForOverride));
     const headerUpdates: NonNullable<InstanceUpstreamResponsesResult["headerUpdates"]> = {};
     if (row.mode === "custom_unified" && row.api_key) {

@@ -23,6 +23,12 @@ export const META_LIST_ACTIONS = new Set([
 ]);
 
 export const META_ACTIONS = [
+  'model-catalog/list',
+  'model-catalog/refresh',
+  'model-catalog/discover',
+  'model-connections/chatgpt/start',
+  'model-connections/chatgpt/complete',
+  'model-connections/chatgpt/disconnect',
   'upstream/supported-agents',
   'instance-upstream/groups/list',
   'instance-upstream/groups/create',

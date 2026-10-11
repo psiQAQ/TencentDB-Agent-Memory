@@ -59,7 +59,7 @@ afterEach(() => {
 });
 
 describe.each(cases)("configuration failure: %s", (kind) => {
-  it.each(routes)("uses the official fallback without exposing errors on %s", async (path) => {
+  it.each(routes)("rejects unavailable configuration without changing billing route on %s", async (path) => {
     const diagnostics = [vi.spyOn(console, "error"), vi.spyOn(console, "warn"), vi.spyOn(log, "warn")];
     const calls: string[] = [];
     vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request) => {
@@ -69,8 +69,8 @@ describe.each(cases)("configuration failure: %s", (kind) => {
     }));
     const config = configuration(); config.creditPricing.models = []; config.costGuard.enabled = false;
     const response = await createApp(config).request(`http://proxy${path}`, request());
-    expect(response.status).toBe(200);
-    expect(calls.some((url) => url.startsWith("https://deployment.invalid"))).toBe(true);
+    expect(response.status).toBe(503);
+    expect(calls.some((url) => url.startsWith("https://deployment.invalid"))).toBe(false);
     expect(JSON.stringify(diagnostics.map((spy) => spy.mock.calls))).not.toContain(PRIVATE);
   });
   it("keeps refresh failures private and explicit", async () => {

@@ -53,6 +53,18 @@ it('probes only Chat for extraction', async () => {
   await call({ ...draft, type: 'extraction' });
   expect(JSON.parse(proxyFetch.mock.calls[0][1].body).protocols).toEqual(['chat']);
 });
+it('probes a subscription through its reference without requiring or forwarding an API key', async () => {
+  const response = await call({ ...draft, api_key: undefined, base_url: 'https://api.openai.com/v1',
+    credential_kind: 'chatgpt_oauth', credential_ref: 'synthetic-connection', protocols: ['responses'] });
+  expect(response.status).toBe(200);
+  const forwarded = JSON.parse(proxyFetch.mock.calls[0][1].body);
+  expect(forwarded).toMatchObject({ credential_kind: 'chatgpt_oauth', credential_ref: 'synthetic-connection', protocols: ['responses'] });
+  expect(forwarded).not.toHaveProperty('api_key');
+});
+it('rejects mixed subscription and API credentials before contacting Proxy', async () => {
+  expect((await call({ ...draft, credential_kind: 'chatgpt_oauth', credential_ref: 'synthetic-connection' })).status).toBe(400);
+  expect(proxyFetch).not.toHaveBeenCalled();
+});
 
 it('forwards an independent local key only to the internal probe and does not return it', async () => {
   const local = {

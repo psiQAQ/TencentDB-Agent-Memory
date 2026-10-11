@@ -1,3 +1,4 @@
+import { chatToResponses, guardSubscriptionResponse, resolveSubscriptionToken, SubscriptionError, subscriptionResponsesRequest, subscriptionToChat } from "./chatgpt-subscription.js";
 /**
  * System-user passthrough handler.
  *
@@ -469,12 +470,19 @@ export async function handleSystemUserPassthrough(
   //   - 有效配置 → 替换 upstream + 跳过 alias + 不上报 credit(用户的模型归用户)
   let extractionApiKeyOverride: string | undefined;
   let extractionModelIdOverride: string | undefined;
+  let subscriptionExtraction = false;
   {
     const instanceConfigs = await getInstanceUpstreamConfigs(config.coreSkill, spaceId, config.instanceUpstream);
     const extractRow = resolveExtraction(instanceConfigs);
     if (extractRow) {
       upstreamUrl = joinUrl(extractRow.base_url, path);
       extractionApiKeyOverride = extractRow.api_key;
+      if (extractRow.credential_kind === "chatgpt_oauth") {
+        if (!/\/(chat\/completions|responses)$/.test(path)) throw new SubscriptionError("CHATGPT_EXTRACTION_PROTOCOL_UNSUPPORTED", 400);
+        extractionApiKeyOverride = await resolveSubscriptionToken(config.coreSkill, spaceId, { group_id: extractRow.group_id, model_id: extractRow.model_id });
+        upstreamUrl = "https://api.openai.com/v1/responses";
+        subscriptionExtraction = true;
+      }
       if (extractRow.model_id) {
         extractionModelIdOverride = extractRow.model_id;
       }
@@ -510,6 +518,15 @@ export async function handleSystemUserPassthrough(
     bodyObj = tryParseJson(bodyTextForTrace);
   }
   const modelId = readModelId(bodyObj);
+  const chatSubscription = subscriptionExtraction && /\/chat\/completions$/.test(path);
+  const requestedStream = bodyObj?.stream === true;
+  const includeUsage = !!(bodyObj?.stream_options && (bodyObj.stream_options as Record<string, unknown>).include_usage);
+  if (subscriptionExtraction) {
+    if (!bodyObj) throw new SubscriptionError("CHATGPT_INVALID_REQUEST", 400);
+    bodyObj.model = extractionModelIdOverride;
+    const request = chatSubscription ? chatToResponses(bodyObj) : subscriptionResponsesRequest(bodyObj);
+    rawBody = new TextEncoder().encode(JSON.stringify(request)).buffer as ArrayBuffer;
+  }
   const requestPayload: unknown = bodyObj ?? bodyTextForTrace;
 
   log.info("systemUser.passthrough", {
@@ -577,6 +594,13 @@ export async function handleSystemUserPassthrough(
   if (upstreamResp.status >= 300 && upstreamResp.status < 400) {
     log.warn("systemUser.redirect_rejected", { status: upstreamResp.status });
     return c.json({ error: "Upstream redirect rejected" }, 502);
+  }
+
+  if (subscriptionExtraction) {
+    if (chatSubscription) upstreamResp = await subscriptionToChat(upstreamResp, requestedStream, includeUsage);
+    else {
+      upstreamResp = guardSubscriptionResponse(upstreamResp, bodyObj?.tools);
+    }
   }
 
   const upstreamRequestId = upstreamResp.headers.get("x-request-id") ?? undefined;

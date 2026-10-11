@@ -124,6 +124,7 @@ disable_response_storage = true
 [model_providers.team-proxy]
 name       = "TDAI team-proxy"
 wire_api   = "responses"
+supports_websockets = false
 base_url   = ${quoted(codexEndpoint)}
 experimental_bearer_token = ${quoted(USER_KEY_PLACEHOLDER)}
 

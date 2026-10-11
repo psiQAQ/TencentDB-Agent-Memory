@@ -3,7 +3,8 @@ import {
 } from './upstream-provider-catalog';
 
 export type CredentialMode = 'custom_unified' | 'custom_passthrough';
-export interface ModelGroup {
+export interface ModelAuthFields { provider_id?: ProviderId; credential_kind?: 'api_key' | 'chatgpt_oauth'; credential_ref?: string }
+export interface ModelGroup extends ModelAuthFields {
   group_id: string;
   group_type: 'default' | 'custom';
   name: string;
@@ -15,7 +16,8 @@ export interface ModelGroup {
   model_id: string;
   version: number;
 }
-export interface ExtractionModel {
+export interface ExtractionModel extends ModelAuthFields {
+  group_id?: string;
   configured: boolean;
   enabled: boolean;
   base_url?: string;
@@ -24,6 +26,8 @@ export interface ExtractionModel {
   version?: number;
 }
 export interface ModelDraft {
+  credential_kind: 'api_key' | 'chatgpt_oauth';
+  credential_ref: string;
   group_id?: string;
   version?: number;
   name: string;
@@ -40,33 +44,36 @@ export type DraftErrors = Partial<Record<DraftField, string>>;
 
 export function emptyModelDraft(): ModelDraft {
   return {
-    name: '', agents: [], provider: 'deepseek', base_url: PROVIDERS[0].baseUrls[0],
+    name: '', agents: [], provider: 'deepseek', base_url: PROVIDERS[0].baseUrls[0], credential_kind: 'api_key', credential_ref: '',
     model_id: PROVIDERS[0].models[0], api_key: '', mode: 'custom_unified', custom_model: false,
   };
 }
 
 export function draftFromGroup(group: ModelGroup): ModelDraft {
-  const provider = providerForUrl(group.base_url);
+  const provider = group.provider_id ?? providerForUrl(group.base_url);
   return {
     ...emptyModelDraft(), group_id: group.group_id, version: group.version, name: group.name,
     agents: [...group.agents], provider, base_url: group.base_url, model_id: group.model_id,
     mode: group.mode === 'custom_passthrough' ? 'custom_passthrough' : 'custom_unified',
+    credential_kind: group.credential_kind ?? 'api_key', credential_ref: group.credential_ref ?? '',
     custom_model: !PROVIDERS.find((entry) => entry.id === provider)?.models.includes(group.model_id),
   };
 }
 
 export function draftFromExtraction(extraction: ExtractionModel): ModelDraft {
   if (!extraction.configured) return emptyModelDraft();
-  const provider = providerForUrl(extraction.base_url ?? '');
+  const provider = extraction.provider_id ?? providerForUrl(extraction.base_url ?? '');
   return {
-    ...emptyModelDraft(), version: extraction.version, provider,
+    ...emptyModelDraft(), version: extraction.version, provider, group_id: extraction.group_id,
+    credential_kind: extraction.credential_kind ?? 'api_key', credential_ref: extraction.credential_ref ?? '',
     base_url: extraction.base_url ?? '', model_id: extraction.model_id ?? '',
     custom_model: !PROVIDERS.find((entry) => entry.id === provider)?.models.includes(extraction.model_id ?? ''),
   };
 }
 
 export function canReuseModelKey(draft: ModelDraft, saved?: ModelGroup | ExtractionModel): boolean {
-  return !!saved?.api_key_masked && sameUpstreamOrigin(saved.base_url ?? '', draft.base_url);
+  return draft.credential_kind !== 'chatgpt_oauth' && saved?.credential_kind !== 'chatgpt_oauth' &&
+    !!saved?.api_key_masked && (saved.provider_id ?? providerForUrl(saved.base_url ?? '')) === draft.provider && sameUpstreamOrigin(saved.base_url ?? '', draft.base_url);
 }
 
 export function validateModelDraft(
@@ -92,7 +99,11 @@ export function validateModelDraft(
     ? '请填写容器可访问的模型地址，例如 http://host.docker.internal:11434/v1；不要使用 localhost。'
     : '请填写 HTTPS API 基础地址，不要在地址中放用户名、Key、查询参数或片段。';
   if (!draft.model_id.trim()) errors.model_id = '请选择一个模型，或填写供应商提供的模型 ID。';
-  if (extraction || draft.mode === 'custom_unified') {
+  if (draft.credential_kind === 'chatgpt_oauth') {
+    if (!draft.credential_ref) errors.api_key = '请先登录并选择 ChatGPT 连接。';
+    if (draft.provider !== 'openai' || draft.mode !== 'custom_unified') errors.api_key = 'ChatGPT 订阅仅用于 OpenAI 服务器认证。';
+    if (!extraction && draft.agents.some((agent) => agent !== 'codex')) errors.model_id = '当前订阅对话只支持 Codex 客户端。';
+  } else if (extraction || draft.mode === 'custom_unified') {
     const key = draft.api_key.trim();
     if (key.startsWith('sk-mem-')) errors.api_key = '这里需要模型供应商的 API Key；sk-mem- 开头的 User Key 用于登录和客户端接入。';
     else if (!key && !canReuseModelKey(draft, saved)) {
@@ -104,8 +115,9 @@ export function validateModelDraft(
 
 export function modelWriteRequest(draft: ModelDraft, extraction?: ExtractionModel) {
   const fields = {
+    provider_id: draft.provider, credential_kind: draft.credential_kind, credential_ref: draft.credential_kind === 'chatgpt_oauth' ? draft.credential_ref : '',
     base_url: draft.base_url.trim(), model_id: draft.model_id.trim(),
-    ...((extraction || draft.mode === 'custom_unified') && draft.api_key.trim()
+    ...(draft.credential_kind !== 'chatgpt_oauth' && (extraction || draft.mode === 'custom_unified') && draft.api_key.trim()
       ? { api_key: draft.api_key.trim() } : {}),
   };
   if (extraction) return {
@@ -135,6 +147,25 @@ export function modelFailureMessage(cause: unknown): string {
   const raw = 'rawMessage' in error && typeof error.rawMessage === 'string' ? error.rawMessage : '';
   const namedCode = raw.match(/^([A-Z_]+|permission_denied)(?=:|$)/)?.[1] ?? '';
   const messages: Record<string, string> = {
+    CHATGPT_REAUTH_REQUIRED: 'ChatGPT 连接已失效，请重新登录。',
+    CHATGPT_MODEL_NOT_AVAILABLE: '该模型不在当前订阅账号的列表中，请获取模型后重新选择。',
+    CHATGPT_PLAN_PERMISSION_REQUIRED: '此连接未获得 ChatGPT 计划用量权限，请重新登录并完成授权。',
+    CHATGPT_QUOTA_EXCEEDED: 'ChatGPT 可用额度不足，请查看用量或手动切换模型配置。',
+    CHATGPT_PERMISSION_DENIED: 'ChatGPT 账号未获得此次调用权限，请检查授权与所选模型。',
+    CHATGPT_STREAM_INTERRUPTED: 'ChatGPT 响应中途断开，此次调用未完成。',
+    CHATGPT_RESPONSE_FAILED: 'ChatGPT 未完成此次响应，请检查账号状态后重试。',
+    CHATGPT_UPSTREAM_UNAVAILABLE: 'ChatGPT 服务暂不可用，请稍后重试。',
+    CHATGPT_CONNECTION_UNAVAILABLE: '暂时无法读取 ChatGPT 连接，请检查 Core 服务。',
+    MODEL_AUTH_REQUIRED: '供应商凭据无效，请检查 Key 或重新登录。',
+    MODEL_PERMISSION_DENIED: '供应商凭据缺少读取模型列表的权限。',
+    MODEL_QUOTA_EXCEEDED: '供应商请求受到额度或频率限制，请稍后重试。',
+    MODEL_DISCOVERY_REQUIRES_OFFICIAL_ENDPOINT: '此地址不支持自动发现，可手动填写模型 ID。',
+    MODEL_CONNECTION_BUSY: '该连接正在更新，请稍后重试。',
+    CHATGPT_ACCOUNT_MISMATCH: '登录账号与所选连接不一致，请使用原账号或新增连接。',
+    CHATGPT_AUTHORIZATION_DENIED: '本次 ChatGPT 授权已取消。',
+    CHATGPT_LOGIN_EXPIRED: '登录请求已过期或 Panel 已重启，请重新登录。',
+    CHATGPT_CODEX_ONLY: '订阅对话当前只支持 Codex；总结模型可单独配置。',
+    MODEL_SOURCE_UNAVAILABLE: '模型来源暂不可用，已保留上次成功列表。',
     DUPLICATE_GROUP_NAME: '模型组名称已存在，请换一个名称。',
     MISSING_GROUP_NAME: '请检查组名：最多 64 个字符，不含引号或斜杠。',
     AGENTS_OVERLAP: '客户端已经分配给其他组。请先在原组移出并保存，再分配到目标组。',

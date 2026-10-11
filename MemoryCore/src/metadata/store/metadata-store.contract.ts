@@ -62,6 +62,33 @@ export function runMetadataStoreContract(
       await teardown(store);
     });
 
+    describe("model catalog and credential state", () => {
+      it("isolates instances and admits only one concurrent CAS writer", async () => {
+        const created = await store.setModelState("oauth:test", "encrypted", 0);
+        expect(created?.version).toBe(1);
+        const results = await Promise.all([store.setModelState("oauth:test", "a", 1), store.setModelState("oauth:test", "b", 1)]);
+        expect(results.filter(Boolean)).toHaveLength(1);
+        expect((await store.getModelState("oauth:test"))?.version).toBe(2);
+        expect((await store.listModelStates("oauth:")).map((row) => row.key)).toEqual(["oauth:test"]);
+        expect(await store.listModelStates("catalog:")).toEqual([]);
+        const other = await makeStore();
+        try { await other.init(); expect(await other.getModelState("oauth:test")).toBeNull(); }
+        finally { await teardown(other); }
+        expect(await store.deleteModelState("oauth:test", 1)).toBe(false);
+        expect(await store.getModelState("oauth:test")).not.toBeNull();
+        expect(await store.deleteModelState("oauth:test", 2)).toBe(true);
+        expect(await store.getModelState("oauth:test")).toBeNull();
+      });
+      it("persists explicit authentication fields without copying subscription credentials into groups", async () => {
+        const row = await store.createInstanceUpstreamGroup({ group_type: "custom", name: "Subscription", mode: "custom_unified",
+          provider_id: "openai", credential_kind: "chatgpt_oauth", credential_ref: "connection-a", api_key: "", model_id: "account-model" });
+        expect(await store.getInstanceUpstreamGroup(row.group_id)).toMatchObject({ credential_ref: "connection-a", credential_kind: "chatgpt_oauth", provider_id: "openai", api_key: "" });
+        await store.updateInstanceUpstreamGroup({ group_id: row.group_id, expected_group_type: "custom", expected_version: row.version,
+          credential_kind: "api_key", credential_ref: "", api_key: "encrypted-key" });
+        expect(await store.getInstanceUpstreamGroup(row.group_id)).toMatchObject({ credential_ref: "", credential_kind: "api_key", api_key: "encrypted-key" });
+      });
+    });
+
     // ── User ──
     describe("User", () => {
       it("defaults local authentication and external identity to the generated user ID", async () => {

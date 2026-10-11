@@ -12,6 +12,7 @@
 // 枚举与字面量类型
 // ============================
 
+import type { ModelAuthFields } from "./models/types.js";
 export type UserStatus = "active" | "inactive" | "invited";
 export type UserType = "normal" | "system_admin";
 export type TeamStatus = "active" | "archived";
@@ -716,7 +717,7 @@ export const EXTRACTION_GROUP_NAME = "抽取模型";
  * agents 字段以 JSON 数组形式存储(SQLite 用 TEXT 存 JSON, MongoDB 用原生数组)。
  * MongoDB 侧额外多一个 `version` 字段(乐观锁,§5.3);SQLite 不需要。
  */
-export interface InstanceUpstreamConfigEntity {
+export interface InstanceUpstreamConfigEntity extends ModelAuthFields {
   id: number;
   /** 后端生成的组 ID:`dflt-<random>` / `grp-<random>` / `ext-<random>`。 */
   group_id: string;
@@ -766,7 +767,7 @@ export interface InstanceUpstreamConfigEntity {
  * create 输入:新建 default (seed 内部用) / custom / extraction 行。
  * group_id 由 store 层生成,调用方不传。
  */
-export interface CreateInstanceUpstreamGroupInput {
+export interface CreateInstanceUpstreamGroupInput extends ModelAuthFields {
   group_type: GroupType;
   name?: string;
   agents?: string[];
@@ -782,7 +783,7 @@ export interface CreateInstanceUpstreamGroupInput {
  * update 输入:PATCH 语义,未传字段保留原值。
  * `api_key`:undefined = 保留原值;空串 = 显式清空。
  */
-export interface UpdateInstanceUpstreamGroupInput {
+export interface UpdateInstanceUpstreamGroupInput extends ModelAuthFields {
   group_id: string;
   /** 期望的 group_type,用作 dispatch 守卫(与库中不符 → GROUP_TYPE_MISMATCH)。 */
   expected_group_type: GroupType;

@@ -1,3 +1,5 @@
+import { subscriptionResolveSchema } from "./v3-meta-schemas.js";
+import { ModelConnectionError } from "../models/types.js";
 /**
  * v3 内部元数据路由（/v3/internal/meta/*）。
  * 运维 / 控制面专用；不写入公开 MetadataClient。
@@ -152,6 +154,8 @@ const routeTable: Record<string, InternalHandler> = {
     },
   ),
   // §6.D:Proxy 拉全量配置(明文 api_key),同时触发 seed default 组。
+  [`${V3_INTERNAL_PREFIX}/model-connections/chatgpt/resolve`]: bind(subscriptionResolveSchema,
+    async (d, svc) => svc.modelCatalog.resolveSubscription(d)),
   [`${V3_INTERNAL_PREFIX}/instance-upstream/list`]: bind(
     instanceUpstreamInternalListSchema,
     async (_d, svc, _instanceId, runtime) =>
@@ -264,6 +268,10 @@ export async function handleInternalMetaRoute(
     );
     return true;
   } catch (err) {
+    if (err instanceof ModelConnectionError) {
+      sendJson(res, err.status, errorEnvelope(err.status, err.code, requestId));
+      return true;
+    }
     if (err instanceof MetadataError) {
       const code = mapErrorCode(err.code);
       const message = `${err.code}: ${err.message}`;

@@ -5,13 +5,12 @@
  * Rewritten to v2 (model groups). See
  * docs/design/2026-08-25-instance-upstream-config.md §5 / §7.
  *
- * Cache semantics (与 v1 一致,只换数据结构):
+ * Cache semantics:
  *   - Key: spaceId (one entry per instance, covering all groups + extraction)
  *   - TTL: 由 config.instanceUpstream.cacheTtlSec 决定(秒,默认 30),
  *          hard expiry,不 refresh-on-access
  *   - Stale-if-error: on fetch failure, return last known good value
- *   - First-time failure: return empty array (= 触发 resolveForAgent 零行 fallback,
- *     视为 official 全走全局 upstream + alias,与旧版行为一致)
+ *   - First-time failure: reject with 503 when no successful configuration exists
  *   - Max entries: 256, evict oldest-written on overflow
  *
  * ## v1 → v2 API 迁移
@@ -58,6 +57,9 @@ export interface InstanceUpstreamRow {
   mode: UpstreamMode;
   base_url: string;
   api_key: string;      // 内部接口拿到明文,供 Proxy 转发上游
+  provider_id?: string;
+  credential_kind?: "api_key" | "chatgpt_oauth";
+  credential_ref?: string;
   model_id: string;
   // ── Core 真实返回里还带的字段 ─────────────────────────────────────────────
   // Proxy 本身不消费它们, 但真实 API 返回里有, 测试 mock 也会填, 不写进类型
@@ -152,12 +154,9 @@ async function fetchFromCore(
 /**
  * Get all upstream config rows for an instance (cached, TTL 由 config 决定, stale-if-error).
  *
- * Returns empty array when:
- *   - Instance has no config AND Core seed 未触发(极端时序)
- *   - Core unreachable AND no prior cached value
- *
- * 空数组会被 resolveForAgent 视作"零行 fallback",走 official + 全局 upstream + alias
- * (与 v1 行为完全一致,保证配置系统挂时业务不中断)。
+ * A successful empty response permits the deployment defaults. A failed read
+ * without a cached value fails closed, so subscription traffic cannot silently
+ * switch to a different credential or billing source.
  *
  * 参数拆两个:
  *   - `skillConfig` 提供 D 接口的 endpoint / serviceToken / timeoutMs(共用 core gateway)
@@ -197,27 +196,19 @@ export async function getInstanceUpstreamConfigs(
   // Fetch failed → stale-if-error fallback
   const stale = lastGood.get(spaceId);
   if (stale !== undefined) {
-    const reason = fetchErr instanceof Error ? fetchErr.message : "unknown";
     console.warn(`${TAG} using cached configuration category=upstream_read_error`);
     return stale;
   }
 
-  // First-time failure, no history → return empty (= resolveForAgent 零行 fallback = official)
-  if (fetchErr) {
-    console.warn(
-      `${TAG} using official fallback category=${fetchErr instanceof UpstreamConfigReadError ? fetchErr.category : "unexpected_error"}`,
-    );
-  }
-  return [];
+  // No configuration evidence: never silently route a subscription request to a billed default.
+  throw fetchErr instanceof UpstreamConfigReadError ? fetchErr : new UpstreamConfigReadError("transport_error");
 }
 
 /**
  * 对话请求解析:输入 items 数组 + agent,输出 4 态 Resolution。
  *
- * 详见 §7.3。**关键**:items 为空数组时返回 `{kind:"official", row:null}`,
- * handler 见到 row=null 一律按"走全局 upstream + alias"处理 —— 这是"向后兼容"
- * 红线的直接体现([[default-no-config-backward-compat]]):Core 挂 / seed 失败 /
- * stale 缓存首次没命中时,业务侧行为等同 v1,不会因为本功能返 500。
+ * Core 成功返回空配置时，返回 `{kind:"official", row:null}` 使用部署默认上游。
+ * 读取失败且没有缓存的请求已由 getInstanceUpstreamConfigs 拒绝。
  */
 export function resolveForAgent(
   items: InstanceUpstreamRow[],

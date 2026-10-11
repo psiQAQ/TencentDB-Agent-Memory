@@ -356,6 +356,9 @@ export class SqliteMetadataStore implements IMetadataStore {
       CREATE INDEX IF NOT EXISTS idx_meta_acl_asset_created ON meta_asset_acl(asset_id, created_at DESC);
       CREATE INDEX IF NOT EXISTS idx_meta_acl_subject_created ON meta_asset_acl(subject_type, subject_id, created_at DESC);
 
+      CREATE TABLE IF NOT EXISTS meta_model_state (
+        key TEXT PRIMARY KEY, value TEXT NOT NULL, version INTEGER NOT NULL, updated_at TEXT NOT NULL
+      );
       CREATE TABLE IF NOT EXISTS meta_config_params (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         scope TEXT NOT NULL CHECK (scope IN ('global', 'user')),
@@ -407,6 +410,11 @@ export class SqliteMetadataStore implements IMetadataStore {
       this.db.exec("ALTER TABLE meta_instance_upstream_config ADD COLUMN credential_ref TEXT NOT NULL DEFAULT ''");
     } catch (err) {
       if (!String(err).includes("duplicate column name")) throw err;
+    }
+    for (const [column, initial] of [["provider_id", ""], ["credential_kind", "api_key"]]) {
+      if (!this.all<{ name: string }>("PRAGMA table_info(meta_instance_upstream_config)").some((row) => row.name === column)) {
+        this.db.exec(`ALTER TABLE meta_instance_upstream_config ADD COLUMN ${column} TEXT NOT NULL DEFAULT '${initial}'`);
+      }
     }
     // v3.2: creator_user_id 只保留创建事实，owner_user_id 承载可变 ownership。
     try {
@@ -541,6 +549,28 @@ export class SqliteMetadataStore implements IMetadataStore {
       }
       throw e;
     }
+  }
+
+  getModelState(key: string): import("../models/types.js").ModelState | null {
+    return this.get("SELECT key, value, version, updated_at FROM meta_model_state WHERE key = ?", key);
+  }
+
+  listModelStates(prefix: string): import("../models/types.js").ModelState[] {
+    return this.all("SELECT key, value, version, updated_at FROM meta_model_state WHERE substr(key, 1, ?) = ? ORDER BY key", prefix.length, prefix);
+  }
+
+  deleteModelState(key: string, expectedVersion: number): boolean {
+    return this.db.prepare("DELETE FROM meta_model_state WHERE key = ? AND version = ?").run(key, expectedVersion).changes === 1;
+  }
+
+  setModelState(key: string, value: string, expectedVersion: number): import("../models/types.js").ModelState | null {
+    return this.txImmediate(() => {
+      if ((this.getModelState(key)?.version ?? 0) !== expectedVersion) return null;
+      this.run(`INSERT INTO meta_model_state (key, value, version, updated_at) VALUES (?, ?, ?, ?)
+        ON CONFLICT(key) DO UPDATE SET value = excluded.value, version = excluded.version, updated_at = excluded.updated_at`,
+      key, value, expectedVersion + 1, nowIso());
+      return this.getModelState(key);
+    });
   }
 
   private get<T = Row>(sql: string, ...params: SQLInputValue[]): T | null {
@@ -2827,8 +2857,8 @@ export class SqliteMetadataStore implements IMetadataStore {
       // 3. INSERT(custom/extraction 的 snapshot 恒 [];default 由 seed 路径独立处理,不走此 create 分支)
       this.run(
         `INSERT INTO meta_instance_upstream_config
-          (group_id, group_type, name, agents, enabled, mode, base_url, api_key, model_id, description, version, supported_agents_snapshot, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, '[]', ?, ?)`,
+          (group_id, group_type, name, agents, enabled, mode, base_url, api_key, model_id, description, provider_id, credential_kind, credential_ref, version, supported_agents_snapshot, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, '[]', ?, ?)`,
         groupId,
         input.group_type,
         input.name ?? "",
@@ -2839,6 +2869,9 @@ export class SqliteMetadataStore implements IMetadataStore {
         input.api_key ?? "",
         input.model_id ?? "",
         input.description ?? "",
+        input.provider_id ?? "",
+        input.credential_kind ?? "api_key",
+        input.credential_ref ?? "",
         now,
         now,
       );
@@ -2907,11 +2940,14 @@ export class SqliteMetadataStore implements IMetadataStore {
         api_key: input.api_key ?? current.api_key,
         model_id: input.model_id ?? current.model_id,
         description: input.description ?? current.description,
+        provider_id: input.provider_id ?? current.provider_id ?? "",
+        credential_kind: input.credential_kind ?? current.credential_kind ?? "api_key",
+        credential_ref: input.credential_ref ?? current.credential_ref ?? "",
       };
       const now = nowIso();
       this.run(
         `UPDATE meta_instance_upstream_config
-         SET name = ?, agents = ?, enabled = ?, mode = ?, base_url = ?, api_key = ?, model_id = ?, description = ?, version = version + 1, updated_at = ?
+         SET name = ?, agents = ?, enabled = ?, mode = ?, base_url = ?, api_key = ?, model_id = ?, description = ?, provider_id = ?, credential_kind = ?, credential_ref = ?, version = version + 1, updated_at = ?
          WHERE group_id = ?`,
         merged.name,
         JSON.stringify(merged.agents),
@@ -2921,6 +2957,9 @@ export class SqliteMetadataStore implements IMetadataStore {
         merged.api_key,
         merged.model_id,
         merged.description,
+        merged.provider_id,
+        merged.credential_kind,
+        merged.credential_ref,
         now,
         input.group_id,
       );
@@ -3082,6 +3121,9 @@ export class SqliteMetadataStore implements IMetadataStore {
       mode: String(r.mode) as UpstreamMode,
       base_url: String(r.base_url ?? ""),
       api_key: String(r.api_key ?? ""),
+      provider_id: (r.provider_id || undefined) as import("../models/types.js").ProviderId | undefined,
+      credential_kind: r.credential_kind === "chatgpt_oauth" ? "chatgpt_oauth" : "api_key",
+      credential_ref: String(r.credential_ref ?? ""),
       model_id: String(r.model_id ?? ""),
       description: String(r.description ?? ""),
       version: Number(r.version ?? 1),

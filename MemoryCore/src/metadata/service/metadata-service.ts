@@ -1,3 +1,6 @@
+import { ModelCatalog } from "../models/catalog.js";
+import { inferProvider, PROVIDERS } from "../models/providers.js";
+import { ModelConnectionError, type ModelAuthFields } from "../models/types.js";
 /**
  * MetadataService — 元数据业务编排层。
  *
@@ -270,6 +273,9 @@ export const DEFAULT_METADATA_QUOTA_LIMITS: MetadataQuotaLimits = {
 };
 
 export class MetadataService {
+  private _modelCatalog?: ModelCatalog;
+  get modelCatalog(): ModelCatalog { return this._modelCatalog ??= new ModelCatalog(this.store); }
+
   private async prepareUpstreamGroups(supported: SupportedAgent[]): Promise<void> {
     if (await this.store.getConfigParam("global", null, "upstream_group_migration", "profiles_v1")) return;
     const inputs: CreateInstanceUpstreamGroupInput[] = [];
@@ -3224,7 +3230,7 @@ export class MetadataService {
 
   /** Panel B2: 新建 custom 组。 */
   async createInstanceUpstreamCustomGroup(
-    input: {
+    input: ModelAuthFields & {
       name: string;
       agents: string[];
       enabled?: boolean;
@@ -3243,9 +3249,7 @@ export class MetadataService {
     if (!input.base_url?.trim()) {
       throw new MetadataError("MISSING_BASE_URL", "base_url is required for custom group");
     }
-    if (input.mode === "custom_unified" && !input.api_key?.trim()) {
-      throw new MetadataError("MISSING_API_KEY", "api_key is required for custom_unified mode");
-    }
+    const auth = await this.resolveModelAuth(input);
     // 存量实例首个请求可能不是 list 而是直接 create,兜底 seed default
     // 防止 assertAgentsNotOverlap 见空表 → INSERT custom → 只有 1 行 custom
     // 无 default → 后续 hermes 请求 AGENT_NOT_CONFIGURED (design §5.5 存量兜底)
@@ -3259,7 +3263,7 @@ export class MetadataService {
         enabled: input.enabled !== false,
         mode: input.mode,
         base_url: input.base_url.trim(),
-        api_key: input.mode === "custom_unified" && input.api_key ? encryptUpstreamKey(input.api_key) : "",
+        ...auth,
         model_id: input.model_id ?? "",
         description: input.description ?? "",
       });
@@ -3271,7 +3275,7 @@ export class MetadataService {
 
   /** Panel B3: PATCH 更新组(default 或 custom)。 */
   async updateInstanceUpstreamGroup(
-    input: {
+    input: ModelAuthFields & {
       group_id: string;
       group_type: GroupType;
       name?: string;
@@ -3297,6 +3301,7 @@ export class MetadataService {
       if (input.mode !== undefined) rejected.push("mode");
       if (input.base_url !== undefined) rejected.push("base_url");
       if (input.api_key !== undefined) rejected.push("api_key");
+      for (const key of ["provider_id", "credential_kind", "credential_ref"] as const) if (input[key] !== undefined) rejected.push(key);
       if (input.model_id !== undefined) rejected.push("model_id");
       if (input.description !== undefined) rejected.push("description");
       if (rejected.length > 0) {
@@ -3318,20 +3323,9 @@ export class MetadataService {
       }
     }
 
-    let effectiveMode = input.mode;
-    if (input.group_type === "custom") {
-      const existing = await this.store.getInstanceUpstreamGroup(input.group_id);
-      if (input.base_url !== undefined) this.assertUpstreamEndpoint(input.base_url);
-      const mode = input.mode ?? existing?.mode;
-      effectiveMode = mode;
-      if (mode === "custom_unified" && (!existing?.api_key || (input.base_url !== undefined &&
-          !this.sameUpstreamOrigin(existing.base_url, input.base_url))) && !input.api_key?.trim()) {
-        throw new MetadataError("MISSING_API_KEY", "a new supplier origin requires its own api_key");
-      }
-      if (mode === "custom_unified" && input.api_key !== undefined && !input.api_key.trim()) {
-        throw new MetadataError("MISSING_API_KEY", "api_key is required for custom_unified mode");
-      }
-    }
+    const existing = await this.store.getInstanceUpstreamGroup(input.group_id);
+    if (input.base_url !== undefined) this.assertUpstreamEndpoint(input.base_url);
+    const auth = input.group_type === "custom" ? await this.resolveModelAuth(input, existing ?? undefined) : {};
     // 存量兜底 seed (同 create 分支说明)
     await this.prepareUpstreamGroups(supportedAgents);
     await this.store.ensureDefaultSeeded(supportedAgents);
@@ -3345,8 +3339,7 @@ export class MetadataService {
         enabled: input.enabled,
         mode: input.mode,
         base_url: input.base_url?.trim(),
-        api_key: effectiveMode === "custom_passthrough" ? ""
-          : input.api_key === undefined ? undefined : input.api_key ? encryptUpstreamKey(input.api_key) : "",
+        ...auth,
         model_id: input.model_id,
         description: input.description,
       });
@@ -3423,6 +3416,10 @@ export class MetadataService {
     return {
       configured: true,
       enabled: ext.enabled,
+      group_id: ext.group_id,
+      provider_id: ext.provider_id || inferProvider(ext.base_url),
+      credential_kind: ext.credential_kind ?? "api_key",
+      credential_ref: ext.credential_ref ?? "",
       base_url: ext.base_url,
       api_key_masked: ext.api_key ? maskKeyValue(decryptUpstreamKey(ext.api_key)) : "",
       model_id: ext.model_id,
@@ -3433,9 +3430,9 @@ export class MetadataService {
   }
 
   async createInstanceUpstreamExtraction(
-    input: {
+    input: ModelAuthFields & {
       base_url: string;
-      api_key: string;
+      api_key?: string;
       model_id?: string;
       enabled?: boolean;
       description?: string;
@@ -3445,9 +3442,7 @@ export class MetadataService {
     if (!input.base_url?.trim()) {
       throw new MetadataError("MISSING_BASE_URL", "base_url is required for extraction");
     }
-    if (!input.api_key?.trim()) {
-      throw new MetadataError("MISSING_API_KEY", "api_key is required for extraction");
-    }
+    const auth = await this.resolveModelAuth({ ...input, mode: "custom_unified", agents: [] });
     this.assertUpstreamEndpoint(input.base_url);
     // 存量兜底 seed:Panel 首个请求可能直接 extraction/create,不走 list/groups
     await this.prepareUpstreamGroups(supportedAgents);
@@ -3460,7 +3455,7 @@ export class MetadataService {
         enabled: input.enabled !== false,
         mode: "custom_unified",
         base_url: input.base_url.trim(),
-        api_key: encryptUpstreamKey(input.api_key.trim()),
+        ...auth,
         model_id: input.model_id ?? "",
         description: input.description ?? "",
       });
@@ -3478,7 +3473,7 @@ export class MetadataService {
   }
 
   async updateInstanceUpstreamExtraction(
-    input: {
+    input: ModelAuthFields & {
       base_url?: string;
       api_key?: string;
       model_id?: string;
@@ -3488,13 +3483,6 @@ export class MetadataService {
     },
     supportedAgents: SupportedAgent[],
   ): Promise<Record<string, unknown>> {
-    if (input.api_key !== undefined && input.api_key.trim() === "") {
-      // extraction 必须有 key,清空要走 delete
-      throw new MetadataError(
-        "MISSING_API_KEY",
-        "api_key cannot be cleared via update; use /extraction/delete instead",
-      );
-    }
     if (input.base_url !== undefined && !input.base_url.trim()) {
       throw new MetadataError("MISSING_BASE_URL", "base_url must be non-empty");
     }
@@ -3512,17 +3500,15 @@ export class MetadataService {
     }
     if (input.base_url !== undefined) {
       this.assertUpstreamEndpoint(input.base_url);
-      if (!this.sameUpstreamOrigin(ext.base_url, input.base_url) && !input.api_key?.trim()) {
-        throw new MetadataError("MISSING_API_KEY", "a new supplier origin requires its own api_key");
-      }
     }
+    const auth = await this.resolveModelAuth({ ...input, mode: "custom_unified", agents: [] }, ext);
     try {
       const row = await this.store.updateInstanceUpstreamGroup({
         group_id: ext.group_id,
         expected_group_type: "extraction",
         expected_version: input.expected_version,
         base_url: input.base_url?.trim(),
-        api_key: input.api_key === undefined ? undefined : encryptUpstreamKey(input.api_key.trim()),
+        ...auth,
         model_id: input.model_id,
         enabled: input.enabled,
         description: input.description,
@@ -3577,6 +3563,32 @@ export class MetadataService {
   }
 
   // ── 内部工具 ─────────────────────────────────────────────
+
+  private async resolveModelAuth(input: ModelAuthFields & {
+    base_url?: string; api_key?: string; model_id?: string; agents?: string[]; mode?: UpstreamMode;
+  }, existing?: InstanceUpstreamConfigEntity) {
+    const base = input.base_url?.trim() ?? existing?.base_url ?? "";
+    const provider = input.provider_id ?? (input.base_url === undefined ? existing?.provider_id : undefined) ?? inferProvider(base);
+    const kind = input.credential_kind ?? existing?.credential_kind ?? "api_key";
+    const mode = input.mode ?? existing?.mode ?? "custom_unified";
+    if (kind === "chatgpt_oauth") {
+      const reference = input.credential_ref ?? existing?.credential_ref ?? "";
+      const model = input.model_id ?? existing?.model_id ?? "";
+      if (provider !== "openai" || base !== PROVIDERS.openai.base_url || mode !== "custom_unified" || input.api_key) {
+        throw new ModelConnectionError("CHATGPT_INVALID_CONFIGURATION");
+      }
+      if ((input.agents ?? existing?.agents ?? []).some((agent) => agent !== "codex")) throw new ModelConnectionError("CHATGPT_CODEX_ONLY");
+      if (!existing || existing.credential_kind !== kind || existing.credential_ref !== reference || existing.model_id !== model) {
+        await this.modelCatalog.assertSubscriptionModel(reference, model);
+      }
+      return { provider_id: provider, credential_kind: kind, credential_ref: reference, api_key: "" };
+    }
+    const canReuse = existing && existing.credential_kind !== "chatgpt_oauth" &&
+      (existing.provider_id || inferProvider(existing.base_url)) === provider && this.sameUpstreamOrigin(existing.base_url, base);
+    const key = input.api_key === undefined && canReuse ? existing.api_key : input.api_key?.trim() ? encryptUpstreamKey(input.api_key.trim()) : "";
+    if (mode === "custom_unified" && !key) throw new MetadataError("MISSING_API_KEY", "this provider and authentication method require their own api_key");
+    return { provider_id: provider, credential_kind: kind, credential_ref: "", api_key: mode === "custom_passthrough" ? "" : key };
+  }
 
   private sameUpstreamOrigin(left: string, right: string): boolean {
     try { return new URL(left).origin === new URL(right).origin; } catch { return false; }
@@ -3652,6 +3664,9 @@ export class MetadataService {
       enabled: row.enabled,
       mode: row.mode,
       base_url: row.base_url,
+      provider_id: row.provider_id || inferProvider(row.base_url),
+      credential_kind: row.credential_kind ?? "api_key",
+      credential_ref: row.credential_ref ?? "",
       api_key_masked: row.api_key ? maskKeyValue(decryptUpstreamKey(row.api_key)) : "",
       model_id: row.model_id,
       description: row.description,
@@ -3663,8 +3678,12 @@ export class MetadataService {
   private toPublicExtraction(row: InstanceUpstreamConfigEntity): Record<string, unknown> {
     return {
       configured: true,
+      group_id: row.group_id,
       enabled: row.enabled,
       base_url: row.base_url,
+      provider_id: row.provider_id || inferProvider(row.base_url),
+      credential_kind: row.credential_kind ?? "api_key",
+      credential_ref: row.credential_ref ?? "",
       api_key_masked: row.api_key ? maskKeyValue(decryptUpstreamKey(row.api_key)) : "",
       model_id: row.model_id,
       description: row.description,

@@ -204,6 +204,7 @@ export class MongoMetadataStore implements IMetadataStore {
   }
 
   async init(): Promise<void> {
+    await this.ensureIndex("meta_model_state", { key: 1 }, { unique: true });
     // 25 个 ensureIndex 全部并行:createIndex 幂等,不同 collection/index 互不冲突,
     // 服务器侧原来就是各自 create,唯一开销是 RTT。串行 25 × ~70ms ≈ 1.8s,
     // 并行 max(独立 RTT) ≈ 100~300ms(空库首建更贵些)。
@@ -2408,6 +2409,9 @@ export class MongoMetadataStore implements IMetadataStore {
         mode: input.mode,
         base_url: input.base_url ?? "",
         api_key: input.api_key ?? "",
+        provider_id: input.provider_id ?? "",
+        credential_kind: input.credential_kind ?? "api_key",
+        credential_ref: input.credential_ref ?? "",
         model_id: input.model_id ?? "",
         description: input.description ?? "",
         version: 1,
@@ -2428,6 +2432,30 @@ export class MongoMetadataStore implements IMetadataStore {
       throw err;
     }
     return (await this.getInstanceUpstreamGroup(groupId))!;
+  }
+
+  async getModelState(key: string): Promise<import("../models/types.js").ModelState | null> {
+    return this.col<import("../models/types.js").ModelState>("meta_model_state").findOne({ key }, PROJECT_NO_ID);
+  }
+
+  async listModelStates(prefix: string): Promise<import("../models/types.js").ModelState[]> {
+    const escaped = prefix.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    return this.col<import("../models/types.js").ModelState>("meta_model_state").find({ key: { $regex: `^${escaped}` } }, PROJECT_NO_ID).sort({ key: 1 }).toArray();
+  }
+
+  async deleteModelState(key: string, expectedVersion: number): Promise<boolean> {
+    return (await this.col<import("../models/types.js").ModelState>("meta_model_state").deleteOne({ key, version: expectedVersion })).deletedCount === 1;
+  }
+
+  async setModelState(key: string, value: string, expectedVersion: number): Promise<import("../models/types.js").ModelState | null> {
+    const next = { key, value, version: expectedVersion + 1, updated_at: nowIso() };
+    const collection = this.col<import("../models/types.js").ModelState>("meta_model_state");
+    if (expectedVersion === 0) {
+      try { await collection.insertOne(next); return next; }
+      catch (error) { if ((error as { code?: number }).code === 11000) return null; throw error; }
+    }
+    const result = await collection.updateOne({ key, version: expectedVersion }, { $set: next });
+    return result.matchedCount === 1 ? next : null;
   }
 
   async updateInstanceUpstreamGroup(
@@ -2482,6 +2510,9 @@ export class MongoMetadataStore implements IMetadataStore {
       if (input.mode !== undefined) setDoc.mode = input.mode;
       if (input.base_url !== undefined) setDoc.base_url = input.base_url;
       if (input.api_key !== undefined) setDoc.api_key = input.api_key;
+      if (input.provider_id !== undefined) setDoc.provider_id = input.provider_id;
+      if (input.credential_kind !== undefined) setDoc.credential_kind = input.credential_kind;
+      if (input.credential_ref !== undefined) setDoc.credential_ref = input.credential_ref;
       if (input.model_id !== undefined) setDoc.model_id = input.model_id;
       if (input.description !== undefined) setDoc.description = input.description;
 

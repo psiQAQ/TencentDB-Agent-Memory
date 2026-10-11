@@ -46,6 +46,10 @@ function sanitizeMetaBody(value: unknown, depth = 0): unknown {
   if (Array.isArray(value)) return value.map((item) => sanitizeMetaBody(item, depth + 1));
   const out: Record<string, unknown> = {};
   for (const [key, raw] of Object.entries(value as Record<string, unknown>)) {
+    if (['access_token', 'refresh_token', 'id_token', 'authorization_code', 'authorization_url', 'code_verifier', 'state', 'nonce'].includes(key.toLowerCase())) {
+      out[key] = '[redacted]';
+      continue;
+    }
     if (SENSITIVE_KEYS.has(key.toLowerCase())) {
       out[key] = typeof raw === 'string' && raw.length > 0 ? maskSecret(raw) : '[redacted]';
       continue;

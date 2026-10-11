@@ -1,3 +1,4 @@
+import { ModelConnectionError } from "../models/types.js";
 /**
  * v3 元数据路由（/v3/meta/*）。
  *
@@ -393,6 +394,30 @@ const routeTable: Record<string, Handler> = {
   }),
 
   // §6.B groups/*
+  [`${V3_PREFIX}/model-catalog/list`]: bind(S.modelCatalogEmptySchema, async (d, c, s) => {
+    await s.assertCanManageUsers(c);
+    return s.modelCatalog.list();
+  }),
+  [`${V3_PREFIX}/model-catalog/refresh`]: bind(S.modelCatalogEmptySchema, async (d, c, s) => {
+    await s.assertCanManageUsers(c);
+    return s.modelCatalog.refresh();
+  }),
+  [`${V3_PREFIX}/model-catalog/discover`]: bind(S.modelCatalogDiscoverSchema, async (d, c, s) => {
+    await s.assertCanManageUsers(c);
+    return s.modelCatalog.discover(d);
+  }),
+  [`${V3_PREFIX}/model-connections/chatgpt/start`]: bind(S.chatgptStartSchema, async (d, c, s) => {
+    await s.assertCanManageUsers(c);
+    return s.modelCatalog.chatgpt.start(c.userId ?? "instance-admin", d.callback_port, d.reference);
+  }),
+  [`${V3_PREFIX}/model-connections/chatgpt/complete`]: bind(S.chatgptCompleteSchema, async (d, c, s) => {
+    await s.assertCanManageUsers(c);
+    return s.modelCatalog.completeLogin(c.userId ?? "instance-admin", d);
+  }),
+  [`${V3_PREFIX}/model-connections/chatgpt/disconnect`]: bind(S.chatgptDisconnectSchema, async (d, c, s) => {
+    await s.assertCanManageUsers(c);
+    return s.modelCatalog.chatgpt.disconnect(d.reference);
+  }),
   [`${V3_PREFIX}/instance-upstream/groups/list`]: bind(S.upstreamGroupsListSchema, async (_d, c, s, _reqId, deps) => {
     s.assertCanManageUsers(c);
     return s.listInstanceUpstreamGroups(deps.getSupportedAgents());
@@ -551,6 +576,10 @@ export async function handleV3MetaRoute(
     instanceId = extractInstanceId(req.headers);
     traceCtx.instanceId = instanceId;
   } catch (err) {
+    if (err instanceof ModelConnectionError) {
+      sendJson(res, err.status, errorEnvelope(err.status, err.code, requestId));
+      return true;
+    }
     if (err instanceof MetadataError) {
       const code = mapErrorCode(err.code);
       const message = `${err.code}: ${err.message}`;
@@ -623,6 +652,10 @@ export async function handleV3MetaRoute(
       },
     );
   } catch (err) {
+    if (err instanceof ModelConnectionError) {
+      sendJson(res, err.status, errorEnvelope(err.status, err.code, requestId));
+      return true;
+    }
     if (err instanceof MetadataError) {
       const code = mapErrorCode(err.code);
       const message = `${err.code}: ${err.message}`;

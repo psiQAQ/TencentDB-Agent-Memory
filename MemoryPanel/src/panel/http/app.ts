@@ -21,6 +21,7 @@ import { registerAdminOrphanRoutes } from './routes/admin-orphans.js';
 import { registerAuthRoutes, registerWoaIngressRoutes } from './routes/auth.js';
 
 import { registerUpstreamTestRoute } from './routes/upstream-test.js';
+import { registerChatGPTRoutes } from './routes/chatgpt.js';
 
 const API_PREFIX = '/api/v1';
 
@@ -38,6 +39,7 @@ export function buildPanelApp(deps: PanelDeps): Hono {
   registerMetaInstanceRoutes(api, deps);
   registerAuthRoutes(api, deps);
   registerUpstreamTestRoute(api, deps);
+  registerChatGPTRoutes(app, api, deps);
   registerMetaProxyRoutes(api, deps);
   // Skill 数据面透明代理：/api/v1/skill/* → 内核 /v3/skill/*
   registerSkillProxyRoutes(api, deps);

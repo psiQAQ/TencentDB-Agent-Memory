@@ -62,10 +62,12 @@ describe("upstream redirect privacy", () => {
       }
       if (request.url?.endsWith("/v3/internal/meta/instance-upstream/list")) {
         response.writeHead(200, { "content-type": "application/json" });
-        response.end(JSON.stringify({ code: 0, data: { items: ["conversation", "extraction"].map((type) => ({
-          agent_source: "default", type, mode: "custom_unified",
-          base_url: `${redirectorOrigin}/anthropic/v1`, api_key: "server-key", model_id: "test-model",
-          ready_protocols: ["chat", "anthropic"],
+        response.end(JSON.stringify({ code: 0, data: { items: [
+          { group_id: "anthropic", group_type: "custom", agents: ["claude-code"], path: "/anthropic/v1" },
+          { group_id: "openai", group_type: "custom", agents: ["codebuddy"], path: "/v1" },
+          { group_id: "extraction", group_type: "extraction", agents: [], path: "/anthropic/v1" },
+        ].map(({ path, ...group }) => ({ ...group, name: group.group_id, enabled: true, mode: "custom_unified",
+          base_url: `${redirectorOrigin}${path}`, api_key: "server-key", model_id: "test-model",
         })) } }));
         return;
       }

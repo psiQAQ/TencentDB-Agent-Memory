@@ -89,6 +89,11 @@ export class LifecycleTransactionsRequiredError extends Error {
 }
 
 export interface IMetadataStore {
+  getModelState(key: string): MaybePromise<import("../models/types.js").ModelState | null>;
+  listModelStates(prefix: string): MaybePromise<import("../models/types.js").ModelState[]>;
+  /** Compare-and-swap; expectedVersion=0 creates a new key. */
+  setModelState(key: string, value: string, expectedVersion: number): MaybePromise<import("../models/types.js").ModelState | null>;
+  deleteModelState(key: string, expectedVersion: number): MaybePromise<boolean>;
   /** 初始化存储（建表/建索引/建连接）。幂等。 */
   init(): MaybePromise<void>;
   /** 关闭存储连接。 */

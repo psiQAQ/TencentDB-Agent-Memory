@@ -1,7 +1,7 @@
 /**
  * Codex 资产注入 —— `<tdai_injections>` wrapper 生成器。
  *
- * 在 codex body.input[0]（developer message）的 content[] 末尾追加一段
+ * 在 codex input 中的 developer/system message 的 content[] 末尾追加一段
  * `{type:"input_text", text:"<tdai_injections>...\n</tdai_injections>"}` 文本块。
  *
  * 两种模式：
@@ -83,7 +83,7 @@ export type CodexInjectionInput = CodexInjectionInputRaw | CodexInjectionInputSt
 
 /**
  * 构建 `<tdai_injections>` wrapper，返回可直接 push 到 codex
- * `body.input[0].content` 数组的 input_text 对象。
+ * 指令消息 content 数组的 input_text 对象。
  *
  * - raw 模式：`{raw: "..."}` → 原样嵌入 wrapper 内层，不 escape 不加子 tag
  * - structured 模式：`{skills, memory, ...}` → 每段用对应 tag 包裹 + XML escape，
