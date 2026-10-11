@@ -22,6 +22,7 @@ import { registerAuthRoutes, registerWoaIngressRoutes } from './routes/auth.js';
 
 import { registerUpstreamTestRoute } from './routes/upstream-test.js';
 import { registerChatGPTRoutes } from './routes/chatgpt.js';
+import { registerClientBundleRoutes } from './routes/client-bundle.js';
 
 const API_PREFIX = '/api/v1';
 
@@ -40,6 +41,7 @@ export function buildPanelApp(deps: PanelDeps): Hono {
   registerAuthRoutes(api, deps);
   registerUpstreamTestRoute(api, deps);
   registerChatGPTRoutes(app, api, deps);
+  registerClientBundleRoutes(api, deps);
   registerMetaProxyRoutes(api, deps);
   // Skill 数据面透明代理：/api/v1/skill/* → 内核 /v3/skill/*
   registerSkillProxyRoutes(api, deps);

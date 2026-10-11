@@ -90,6 +90,8 @@ export interface PanelConfig {
   metadataInstancesConfig: string;
   metadataRemoteTimeoutMs: number;
   ui: { distDir: string };
+  /** Optional deployment-exported Pi bundle directory, mounted read-only. */
+  clientBundleDir?: string;
   log: { level: LogLevel; format: 'json' | 'pretty' };
   /** Knowledge Service (KS :8421) 连接配置。serviceId 按请求 instanceId 注入。 */
   knowledge: { baseUrl: string; authToken: string; lifecycleAuthToken: string; timeoutMs: number };
@@ -242,6 +244,7 @@ export function loadPanelConfig(): PanelConfig {
     metadataInstancesConfig: env('METADATA_INSTANCES_CONFIG', './config/metadata-instances.json'),
     metadataRemoteTimeoutMs: envInt('METADATA_REMOTE_TIMEOUT_MS', 15_000),
     ui: { distDir: env('UI_DIST_DIR', './web/dist') },
+    clientBundleDir: env('PANEL_CLIENT_BUNDLE_DIR', ''),
     log: {
       level: ['debug', 'info', 'warn', 'error'].includes(level) ? level : 'info',
       format: format === 'pretty' ? 'pretty' : 'json',

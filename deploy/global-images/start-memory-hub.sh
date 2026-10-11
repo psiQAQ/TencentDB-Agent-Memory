@@ -116,6 +116,12 @@ if [[ "${MEMORY_MODEL_ROUTING_VIA_PROXY:-0}" == "1" ]]; then
 fi
 
 pull_image "$MEMORY_HUB_IMAGE"
+client_bundle_args=()
+if [[ -n "${PANEL_CLIENT_BUNDLE_DIR:-}" ]]; then
+  [[ -s "$PANEL_CLIENT_BUNDLE_DIR/download.json" && -s "$PANEL_CLIENT_BUNDLE_DIR/pi-client-bundle.zip" ]] \
+    || die "Pi 客户端包未导出或不完整"
+  client_bundle_args=(-v "$PANEL_CLIENT_BUNDLE_DIR:/data/client-bundles:ro" -e PANEL_CLIENT_BUNDLE_DIR=/data/client-bundles)
+fi
 rm_container_if_exists "$CONTAINER"
 
 info "启动 memory-hub (image=$MEMORY_HUB_IMAGE, panel=$PANEL_PORT knowledge=$KNOWLEDGE_PORT)"
@@ -145,6 +151,7 @@ $DOCKER run -d --name "$CONTAINER" \
   -e LLM_MODEL="panel-selected" \
   "${HUB_EXTRA_ENV[@]}" \
   "${git_proxy_env[@]}" \
+  "${client_bundle_args[@]}" \
   "$MEMORY_HUB_IMAGE" >/dev/null
 
 wait_healthy "$CONTAINER" 120

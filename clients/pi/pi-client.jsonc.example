@@ -1,0 +1,12 @@
+{
+  "proxyUrl": "https://memory.example.com/proxy",
+  "panelUrl": "https://panel.example.com",
+  "spaceId": "default",
+  "teamId": "replace-with-team-id",
+  "agentId": "replace-with-agent-id",
+  "taskId": "",
+  "model": "replace-with-panel-pi-model",
+  "userKeyFile": "./pi-user.key",
+  "pluginFile": "./tdai-memory.ts",
+  "piCommand": "pi"
+}

@@ -14,6 +14,24 @@ defaults:
     working-directory: MemoryCore
 
 jobs:
+  pi-client:
+    name: Pi Client Bundle
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: .
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+      - run: node clients/pi/tests/test-client.cjs
+      - run: node clients/pi/tests/test-https.cjs
+      - run: python3 clients/pi/tests/test-export.py
+
   # ── 1. Install dependencies ────────────────────────────────
   install:
     name: Install

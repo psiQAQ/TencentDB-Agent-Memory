@@ -36,6 +36,10 @@ Set these in your shell or Pi's env block; the plugin reads them at load.
 
 ## Install / load
 
+For a deployment-specific installer with HTTPS checks, business identity validation,
+and Panel downloads, see [the Pi client bundle](../../clients/pi/README.md).
+Its launcher also supplies the memory-tool credential environment for Bash recipes.
+
 Quick test (throwaway load):
 
 ```bash
