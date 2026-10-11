@@ -42,6 +42,18 @@ export interface ModelDraft {
 export type DraftField = 'name' | 'base_url' | 'model_id' | 'api_key';
 export type DraftErrors = Partial<Record<DraftField, string>>;
 
+export function supportsSubscriptionAgent(agent: string): boolean {
+  return ['codex', 'pi', 'opencode'].includes(agent);
+}
+
+export function subscriptionProbeProtocols(agents: string[], extraction = false): Array<'chat' | 'responses'> {
+  if (extraction) return ['chat'];
+  const protocols: Array<'chat' | 'responses'> = [];
+  if (agents.includes('codex')) protocols.push('responses');
+  if (agents.some((agent) => agent === 'pi' || agent === 'opencode')) protocols.push('chat');
+  return protocols.length ? protocols : ['responses', 'chat'];
+}
+
 export function emptyModelDraft(): ModelDraft {
   return {
     name: '', agents: [], provider: 'deepseek', base_url: PROVIDERS[0].baseUrls[0], credential_kind: 'api_key', credential_ref: '',
@@ -102,7 +114,7 @@ export function validateModelDraft(
   if (draft.credential_kind === 'chatgpt_oauth') {
     if (!draft.credential_ref) errors.api_key = '请先登录并选择 ChatGPT 连接。';
     if (draft.provider !== 'openai' || draft.mode !== 'custom_unified') errors.api_key = 'ChatGPT 订阅仅用于 OpenAI 服务器认证。';
-    if (!extraction && draft.agents.some((agent) => agent !== 'codex')) errors.model_id = '当前订阅对话只支持 Codex 客户端。';
+    if (!extraction && draft.agents.some((agent) => !supportsSubscriptionAgent(agent))) errors.model_id = '订阅对话支持 Codex、Pi 和 OpenCode 客户端。';
   } else if (extraction || draft.mode === 'custom_unified') {
     const key = draft.api_key.trim();
     if (key.startsWith('sk-mem-')) errors.api_key = '这里需要模型供应商的 API Key；sk-mem- 开头的 User Key 用于登录和客户端接入。';
@@ -164,7 +176,7 @@ export function modelFailureMessage(cause: unknown): string {
     CHATGPT_ACCOUNT_MISMATCH: '登录账号与所选连接不一致，请使用原账号或新增连接。',
     CHATGPT_AUTHORIZATION_DENIED: '本次 ChatGPT 授权已取消。',
     CHATGPT_LOGIN_EXPIRED: '登录请求已过期或 Panel 已重启，请重新登录。',
-    CHATGPT_CODEX_ONLY: '订阅对话当前只支持 Codex；总结模型可单独配置。',
+    CHATGPT_AGENT_UNSUPPORTED: '订阅对话支持 Codex、Pi 和 OpenCode；总结模型可单独配置。',
     MODEL_SOURCE_UNAVAILABLE: '模型来源暂不可用，已保留上次成功列表。',
     DUPLICATE_GROUP_NAME: '模型组名称已存在，请换一个名称。',
     MISSING_GROUP_NAME: '请检查组名：最多 64 个字符，不含引号或斜杠。',

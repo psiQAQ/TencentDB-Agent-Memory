@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { supported, upstreamFixture } from "./upstream-group-test-fixture.js";
 import { decryptUpstreamKey } from "./upstream-profile-library.js";
 import { upstreamGroupsCreateSchema } from "../router/v3-meta-schemas.js";
@@ -6,7 +6,26 @@ import { upstreamGroupsCreateSchema } from "../router/v3-meta-schemas.js";
 describe("model-group credential isolation", () => {
   let f: ReturnType<typeof upstreamFixture>;
   beforeEach(() => { f = upstreamFixture(); });
-  afterEach(() => f.cleanup());
+  afterEach(() => { vi.restoreAllMocks(); f.cleanup(); });
+  it("assigns subscription models only to supported conversational clients and keeps the credential reference", async () => {
+    const agents = [...supported,
+      { agent_source: "opencode", protocol: "openai-chat", display_name: "OpenCode" },
+      { agent_source: "dsh", protocol: "openai-chat", display_name: "DSH" },
+    ];
+    const assertModel = vi.spyOn(f.service.modelCatalog, "assertSubscriptionModel").mockResolvedValue();
+    await f.service.listInstanceUpstreamGroups(agents);
+    const def = f.store.listInstanceUpstreamGroups()[0];
+    await f.service.updateInstanceUpstreamGroup({ group_id: def.group_id, group_type: "default", agents: [] }, agents);
+    const fields = { name: "Subscription", mode: "custom_unified" as const,
+      provider_id: "openai" as const, base_url: "https://api.openai.com/v1", model_id: "account-model",
+      credential_kind: "chatgpt_oauth" as const, credential_ref: "connection" };
+    const result = await f.service.createInstanceUpstreamCustomGroup({ ...fields, agents: ["codex", "pi", "opencode"] }, agents);
+    expect(assertModel).toHaveBeenCalledWith("connection", "account-model");
+    expect(f.store.getInstanceUpstreamGroup(String(result.group_id))).toMatchObject({ api_key: "", credential_ref: "connection" });
+    await expect(f.service.updateInstanceUpstreamGroup({ group_id: String(result.group_id), group_type: "custom", agents: ["pi", "dsh"] }, agents))
+      .rejects.toThrow("CHATGPT_AGENT_UNSUPPORTED");
+    expect(f.store.getInstanceUpstreamGroup(String(result.group_id))?.agents).toEqual(["codex", "pi", "opencode"]);
+  });
   async function create() {
     await f.service.listInstanceUpstreamGroups(supported);
     const def = f.store.listInstanceUpstreamGroups()[0];

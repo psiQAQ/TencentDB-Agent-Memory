@@ -6,7 +6,7 @@ import { metaPost } from '@/lib/api/base';
 import { PROVIDERS, type ProviderId } from '@/lib/upstream-provider-catalog';
 import {
   canReuseModelKey, draftFromExtraction, draftFromGroup, emptyModelDraft, modelFailureMessage,
-  modelWriteRequest, validateModelDraft, writeModelAndReload,
+  modelWriteRequest, validateModelDraft, writeModelAndReload, supportsSubscriptionAgent, subscriptionProbeProtocols,
   type DraftErrors, type ExtractionModel, type ModelDraft, type ModelGroup,
 } from '@/lib/upstream-settings-form';
 import './UpstreamSettings.css';
@@ -123,7 +123,9 @@ function GroupSettings() {
         ...(draft.credential_kind === 'chatgpt_oauth' ? { credential_ref: draft.credential_ref } : {}),
         agent_source: 'default', type: editor === 'extraction' ? 'extraction' : 'conversation',
         base_url: draft.base_url.trim(), model_id: draft.model_id.trim(), api_key: draft.api_key.trim(),
-        local: draft.provider === 'local', protocols: editor === 'extraction' ? ['chat'] : draft.credential_kind === 'chatgpt_oauth' ? ['responses'] : preset?.protocols ?? ['chat'],
+        local: draft.provider === 'local', protocols: draft.credential_kind === 'chatgpt_oauth'
+          ? subscriptionProbeProtocols(draft.agents, editor === 'extraction')
+          : editor === 'extraction' ? ['chat'] : preset?.protocols ?? ['chat'],
       });
       setProbe(result);
     } catch (cause) { setError(modelFailureMessage(cause)); }
@@ -218,7 +220,7 @@ function GroupSettings() {
             const owner = occupied(agent.agent_source);
             const other = owner && owner.group_id !== draft.group_id;
             return <div className="upstream-client-option" key={agent.agent_source}>
-              <label><input type="checkbox" disabled={working || !!other || (draft.credential_kind === 'chatgpt_oauth' && agent.agent_source !== 'codex')} checked={draft.agents.includes(agent.agent_source)}
+              <label><input type="checkbox" disabled={working || !!other || (draft.credential_kind === 'chatgpt_oauth' && !supportsSubscriptionAgent(agent.agent_source))} checked={draft.agents.includes(agent.agent_source)}
                 onChange={() => selectAgent(agent.agent_source)} />
                 <span>{agent.display_name}<small>{owner ? `当前组：${owner.name}` : '尚未分配'}</small></span></label>
               {other && <Button type="text" disabled={working} onClick={() => openEditor('assignment', owner)}>调整原组</Button>}
@@ -280,7 +282,7 @@ function GroupSettings() {
           </details>}
           {editor === 'group' && <fieldset className="upstream-client-fieldset"><legend>客户端分配（可选）</legend>
             {availableAgents.length ? <div className="upstream-available-clients">{availableAgents.map((agent) => <label key={agent.agent_source}>
-              <input type="checkbox" disabled={working || (draft.credential_kind === 'chatgpt_oauth' && agent.agent_source !== 'codex')} checked={draft.agents.includes(agent.agent_source)} onChange={() => selectAgent(agent.agent_source)} />{agent.display_name}
+              <input type="checkbox" disabled={working || (draft.credential_kind === 'chatgpt_oauth' && !supportsSubscriptionAgent(agent.agent_source))} checked={draft.agents.includes(agent.agent_source)} onChange={() => selectAgent(agent.agent_source)} />{agent.display_name}
             </label>)}</div> : <p>所有客户端目前已有模型组，可以先保存此组，再通过“分配客户端”调整归属。</p>}
             <p className="upstream-help">此处只列出未分配或已属于本组的客户端。留空保存后，组会显示“待分配客户端”。</p>
           </fieldset>}

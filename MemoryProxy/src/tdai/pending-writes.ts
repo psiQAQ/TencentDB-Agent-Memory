@@ -15,8 +15,7 @@
  *
  * 不改变的：
  *   - 非流式路径仍然 await（本模块的 track 也对 await 生效，但没多余开销）。
- *   - `recordTdaiTurn(client, identity=null | userMessage=null)` 时 client 侧直接
- *     return，本模块不介入。
+ *   - `recordTdaiTurn` 缺少 identity 或没有消息时直接 return，本模块不介入。
  *
  * 重复写风险：如果第一次 POST 已到达 tdai kernel 但客户端读 5xx 超时后重试，
  * kernel 可能收到两条同样内容的 L0（tdai `/v3/conversation/add` 目前没有

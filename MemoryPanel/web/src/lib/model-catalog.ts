@@ -1,4 +1,10 @@
 import type { ModelDraft } from './upstream-settings-form';
+import { supportsSubscriptionAgent } from './upstream-settings-form';
+
+export function subscriptionUsable(agents: string[], protocols: string[], extraction: boolean): boolean {
+  return extraction || (agents.every(supportsSubscriptionAgent) &&
+    protocols.every((protocol) => protocol === 'openai-chat' || protocol === 'openai-responses'));
+}
 
 export interface CatalogModel {
   id: string;

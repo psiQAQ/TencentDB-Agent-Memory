@@ -19,6 +19,8 @@ import {
 } from "../pipeline/runners/codex.js";
 import * as archiveStage from "../pipeline/stages/archive.js";
 import { createPipeline } from "../logger.js";
+import * as recorder from "../tdai/recorder.js";
+import * as skillTrigger from "../skill/handler-glue.js";
 
 type Json = Record<string, unknown>;
 function sse(events: Json[], crlf = false, contentType = true): Response {
@@ -314,6 +316,33 @@ describe("ChatGPT Responses adaptation", () => {
     expect(text).toContain("CHATGPT_RESPONSE_FAILED");
     expect(text).not.toContain("[DONE]");
   }, 2000);
+  it("recovers streamed text and tool arguments from final items without duplicating deltas", async () => {
+    const call = { type: "function_call", id: "item", call_id: "c", name: "read", arguments: '{"path":"file"}' };
+    const terminal = { ...completed, response: { ...completed.response, output: [] } };
+    const response = await subscriptionToChat(sse([
+      { type: "response.output_text.delta", delta: "合成" },
+      { type: "response.output_item.added", item: { ...call, arguments: "" } },
+      { type: "response.function_call_arguments.delta", item_id: "item", delta: '{"path":' },
+      { type: "response.output_item.done", output_index: 0, item: completed.response.output[0] },
+      { type: "response.output_item.done", output_index: 1, item: call },
+      terminal,
+    ]), true, true);
+    const events = (await response.text()).split('\n').filter((line) => line.startsWith('data: {')).map((line) => JSON.parse(line.slice(6)));
+    const deltas = events.flatMap((event) => event.choices ?? []).map((choice) => choice.delta);
+    expect(deltas.map((delta) => delta.content ?? '').join('')).toBe('合成数据完成');
+    const tools = deltas.flatMap((delta) => delta.tool_calls ?? []);
+    expect(tools.filter((tool) => tool.id)).toHaveLength(1);
+    expect(tools.map((tool) => tool.function.arguments).join('')).toBe(call.arguments);
+  });
+  it("uses output_text for assistant content blocks and input_text for injected instructions", () => {
+    expect(chatToResponses({ messages: [
+      { role: 'system', content: [{ type: 'text', text: 'injected' }] },
+      { role: 'assistant', content: [{ type: 'text', text: 'previous answer' }] },
+    ] }).input).toEqual([
+      { type: 'message', role: 'developer', content: [{ type: 'input_text', text: 'injected' }] },
+      { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'previous answer' }] },
+    ]);
+  });
 });
 
 function config() {
@@ -344,9 +373,11 @@ it.each([
   { extraction: false, contentType: false },
   { extraction: true, contentType: true },
   { extraction: true, contentType: false },
-])(
+].map((row) => ({ ...row, agent: "codex", stream: false })).concat(
+  ["pi", "opencode"].flatMap((agent) => [false, true].map((stream) => ({ agent, stream, extraction: false, contentType: true }))),
+))(
   "routes extraction=$extraction with upstream Content-Type=$contentType through Core credentials",
-  async ({ extraction, contentType }) => {
+  async ({ extraction, contentType, agent, stream }) => {
     const value = config();
     if (extraction) {
       value.auth = {
@@ -384,7 +415,7 @@ it.each([
                 {
                   group_id: "subscription",
                   group_type: extraction ? "extraction" : "custom",
-                  agents: extraction ? [] : ["codex"],
+                  agents: extraction ? [] : [agent],
                   enabled: true,
                   mode: "custom_unified",
                   base_url: "https://api.openai.com/v1",
@@ -406,7 +437,7 @@ it.each([
       }),
     );
     const result = await createApp(value).request(
-      `http://proxy/${extraction ? "codebuddy" : "codex"}/test/v1/${extraction ? "chat/completions" : "responses"}`,
+      `http://proxy/${extraction ? "codebuddy" : agent}/test/v1/${extraction || agent !== "codex" ? "chat/completions" : "responses"}`,
       {
         method: "POST",
         headers: {
@@ -416,11 +447,11 @@ it.each([
           "x-session-id": "synthetic-session",
         },
         body: JSON.stringify(
-          extraction
+          extraction || agent !== "codex"
             ? {
                 model: "requested",
                 messages: [{ role: "user", content: "synthetic" }],
-                stream: false,
+                stream,
               }
             : {
                 model: "requested",
@@ -435,10 +466,10 @@ it.each([
       `${output} ${calls.map((c) => c.url).join(",")}`,
     ).toBe(200);
     expect(result.headers.get("content-type")).toContain(
-      extraction ? "application/json" : "text/event-stream",
+      (extraction || agent !== "codex") && !stream ? "application/json" : "text/event-stream",
     );
     expect(output).toContain(
-      extraction ? "chat.completion" : "response.completed",
+      extraction || agent !== "codex" ? "chat.completion" : "response.completed",
     );
     const forwarded = calls.find(
       (c) => c.url === "https://api.openai.com/v1/responses",
@@ -472,6 +503,83 @@ it("does not fall back when the selected subscription cannot be resolved", async
     }),
   ).rejects.toMatchObject({ code: "CHATGPT_REAUTH_REQUIRED" });
   expect(fetcher).toHaveBeenCalledTimes(1);
+});
+
+it.each(["pi", "opencode"])("%s archives only completed subscription responses and preserves error statuses", async (agent) => {
+  const record = vi.spyOn(recorder, 'recordTdaiTurn').mockResolvedValue(undefined);
+  const extract = vi.spyOn(skillTrigger, 'triggerSkillExtractIfReady').mockResolvedValue(undefined);
+  const value = config();
+  value.tdai.enabled = true;
+  value.tdai.endpoint = 'https://memory.invalid';
+  value.tdai.memory.enabled = true;
+  value.tdai.memory.writeL0 = true;
+  value.extraction = { enabled: true, extractors: ['tdai-memory', 'skill'] };
+  initAuth(value.auth);
+  let upstream: () => Response = () => sse([{ type: 'response.output_text.delta', delta: 'partial' }]);
+  const fetcher = vi.fn(async (url: unknown) => {
+    const target = String(url);
+    if (target.endsWith('instance-upstream/list')) return Response.json({ code: 0, data: { items: [{
+      group_id: 'subscription', group_type: 'custom', agents: [agent], enabled: true, mode: 'custom_unified',
+      base_url: 'https://api.openai.com/v1', model_id: 'account-model', api_key: '', credential_kind: 'chatgpt_oauth', credential_ref: 'connection',
+    }] } });
+    if (target.endsWith('chatgpt/resolve')) return Response.json({ code: 0, data: { access_token: 'synthetic-oauth' } });
+    expect(target).toBe('https://api.openai.com/v1/responses');
+    return upstream();
+  });
+  vi.stubGlobal('fetch', fetcher);
+  const app = createApp(value);
+  const request = (stream = true, title = false) => app.request(`http://proxy/${agent}/test/v1/chat/completions`, {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: 'Bearer business-key' },
+    body: JSON.stringify({ model: 'requested', stream, messages: [
+      ...(title ? [{ role: 'system', content: 'You are a title generator. You output ONLY a thread title.' }] : []),
+      { role: 'user', content: 'synthetic' },
+    ] }),
+  });
+  const partial = await (await request()).text();
+  expect(partial).toContain('CHATGPT_STREAM_INTERRUPTED');
+  expect(partial).not.toContain('[DONE]');
+  expect(record).not.toHaveBeenCalled();
+  expect(extract).not.toHaveBeenCalled();
+  for (const status of [401, 403, 429]) {
+    upstream = () => new Response(null, { status });
+    const error = await request(false);
+    expect(error.status).toBe(status);
+    expect(await error.text()).toContain('subscription_error');
+  }
+  upstream = () => sse([{ type: 'response.output_text.delta', delta: 'partial' },
+    { type: 'response.failed', response: { error: { code: 'subscription_sharing_usage_limit_exceeded' } } }]);
+  expect(await (await request()).text()).toContain('CHATGPT_QUOTA_EXCEEDED');
+  expect(record).not.toHaveBeenCalled();
+  upstream = () => sse([completed]);
+  expect(await (await request()).text()).toContain('合成数据完成');
+  await vi.waitFor(() => expect(record).toHaveBeenCalledTimes(1));
+  expect(extract).toHaveBeenCalledTimes(1);
+  if (agent === 'opencode') {
+    await (await request(true, true)).text();
+    expect(record).toHaveBeenCalledTimes(1);
+    expect(extract).toHaveBeenCalledTimes(1);
+  }
+});
+
+it('reports independent Chat and Responses subscription probe outcomes', async () => {
+  const value = config();
+  let inference = 0;
+  const bodies: Json[] = [];
+  vi.stubGlobal('fetch', vi.fn(async (url, init) => {
+    if (String(url).endsWith('chatgpt/resolve')) return Response.json({ code: 0, data: { access_token: 'synthetic-oauth' } });
+    bodies.push(JSON.parse(String(init?.body)));
+    return ++inference === 1 ? new Response(null, { status: 429 }) : sse([completed]);
+  }));
+  const result = await createApp(value).request('/internal/upstream/test', {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: 'Bearer synthetic-gateway', 'x-tdai-service-id': 'probe-independent' },
+    body: JSON.stringify({ credential_kind: 'chatgpt_oauth', credential_ref: 'connection', model_id: 'account-model',
+      base_url: 'https://api.openai.com/v1', protocols: ['chat', 'responses'], type: 'conversation' }),
+  });
+  expect(await result.json()).toEqual({ results: [
+    { protocol: 'chat', status: 'CHATGPT_QUOTA_EXCEEDED' }, { protocol: 'responses', status: 'ready', httpStatus: 200 },
+  ] });
+  expect(inference).toBe(2);
+  expect(bodies[0]).toMatchObject({ input: [{ type: 'message', role: 'user' }], stream: true, store: false });
 });
 it("archives a subscription turn only after response.completed", async () => {
   const archive = vi

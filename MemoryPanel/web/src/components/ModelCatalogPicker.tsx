@@ -5,6 +5,7 @@ import { modelFailureMessage, type ModelDraft } from '@/lib/upstream-settings-fo
 import {
   accountSnapshot,
   catalogChoices,
+  subscriptionUsable,
   type Catalog,
   type CatalogModel,
 } from '@/lib/model-catalog';
@@ -154,7 +155,7 @@ export function ModelCatalogPicker({
   const usable = (m: CatalogModel) =>
     m.lifecycle !== 'retired' &&
     (subscription
-      ? extraction || protocols.every((p) => p === 'openai-responses')
+      ? subscriptionUsable(draft.agents, protocols, extraction)
       : extraction
         ? m.protocols.includes('openai-chat')
         : protocols.every((p) => m.protocols.includes(p)));
@@ -371,7 +372,7 @@ export function ModelCatalogPicker({
             </a>
           </div>
           <small>
-            订阅用于本实例的 Codex 对话或后台提取。认证或额度失败会报错，需手动切换配置。
+            订阅用于本实例的 Codex、Pi、OpenCode 对话或后台提取。认证或额度失败会报错，需手动切换配置。
           </small>
           {connection && connection.status !== 'connected' && (
             <Alert type="warning">此连接需要重新登录。</Alert>

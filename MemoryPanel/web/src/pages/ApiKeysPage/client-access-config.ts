@@ -158,6 +158,8 @@ dsh`,
       content: JSON.stringify(
         {
           $schema: 'https://opencode.ai/config.json',
+          model: `proxy-memory/${model}`,
+          small_model: `proxy-memory/${model}`,
           provider: {
             'proxy-memory': {
               npm: '@ai-sdk/openai-compatible',

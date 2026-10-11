@@ -36,6 +36,8 @@ export interface ResolveTargetFullInput {
   traceId: string;
   startTime: string;
   spaceId: string;
+  /** Subscription credentials bind the request to its selected account and model. */
+  useGuard?: boolean;
 }
 
 export interface ResolveTargetFullResult {
@@ -83,7 +85,7 @@ export async function stageResolveTargetFull(
     spaceId: input.spaceId,
     // markerOptIn=false (default/prod): 每个请求都走 router (`/cost-guard` 路径 404)
     // markerOptIn=true (test): 只有带 marker 才启用 router; 裸路径 passthrough
-    useGuard: config.costGuard.markerOptIn ? hasCostGuardMarker(c.req.path) : true,
+    useGuard: input.useGuard ?? (config.costGuard.markerOptIn ? hasCostGuardMarker(c.req.path) : true),
     agentName: agentFromPath,
     costGuardMode,
   });

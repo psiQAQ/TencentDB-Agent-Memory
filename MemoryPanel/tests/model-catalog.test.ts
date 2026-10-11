@@ -2,6 +2,7 @@ import { expect, it } from "vitest";
 import {
   accountSnapshot,
   catalogChoices,
+  subscriptionUsable,
   type Catalog,
   type CatalogModel,
 } from "../web/src/lib/model-catalog.js";
@@ -9,6 +10,8 @@ import {
   canReuseModelKey,
   emptyModelDraft,
   modelWriteRequest,
+  subscriptionProbeProtocols,
+  validateModelDraft,
 } from "../web/src/lib/upstream-settings-form.js";
 
 const publicModel: CatalogModel = {
@@ -52,6 +55,20 @@ const draft = {
   group_id: "group",
   base_url: "https://api.openai.com/v1",
 };
+
+it('offers subscription models and tests the actual selected client protocols', () => {
+  const subscription = { ...draft, name: 'Subscription', credential_kind: 'chatgpt_oauth' as const,
+    credential_ref: 'connection', agents: ['codex', 'pi', 'opencode'] };
+  expect(validateModelDraft(subscription)).toEqual({});
+  expect(subscriptionUsable(subscription.agents, ['openai-responses', 'openai-chat'], false)).toBe(true);
+  expect(subscriptionProbeProtocols(subscription.agents)).toEqual(['responses', 'chat']);
+  expect(subscriptionProbeProtocols(['pi', 'opencode'])).toEqual(['chat']);
+  expect(subscriptionProbeProtocols(['codex'])).toEqual(['responses']);
+  expect(subscriptionProbeProtocols([], true)).toEqual(['chat']);
+  expect(subscriptionProbeProtocols([])).toEqual(['responses', 'chat']);
+  expect(subscriptionUsable(['dsh'], ['openai-chat'], false)).toBe(false);
+  expect(validateModelDraft({ ...subscription, agents: ['dsh'] }).model_id).toBeTruthy();
+});
 
 it("uses saved account results only for the same supplier, auth mode, URL, and unchanged key", () => {
   expect(accountSnapshot(catalog, draft)).toBe(snapshot);

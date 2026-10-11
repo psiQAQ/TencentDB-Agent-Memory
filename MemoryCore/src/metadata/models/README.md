@@ -27,7 +27,10 @@ access token。普通配置缓存和客户端导出不包含 OAuth token。
 
 模型组和 extraction 增加 `provider_id`、`credential_kind`、`credential_ref`。
 未提供认证类型的旧配置按 `api_key` 解释。切换认证方式或供应商不能借同一地址复用凭据。
-订阅对话组只接受 Codex；后台提取通过 Proxy 将 Chat Completions 转成 Responses。
+订阅对话组接受 Codex、Pi 和 OpenCode。Codex 使用 Responses；Pi、OpenCode 和后台提取
+通过 Proxy 将 Chat Completions 转成 Responses，并将流式或非流式结果还原为客户端协议。
+订阅只有在收到 `response.completed` 后才归档和触发提取；额度错误、认证失效和断流
+分别报错，由用户手动切换。Panel 按已选客户端分别测试 Chat 转换及 Responses 协议。
 
 ## 数据与刷新
 
@@ -61,9 +64,13 @@ Proxy 使用公开 `/v1/responses`，固定 `stream: true`、`store: false`，�
 额度、认证和断流分别报错。未完成响应不会触发成功回合归档。Core 配置首次读取失败返回
 503，有旧配置则使用旧配置；不会因订阅不可用而自动改用其他计费来源。
 
-首期订阅对话只开放 HTTP `/responses`。`/responses/compact`、
+Codex 订阅对话使用 HTTP `/responses`；Pi、OpenCode 使用各自客户端路径下的
+`/chat/completions`，由 Proxy 转换协议。`/responses/compact`、
 `/memories/trace_summarize` 和 `/realtime/calls` 返回明确的不支持错误；客户端导出关闭
 WebSocket。真实 Codex 长会话及服务端压缩行为仍需在账号验收时确认。
 
 API 发现测试使用合成 HTTP 响应验证分页、权限、字段和错误边界。OAuth 测试使用临时
 RSA 签名验证真实 JOSE 校验流程，但不能代替真实账号授权和模型调用验收。
+
+Pi、OpenCode 的协议回归、真实客户端矩阵、Panel 点击测试与 dev 代理出口结果见
+[2026-10-11 验收记录](./VALIDATION-20261011.md)。

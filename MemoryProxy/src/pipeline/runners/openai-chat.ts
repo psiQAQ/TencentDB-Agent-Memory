@@ -1,4 +1,5 @@
 import { filterResponseHeaders } from "../../common/constants.js";
+import { chatToResponses, resolveSubscriptionToken, subscriptionToChat, SubscriptionError, type SubscriptionStreamState } from "../../chatgpt-subscription.js";
 /** Core request handler: intercept → forward → parse usage → log. */
 
 import type { Context } from "hono";
@@ -554,6 +555,10 @@ export async function runOpenaiChatPipeline(
   const _earlyExtractRow = earlyResult.earlyExtractRow;
   const _earlySysMatch = earlyResult.earlySysMatch;
   const _isCustomUpstream = earlyResult.isCustomUpstream;
+  const subscriptionRow = _earlySysMatch === null && _earlyConvResolution.kind === "override"
+    && _earlyConvResolution.row.credential_kind === "chatgpt_oauth" ? _earlyConvResolution.row : null;
+  if (subscriptionRow && !["pi", "opencode"].includes(agentSource)) throw new SubscriptionError("CHATGPT_ENDPOINT_UNSUPPORTED", 400);
+  const subscriptionState: SubscriptionStreamState | undefined = subscriptionRow ? { completed: false } : undefined;
 
   // ── Model gate + alias (gated by stageGates.modelGate) ────────────────
   // 未开门控 → 完全跳过 pricing 检查, alias 也不做 (行为等价 codex/wb minimal preset)。
@@ -1013,6 +1018,7 @@ export async function runOpenaiChatPipeline(
     keyId, sessionKey, messages, hasTools, body,
     modelId: modelId as string, headers: lcHeaders,
     traceId, startTime, spaceId,
+    useGuard: subscriptionRow ? false : undefined,
   });
   const target = resolvedTarget.target;
   let effectiveApiKey = resolvedTarget.effectiveApiKey;
@@ -1040,6 +1046,18 @@ export async function runOpenaiChatPipeline(
     }
   }
   const skipCreditReport = overrideResult.skipCreditReport;
+  if (subscriptionRow) {
+    effectiveApiKey = await resolveSubscriptionToken(config.coreSkill, spaceId, {
+      group_id: subscriptionRow.group_id, model_id: subscriptionRow.model_id,
+    });
+    target.url = "https://api.openai.com/v1/responses";
+    target.model = subscriptionRow.model_id;
+    target.authHeaders = null;
+    target.retryTarget = null;
+    target.bodyOverrides = null;
+    credentialOrigin = target.url;
+    body.model = modelId = subscriptionRow.model_id;
+  }
 
   // ── Create pipeline logger ──────────────────────────────────────────────
   const pipe = createPipeline(config, traceId, target.model);
@@ -1150,13 +1168,14 @@ export async function runOpenaiChatPipeline(
     lf,
     opikTraceId: traceId,
     opikKeyId: keyId,
-    skipPrepare: costGuardMode === "cheap",
+    skipPrepare: costGuardMode === "cheap" || !!subscriptionRow,
   });
 
-  const upstreamBody = buildUpstreamBody(body, target);
+  const chatBody = buildUpstreamBody(body, target);
+  const upstreamBody = subscriptionRow ? chatToResponses(chatBody) : chatBody;
 
   // Inject stream_options.include_usage for OpenAI compat
-  if (isStream) {
+  if (isStream && !subscriptionRow) {
     upstreamBody.stream_options = {
       ...(typeof upstreamBody.stream_options === "object" && upstreamBody.stream_options !== null
         ? (upstreamBody.stream_options as object)
@@ -1189,7 +1208,9 @@ export async function runOpenaiChatPipeline(
     );
     upstreamResp = result.resp;
     retried = result.retried;
+    if (subscriptionRow) upstreamResp = await subscriptionToChat(upstreamResp, isStream, true, subscriptionState);
   } catch (err: unknown) {
+    if (err instanceof SubscriptionError) throw err;
     if (isRateLimitExceededError(err)) {
       pipe.info("RATE_LIMIT", "TPM/QPM exceeded");
       return err.response;
@@ -1306,6 +1327,7 @@ export async function runOpenaiChatPipeline(
       skipCreditReport,
       isCustomUpstream: _isCustomUpstream,
       gates: _gates,
+      subscriptionState,
     };
     const passthrough = createUsageTapTransform(tapCtx);
     // 顺序要紧：tap 在前，读到的是模型原始输出；剥离在后，只影响客户端那一份。
@@ -1610,6 +1632,7 @@ function outputMessageContent(message: Record<string, unknown> | null): string |
 // ── Internal helpers ─────────────────────────────────────────────────────────
 
 interface TapContext {
+  subscriptionState?: SubscriptionStreamState;
   config: ProxyConfig;
   modelId: string;
   keyId: string;
@@ -1760,6 +1783,13 @@ function createUsageTapTransform(ctx: TapContext): TransformStream<Uint8Array, U
   }
 
   async function finalize(): Promise<void> {
+    if (ctx.subscriptionState && (!ctx.subscriptionState.completed || ctx.subscriptionState.error)) {
+      const code = ctx.subscriptionState.error ?? "CHATGPT_STREAM_INTERRUPTED";
+      pipe.error("SUBSCRIPTION_STREAM", code);
+      langfuseReportFailure({ lf, model: modelId, startTime, endTime: new Date().toISOString(),
+        statusMessage: code, observationMetadata: { stage: "subscription_stream" } });
+      return;
+    }
     if (sseBuf.trim()) {
       const usage = extractSseUsage(sseBuf);
       if (usage) lastUsage = usage;

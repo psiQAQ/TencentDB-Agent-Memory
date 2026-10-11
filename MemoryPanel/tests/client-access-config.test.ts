@@ -66,6 +66,9 @@ describe('API Key client access configuration', () => {
     expect(configs.get('codex')).toContain('/codex/instance-a');
     expect(configs.get('dsh')).toContain('/dsh/instance-a');
     expect(configs.get('opencode')).toContain('/opencode/instance-a/v1');
+    expect(JSON.parse(configs.get('opencode')!)).toMatchObject({
+      model: 'proxy-memory/model-a', small_model: 'proxy-memory/model-a',
+    });
     expect(configs.get('openclaw')).toContain('/openclaw/instance-a');
     expect(configs.get('hermes')).toContain('/hermes/instance-a');
   });

@@ -210,7 +210,7 @@ export function chatToResponses(body: Json): Json {
                     400,
                   );
                 if (part.type === "text")
-                  return { type: "input_text", text: part.text };
+                  return { type: role === "assistant" ? "output_text" : "input_text", text: part.text };
                 if (part.type === "image_url" && isObject(part.image_url))
                   return {
                     type: "input_image",
@@ -465,29 +465,40 @@ export function responseToChat(response: Json): Json {
     usage: chatUsage(response.usage),
   };
 }
+/** Kept in-process so an SSE error/EOF cannot be mistaken for successful archival. */
+export interface SubscriptionStreamState {
+  completed: boolean;
+  error?: string;
+}
 export async function subscriptionToChat(
   response: Response,
   stream: boolean,
   includeUsage = false,
+  state?: SubscriptionStreamState,
 ): Promise<Response> {
   assertSubscriptionResponse(response);
   const events = subscriptionEvents(response.body!);
   const headers = {
     "content-type": stream ? "text/event-stream" : "application/json",
     "cache-control": "no-store",
+    ...(response.headers.has("x-request-id") ? { "x-request-id": response.headers.get("x-request-id")! } : {}),
   };
   if (!stream) {
     for await (const event of events)
-      if (event.type === "response.completed")
+      if (event.type === "response.completed") {
+        if (state) state.completed = true;
         return Response.json(responseToChat(event.response as Json), {
           headers,
         });
+      }
     throw new SubscriptionError("CHATGPT_STREAM_INTERRUPTED");
   }
   let id = "";
   let model = "";
   let toolCount = 0;
-  const tools = new Map<string, number>();
+  let text = "";
+  const tools = new Map<string, { index: number; arguments: string }>();
+  const itemCalls = new Map<string, string>();
   const chunk = (delta: Json, finish: string | null = null) => ({
     id,
     object: "chat.completion.chunk",
@@ -503,6 +514,24 @@ export async function subscriptionToChat(
           emitted = true;
           controller.enqueue(value);
         };
+        const toolItem = (item: Json) => {
+          const callId = String(item.call_id ?? "");
+          if (!callId || typeof item.name !== "string") throw new SubscriptionError("CHATGPT_INVALID_TOOL_EVENT");
+          if (typeof item.id === "string") itemCalls.set(item.id, callId);
+          let tool = tools.get(callId);
+          if (!tool) {
+            tool = { index: toolCount++, arguments: "" };
+            tools.set(callId, tool);
+            emit(encode(chunk({ tool_calls: [{ index: tool.index, id: callId, type: "function",
+              function: { name: item.name, arguments: "" } }] })));
+          }
+          if (typeof item.arguments === "string" && item.arguments) {
+            if (!item.arguments.startsWith(tool.arguments)) throw new SubscriptionError("CHATGPT_INVALID_TOOL_EVENT");
+            const delta = item.arguments.slice(tool.arguments.length);
+            tool.arguments = item.arguments;
+            if (delta) emit(encode(chunk({ tool_calls: [{ index: tool.index, function: { arguments: delta } }] })));
+          }
+        };
         while (!emitted) {
           const next = await events.next();
           if (next.done) {
@@ -515,47 +544,47 @@ export async function subscriptionToChat(
             model = String(event.response.model ?? "");
             emit(encode(chunk({ role: "assistant", content: "" })));
           }
-          if (event.type === "response.output_text.delta")
+          if (event.type === "response.output_text.delta") {
+            if (typeof event.delta !== "string") throw new SubscriptionError("CHATGPT_INVALID_EVENT");
+            text += event.delta;
             emit(encode(chunk({ content: event.delta })));
+          }
           if (
-            event.type === "response.output_item.added" &&
+            ["response.output_item.added", "response.output_item.done"].includes(String(event.type)) &&
             isObject(event.item) &&
             event.item.type === "function_call"
           ) {
-            const item = event.item;
-            const index = toolCount++;
-            tools.set(String(item.id), index);
-            emit(
-              encode(
-                chunk({
-                  tool_calls: [
-                    {
-                      index,
-                      id: item.call_id,
-                      type: "function",
-                      function: {
-                        name: item.name,
-                        arguments: item.arguments ?? "",
-                      },
-                    },
-                  ],
-                }),
-              ),
-            );
+            toolItem(event.item);
           }
           if (event.type === "response.function_call_arguments.delta") {
-            const index = tools.get(String(event.item_id));
-            if (index === undefined)
+            const tool = tools.get(itemCalls.get(String(event.item_id)) ?? "");
+            if (!tool || typeof event.delta !== "string")
               throw new SubscriptionError("CHATGPT_INVALID_TOOL_EVENT");
+            tool.arguments += event.delta;
             emit(
               encode(
                 chunk({
-                  tool_calls: [{ index, function: { arguments: event.delta } }],
+                  tool_calls: [{ index: tool.index, function: { arguments: event.delta } }],
                 }),
               ),
             );
           }
           if (event.type === "response.completed") {
+            const terminal = event.response as Json;
+            id ||= String(terminal.id ?? "");
+            model ||= String(terminal.model ?? "");
+            // Some streams contain the final text/tool arguments only in done items.
+            const final = responseToChat(terminal);
+            const message = ((final.choices as Json[])[0].message as Json);
+            if (typeof message.content === "string") {
+              if (!message.content.startsWith(text)) throw new SubscriptionError("CHATGPT_INVALID_EVENT");
+              const delta = message.content.slice(text.length);
+              if (delta) emit(encode(chunk({ content: delta })));
+            }
+            for (const item of Array.isArray(terminal.output) ? terminal.output : []) {
+              if (isObject(item) && item.type === "function_call") toolItem(item);
+            }
+            if (state) state.completed = true;
             controller.enqueue(
               encode(chunk({}, toolCount ? "tool_calls" : "stop")),
             );
@@ -578,6 +607,7 @@ export async function subscriptionToChat(
           error instanceof SubscriptionError
             ? error.code
             : "CHATGPT_STREAM_INTERRUPTED";
+        if (state) state.error = code;
         controller.enqueue(
           encode({
             error: { type: "subscription_error", code, message: code },

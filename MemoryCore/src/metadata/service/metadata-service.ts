@@ -3577,7 +3577,7 @@ export class MetadataService {
       if (provider !== "openai" || base !== PROVIDERS.openai.base_url || mode !== "custom_unified" || input.api_key) {
         throw new ModelConnectionError("CHATGPT_INVALID_CONFIGURATION");
       }
-      if ((input.agents ?? existing?.agents ?? []).some((agent) => agent !== "codex")) throw new ModelConnectionError("CHATGPT_CODEX_ONLY");
+      if ((input.agents ?? existing?.agents ?? []).some((agent) => !["codex", "pi", "opencode"].includes(agent))) throw new ModelConnectionError("CHATGPT_AGENT_UNSUPPORTED");
       if (!existing || existing.credential_kind !== kind || existing.credential_ref !== reference || existing.model_id !== model) {
         await this.modelCatalog.assertSubscriptionModel(reference, model);
       }
