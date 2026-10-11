@@ -57,7 +57,7 @@ class ExportTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         metadata = json.loads((self.output / 'download.json').read_text())
         self.assertEqual(metadata['panelUrl'], 'https://memory.example.com')
-        self.assertEqual(metadata['piVersion'], '0.84.3')
+        self.assertEqual(metadata['piVersion'], '1.1.0')
         self.assertNotIn('expectedCaSha256', metadata)
         self.assertEqual(metadata['archiveSha256'], hashlib.sha256((self.output / 'pi-client-bundle.zip').read_bytes()).hexdigest())
         with zipfile.ZipFile(self.output / 'pi-client-bundle.zip') as archive:
