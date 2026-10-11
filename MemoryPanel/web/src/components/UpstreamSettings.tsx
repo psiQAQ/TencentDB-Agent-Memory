@@ -11,6 +11,8 @@ import {
 } from '@/lib/upstream-settings-form';
 import './UpstreamSettings.css';
 import { ModelCatalogPicker, ModelCatalogStatus, useModelCatalog } from './ModelCatalogPicker';
+import { useClientModels } from '@/lib/use-client-models';
+import { notifyModelConfigChanged } from '@/lib/model-config-events';
 
 type Agent = { agent_source: string; display_name: string; protocol: string };
 type Editor = 'group' | 'extraction' | 'assignment' | null;
@@ -23,6 +25,9 @@ export function UpstreamPage() {
 }
 
 function GroupSettings() {
+  const { auth } = useAuthStore();
+  const clientModels = useClientModels(auth?.instance_id);
+  const deploymentModel = clientModels.instance?.deployment_model;
   const catalog = useModelCatalog();
   const [groups, setGroups] = useState<ModelGroup[]>([]);
   const [agents, setAgents] = useState<Agent[]>([]);
@@ -68,6 +73,7 @@ function GroupSettings() {
     setBusy(true); setError(''); setNotice('');
     try {
       const result = await writeModelAndReload(action, reload);
+      if (auth?.instance_id) notifyModelConfigChanged(auth.instance_id);
       setNotice(message);
       if (result.refreshFailed) setError('配置已保存，但列表刷新失败。请重新加载配置，不要重复创建模型组。');
       return true;
@@ -161,13 +167,18 @@ function GroupSettings() {
       <p>对话模型组用于客户端的模型调用；总结模型单独供 Core 和 Knowledge 使用。配置保存后最多约 30 秒生效。</p>
     </details>
     {loading ? <p role="status">正在加载模型配置…</p> : <>
+      {clientModels.error && <Alert type="warning">{clientModels.error}</Alert>}
+      {clientModels.instance && !deploymentModel && <Alert type="warning">未配置部署默认模型，已隐藏默认组。仍归属该组的客户端需要重新分配到可用模型组。
+        {groups.filter((group) => group.group_type === 'default' && group.agents.length > 0).map((group) =>
+          <Button key={group.group_id} disabled={working} onClick={() => openEditor('assignment', group)}>调整未配置客户端</Button>)}
+      </Alert>}
       {freeAgents.length > 0 && <Alert type="warning">{freeAgents.map((agent) => agent.display_name).join('、')} 尚未分配模型组，请在目标组点击“分配客户端”。</Alert>}
       <div className="upstream-columns">
         <section className="upstream-card" aria-label="对话模型组"><h2>对话模型组</h2>
-          <p className="upstream-help">每个客户端最多属于一个组。默认组使用部署默认模型；自定义组使用你保存的供应商配置。</p>
-          <div className="upstream-profile-list">{groups.map((group) => <article key={group.group_id} className="upstream-profile">
-            <div className="upstream-profile-head"><h3>{group.name}</h3><span className={group.enabled ? 'upstream-status-good' : 'upstream-status-bad'}>{group.enabled ? '已启用' : '已停用'}</span></div>
-            {group.group_type === 'default' ? <p>使用部署默认模型</p> : <dl className="upstream-current">
+          <p className="upstream-help">每个客户端最多属于一个组。自定义组使用你保存的供应商配置；仅在提供部署默认模型时展示默认组。</p>
+          <div className="upstream-profile-list">{groups.filter((group) => group.group_type !== 'default' || !!deploymentModel).map((group) => <article key={group.group_id} className="upstream-profile">
+            <div className="upstream-profile-head"><h3>{group.group_type === 'default' ? '部署默认模型' : group.name}</h3><span className={group.enabled ? 'upstream-status-good' : 'upstream-status-bad'}>{group.enabled ? '已启用' : '已停用'}</span></div>
+            {group.group_type === 'default' ? <p>模型：{deploymentModel}</p> : <dl className="upstream-current">
               <dt>模型</dt><dd>{group.model_id || '未指定'}</dd>
               <dt>API 地址</dt><dd>{group.base_url}</dd>
               <dt>认证方式</dt><dd>{group.credential_kind === 'chatgpt_oauth' ? `ChatGPT 订阅 · ${catalog.catalog?.subscriptions.find((c) => c.reference === group.credential_ref)?.email ?? group.credential_ref}` : group.mode === 'custom_passthrough' ? '由客户端提供供应商凭据' : group.api_key_masked || '未保存'}</dd>

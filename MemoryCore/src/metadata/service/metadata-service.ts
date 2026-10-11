@@ -302,13 +302,19 @@ export class MetadataService {
     const rows = await this.store.listInstanceUpstreamGroups(undefined, supported);
     const model_ids: Record<string, string | null> = {};
     const official_agents: string[] = [];
+    const clients = supported.map((agent) => {
+      const row = rows.find((r) => r.group_type !== "extraction" && r.agents.includes(agent.agent_source));
+      return { agent_source: agent.agent_source, display_name: agent.display_name, protocol: agent.protocol,
+        assignment: row ? { enabled: row.enabled, mode: row.mode, model_id: row.model_id,
+          credential_kind: row.credential_kind } : null };
+    });
     for (const agent of supported) {
       const row = rows.find((r) => r.group_type !== "extraction" && r.agents.includes(agent.agent_source));
       model_ids[agent.agent_source] = row?.enabled ? row.model_id || null : null;
       if (row?.enabled && row.mode === "official") official_agents.push(agent.agent_source);
     }
     const unique = [...new Set(Object.values(model_ids))];
-    return { model_ids, official_agents, model_id: unique.length === 1 ? unique[0] : null };
+    return { model_ids, official_agents, model_id: unique.length === 1 ? unique[0] : null, clients };
   }
 
   private readonly quota: MetadataQuotaLimits;

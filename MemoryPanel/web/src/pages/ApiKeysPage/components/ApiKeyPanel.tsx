@@ -24,7 +24,8 @@ import {
   Text,
 } from 'tea-component';
 import { AddIcon } from 'tea-icons-react';
-import { metaInstancesApi, userKeysApi } from '@/lib/teamApi';
+import { userKeysApi } from '@/lib/teamApi';
+import { useClientModels } from '@/lib/use-client-models';
 import { useAuthStore } from '@/stores/auth';
 import { tea } from '@/lib/tea-bridge';
 import { getErrorMessage } from '@/lib/error-message';
@@ -34,7 +35,7 @@ import {
   type ApiKeySubject,
   type ManagedUserKey,
 } from '../api-key-inventory';
-import { buildClientAccessConfigs } from '../client-access-config';
+import { buildClientAccessConfigs, buildClientAccessEntries } from '../client-access-config';
 import '../styles/api-key-panel.css';
 
 const { autotip } = Table.addons;
@@ -51,39 +52,14 @@ export default function ApiKeyPanel() {
   const { auth } = useAuthStore();
   const [keys, setKeys] = useState<ManagedUserKey[]>([]);
   const [loading, setLoading] = useState(true);
-  const [clientBaseUrl, setClientBaseUrl] = useState<string | null>(null);
-  const [clientUpstreamModel, setClientUpstreamModel] = useState<string | Record<string, string | null> | null>(null);
+  const clientModels = useClientModels(auth?.instance_id);
+  const clientBaseUrl = clientModels.instance?.proxy_endpoint ?? clientModels.instance?.gateway_endpoint;
+  const clientUpstreamModel = clientModels.instance?.upstream_models ?? clientModels.instance?.upstream_model;
   const [showCreate, setShowCreate] = useState(false);
   const [newKeyName, setNewKeyName] = useState('');
   const [newExpiresAt, setNewExpiresAt] = useState<Moment | null>(null);
   const [creating, setCreating] = useState(false);
   const [freshKey, setFreshKey] = useState<{ keyId: string; secret: string } | null>(null);
-
-  useEffect(() => {
-    let cancelled = false;
-    if (!auth?.instance_id) {
-      setClientBaseUrl(null);
-      setClientUpstreamModel(null);
-      return;
-    }
-    void metaInstancesApi
-      .list()
-      .then((list) => {
-        if (cancelled) return;
-        const hit = list.find((instance) => instance.instance_id === auth.instance_id);
-        setClientBaseUrl(hit?.proxy_endpoint ?? hit?.gateway_endpoint ?? null);
-        setClientUpstreamModel(hit?.upstream_models ?? hit?.upstream_model ?? null);
-      })
-      .catch(() => {
-        if (!cancelled) {
-          setClientBaseUrl(null);
-          setClientUpstreamModel(null);
-        }
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [auth?.instance_id]);
 
   const refresh = useCallback(async () => {
     if (!auth) return;
@@ -159,9 +135,11 @@ export default function ApiKeyPanel() {
   }
 
   const clientAccessConfigs = useMemo(() => {
-    if (!clientBaseUrl || !clientUpstreamModel || !auth?.instance_id) return [];
+    if (!clientBaseUrl || !auth?.instance_id || clientModels.error) return [];
+    if (clientModels.instance?.client_models) return buildClientAccessEntries(clientBaseUrl, auth.instance_id, clientModels.instance.client_models);
+    if (!clientUpstreamModel) return [];
     return buildClientAccessConfigs(clientBaseUrl, auth.instance_id, clientUpstreamModel);
-  }, [auth?.instance_id, clientBaseUrl, clientUpstreamModel]);
+  }, [auth?.instance_id, clientBaseUrl, clientUpstreamModel, clientModels.instance, clientModels.error]);
 
   return (
     <div className="_memory-apikey-body">
@@ -298,6 +276,8 @@ export default function ApiKeyPanel() {
 
       <Card>
         <Card.Body title={t('apiKey.endpoint.title')}>
+          <Button disabled={clientModels.loading} onClick={() => void clientModels.reload()}>刷新接入配置</Button>
+          <p>按各客户端已保存的模型分配生成。复制后需更新客户端本地文件；供应商凭据和订阅令牌由服务端管理。</p>
           {auth?.instance_name && (
             <div
               style={{ marginBottom: 8, fontSize: 11, color: 'var(--tea-color-text-secondary)' }}
@@ -314,7 +294,7 @@ export default function ApiKeyPanel() {
             </div>
           )}
           <div className="_memory-apikey-endpoints">
-            {!clientBaseUrl ? (
+            {clientModels.error ? <Alert type="error">{clientModels.error}</Alert> : clientModels.loading ? (
               <Text theme="weak" style={{ fontSize: 11 }}>
                 {t('apiKey.endpoint.loading')}
               </Text>
@@ -329,14 +309,18 @@ export default function ApiKeyPanel() {
                         {config.name}
                       </Text>
                       <Text theme="weak" parent="code" className="_memory-apikey-endpoint-target">
-                        {t(`apiKey.endpoint.kind.${config.kind}`)} · {config.target}
+                        {config.model ? `模型：${config.model} · ${config.authentication ?? ''}` : '未配置可用模型'}
                       </Text>
                     </div>
-                    <Copy text={config.content}>
+                    {!config.reason && <Copy text={config.content}>
                       <Button>{t('apiKey.endpoint.copyConfig')}</Button>
-                    </Copy>
+                    </Copy>}
                   </div>
-                  <pre className="_memory-apikey-endpoint-code">{config.content}</pre>
+                  {config.reason ? <Alert type="warning">{config.reason}</Alert> : <>
+                    <p>{config.kind === 'command' ? config.target : `${t('apiKey.endpoint.kind.file')} · ${config.target}`}</p>
+                    {config.instructions && <p>{config.instructions}</p>}
+                    <pre className="_memory-apikey-endpoint-code">{config.content}</pre>
+                  </>}
                 </div>
               ))
             )}

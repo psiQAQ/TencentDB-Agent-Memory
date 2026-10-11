@@ -1,5 +1,6 @@
 import type { Hono } from 'hono';
 import type { PanelDeps } from '../../../panel-deps.js';
+import { resolveClientModels, type ConversationModelMetadata } from '../../../../shared/client-models.js';
 
 export function registerHealthRoutes(app: Hono): void {
   app.get('/health', (c) => c.json({ status: 'ok' }));
@@ -10,20 +11,23 @@ export function registerMetaInstanceRoutes(api: Hono, deps: PanelDeps): void {
     const instances = await Promise.all(deps.instanceRegistry.listPublic().map(async (entry) => {
       const privateEntry = deps.instanceRegistry.resolve(entry.instance_id);
       const { upstream_model: _configuredModel, ...publicEntry } = entry;
+      const base = { ...publicEntry, deployment_model: _configuredModel ?? null };
       try {
         const response = await fetch(`${privateEntry.gateway_endpoint.replace(/\/+$/, '')}/v3/internal/meta/instance-upstream/model`, {
           method: 'POST', signal: AbortSignal.timeout(3000),
           headers: { authorization: `Bearer ${privateEntry.api_key}`, 'x-tdai-service-id': entry.instance_id,
             'content-type': 'application/json' }, body: '{}',
         });
-        if (!response.ok) return publicEntry;
-        const json = await response.json() as { data?: { model_id?: string | null; model_ids?: Record<string, string | null>; official_agents?: string[] } };
+        if (!response.ok) return { ...base, model_status: 'unavailable' };
+        const json = await response.json() as { data?: ConversationModelMetadata };
+        if (!json.data?.model_ids) return { ...base, model_status: 'unavailable' };
         const models = { ...json.data?.model_ids };
         for (const agent of json.data?.official_agents ?? []) models[agent] = _configuredModel ?? null;
         const unique = [...new Set(Object.values(models))];
         const model = unique.length === 1 ? unique[0] : json.data?.model_id;
-        return { ...publicEntry, ...(model ? { upstream_model: model } : {}), upstream_models: models };
-      } catch { return publicEntry; }
+        return { ...base, model_status: 'ready', ...(model ? { upstream_model: model } : {}), upstream_models: models,
+          client_models: resolveClientModels(json.data, _configuredModel) };
+      } catch { return { ...base, model_status: 'unavailable' }; }
     }));
     return c.json({
       instances,

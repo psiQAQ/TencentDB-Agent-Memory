@@ -2,6 +2,15 @@
  * api/meta-instances.ts — 登录前选实例（GET /api/v1/meta/instances）。
  */
 import { request, dedupeInFlight } from './base';
+/** Public /meta/instances client model contract; contains no supplier credentials. */
+export interface ClientModel {
+  agent_source: string;
+  display_name: string;
+  protocol: string;
+  model_id: string | null;
+  credential_kind: 'api_key' | 'chatgpt_oauth';
+  status: 'ready' | 'unassigned' | 'disabled' | 'default_missing' | 'model_missing' | 'unsupported' | 'client_credentials';
+}
 
 /**
  * 客户端可见的实例元信息。
@@ -20,6 +29,9 @@ export interface MetadataInstance {
   /** Proxy 当前实际转发使用的模型 ID；公开配置，不含凭据。 */
   upstream_model?: string;
   upstream_models?: Record<string, string | null>;
+  client_models?: ClientModel[];
+  deployment_model?: string | null;
+  model_status?: 'ready' | 'unavailable';
 }
 
 /** 面板级能力开关（随实例列表顺带下发，用于菜单/路由可见性控制）。 */
@@ -33,18 +45,17 @@ const DEFAULT_CAPABILITIES: PanelCapabilities = { analyticsEnabled: false };
 
 export const metaInstancesApi = {
   /** 登录前选实例；GET /api/v1/meta/instances，公开、无需鉴权、无分页 */
-  list: () =>
-    dedupeInFlight('meta/instances', () =>
-      request<{ instances: MetadataInstance[] }>('GET', '/api/v1/meta/instances').then((r) => r.instances),
-    ),
+  list: (fresh = false) => {
+    const load = () => request<{ instances: MetadataInstance[] }>('GET', '/api/v1/meta/instances').then((r) => r.instances);
+    return fresh ? load() : dedupeInFlight('meta/instances:list', load);
+  },
 
   /**
-   * 面板能力开关。与 list() 同一去重 key：并发时共享同一次网络请求，
-   * 各自从响应中提取所需字段（list 取 instances、本函数取 capabilities）。
+   * 面板能力开关。使用独立去重 key，避免与实例列表的不同返回结构混用。
    * 老版本 Panel 响应中没有该字段 → 按关闭兜底。
    */
   capabilities: () =>
-    dedupeInFlight('meta/instances', () =>
+    dedupeInFlight('meta/instances:capabilities', () =>
       request<{ capabilities?: PanelCapabilities }>('GET', '/api/v1/meta/instances').then(
         (r) => r.capabilities ?? DEFAULT_CAPABILITIES,
       ),

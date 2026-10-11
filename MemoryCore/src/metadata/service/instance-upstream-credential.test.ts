@@ -48,6 +48,12 @@ describe("model-group credential isolation", () => {
     const custom = await f.service.getConversationModelsInternal(supported);
     expect(custom.model_ids).toEqual({ codex: "model-a", pi: null });
     expect(custom.official_agents).toEqual([]);
+    expect(custom.clients).toEqual([
+      { agent_source: 'codex', display_name: 'Codex', protocol: 'openai-responses',
+        assignment: { enabled: true, mode: 'custom_unified', model_id: 'model-a', credential_kind: 'api_key' } },
+      { agent_source: 'pi', display_name: 'Pi', protocol: 'openai-chat', assignment: null },
+    ]);
+    expect(JSON.stringify(custom)).not.toContain('supplier-secret');
   });
   it("requires an independent key before changing supplier origin", async () => {
     const result = await create();

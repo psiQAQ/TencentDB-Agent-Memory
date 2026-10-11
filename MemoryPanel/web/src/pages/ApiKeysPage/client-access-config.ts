@@ -1,4 +1,6 @@
-export type ClientAccessConfigKind = 'file';
+import type { ClientModel } from '../../lib/api/meta-instances';
+
+export type ClientAccessConfigKind = 'file' | 'command';
 
 export interface ClientAccessConfig {
   id: string;
@@ -6,6 +8,10 @@ export interface ClientAccessConfig {
   kind: ClientAccessConfigKind;
   target: string;
   content: string;
+  instructions?: string;
+  reason?: string;
+  model?: string | null;
+  authentication?: string;
 }
 
 export const USER_KEY_PLACEHOLDER = 'sk-mem-<你的 User Key>';
@@ -16,6 +22,28 @@ function endpoint(base: string, agent: string, instanceId: string, withV1 = fals
 
 function quoted(value: string): string {
   return JSON.stringify(value);
+}
+
+function shellQuoted(value: string): string {
+  return `'${value.replace(/'/g, `'"'"'`)}'`;
+}
+
+export function buildClientAccessEntries(base: string, instanceId: string, clients: ClientModel[]): ClientAccessConfig[] {
+  const reasons: Record<Exclude<ClientModel['status'], 'ready'>, string> = {
+    unassigned: '尚未分配模型组，请在模型配置中分配客户端。',
+    disabled: '所属模型组已停用，请启用模型组或重新分配。',
+    default_missing: '未配置部署默认模型，请分配到已配置的自定义模型组。',
+    model_missing: '所属模型组未指定模型，请补全模型配置。',
+    unsupported: '当前客户端不支持 ChatGPT 订阅协议，请选择兼容的模型组。',
+    client_credentials: '当前组要求客户端提供供应商凭据，不能使用仅含业务 User Key 的接入模板。',
+  };
+  return clients.map((client) => {
+    const config = client.status === 'ready' && client.model_id
+      ? buildClientAccessConfigs(base, instanceId, client.model_id).find((item) => item.id === client.agent_source) : undefined;
+    return { id: client.agent_source, name: client.display_name, kind: 'file' as const, target: '', content: '', ...config,
+      model: client.model_id, authentication: client.credential_kind === 'chatgpt_oauth' ? 'ChatGPT 订阅' : '部署配置 / API Key',
+      reason: client.status !== 'ready' ? reasons[client.status] : !config ? '当前客户端尚无接入模板。' : undefined };
+  });
 }
 
 /**
@@ -43,6 +71,24 @@ export function buildClientAccessConfigs(
   const hermesEndpoint = endpoint(base, 'hermes', instanceId);
 
   return [
+    {
+      id: 'pi',
+      name: 'Pi',
+      kind: 'command',
+      target: '终端（Bash / Zsh）',
+      instructions: '先将源码仓库的 MemoryCore/pi-plugin/index.ts 保存为 ~/.pi/agent/extensions/tdai-memory.ts（或使用已有 Pi 客户端包中的同一插件）。填写业务 User Key、Team ID 和 Agent ID；Task ID 可选。插件自动为每个真实会话生成 pi-<session id>，不要手填固定会话 ID。',
+      content: `# 接口：${endpoint(base, 'pi', instanceId, true)}
+export TDAI_PROXY_URL=${shellQuoted(base.replace(/\/+$/, ''))}
+export TDAI_SPACE_ID=${shellQuoted(instanceId)}
+export TDAI_AGENT_SOURCE='pi'
+export TDAI_MODEL=${shellQuoted(model)}
+export TDAI_USER_KEY=${shellQuoted(USER_KEY_PLACEHOLDER)}
+export TDAI_TEAM_ID='<team-id>'
+export TDAI_AGENT_ID='<agent-id>'
+# 如需按 Task 隔离，填写对应 Task ID；空值表示不限制 Task。
+export TDAI_TASK_ID=''
+pi -e "$HOME/.pi/agent/extensions/tdai-memory.ts" --provider tdai --model "$TDAI_MODEL"`,
+    },
     {
       id: 'claude-code',
       name: 'Claude Code',
