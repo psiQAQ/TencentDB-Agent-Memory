@@ -43,3 +43,6 @@ export const defaultAdapter: AgentAdapter = {
 /** OpenCode and Pi use the default Anthropic message semantics observed here. */
 export const opencodeAdapter: AgentAdapter = { ...defaultAdapter, agentKind: "opencode" };
 export const piAdapter: AgentAdapter = { ...defaultAdapter, agentKind: "pi" };
+/** Header-bound clients use standard Chat message content without form tools. */
+export const hermesAdapter: AgentAdapter = { ...defaultAdapter, agentKind: "hermes" };
+export const openclawAdapter: AgentAdapter = { ...defaultAdapter, agentKind: "openclaw" };

@@ -35,3 +35,36 @@ CA 配置成对可选：没有 CA 字段时使用运行时默认信任，有 CA 
 客户端测试涵盖独立导出、有 / 无 CA、白名单、符号链接、失败回退、旧安装兼容、环境变量、
 真实本机 HTTPS、身份校验请求与重定向拒绝。Panel 下载测试使用真实导出 ZIP，并以 fixture
 隔离 Core 认证；配置测试覆盖新旧元信息、独立 Panel 和地址不匹配。离线测试不代表已部署。
+
+以下日期记录为对应版本的验收历史；客户端当前推荐版本以客户端模块的 `compatibility.json` 为准。
+
+## 模板版本与范围
+
+2026-10-11，逐一执行本地五个镜像的版本命令：Claude Code 2.1.241、Codex CLI 0.149.1、
+Pi 0.84.3、OpenCode 1.18.22、DSH 0.1.1-rc.2，均与模板标注一致。
+
+DSH 使用当前镜像的 `~/.dsh/cordis.patch.yml`、`llm-pi-ai`、业务 Key 环境引用及显式会话头。
+YAML 和 Linux 启动命令分别复制；每次新会话生成 ID，续聊复用。该模板不声称兼容 0.2+ 的
+`deepseek-official` 入口。真实镜像离线 `--dump-config` 已确认主模型及供应商配置被加载。
+
+OpenClaw 补充默认模型选择及 `/v1` 端点；Hermes 改用供应商级 `extra_headers`、`/v1`
+和 `session_affinity_header`。这些配置基于
+[OpenClaw 官方规范](https://docs.openclaw.ai/gateway/config-tools/custom-providers)与
+[Hermes 官方规范](https://hermes-agent.nousresearch.com/docs/user-guide/configuring-models)。
+Hermes 需要支持上述字段的版本。CodeBuddy、WorkBuddy 按仓库说明核对；这四个客户端本机没有镜像，
+未将文档核对记为真实客户端验收，页面也明确显示该范围。
+
+## dev 验收
+
+| 检查 | 状态 | 证据范围 |
+| --- | --- | --- |
+| Panel 定向测试 | Passed | 4 文件、19 用例：模板、分配、实例元数据、下载认证及实例隔离、路径参数拒绝、文件缺失和摘要不匹配。 |
+| Panel 类型检查与前端构建 | Passed | `npm run typecheck`、`npm run build --prefix web`；Hub 构建通过。 |
+| ZIP 打包与安装脚本 | Passed | 固定七文件白名单测试；混入 Key / 私钥不打包，符号链接拒绝；本地安装幂等和 CLI 离线安装测试。 |
+| 浏览器下载 | Passed | 实际点击下载 ZIP，文件与部署端摘要相同，插件摘要与源清单一致。 |
+| 浏览器复制与刷新 | Passed | Pi 配置、DSH YAML、DSH 启动命令均实际点击并出现“复制成功”；刷新后当前分配保留。剪贴板逐字回读未取得，不记为通过。 |
+| Pi 真实镜像离线安装 | Passed | 将浏览器下载包在禁网容器内安装，真实 Pi 0.84.3 自动加载扩展并注册当前模型；未调用 LLM。 |
+| 原配置及 Lab 记忆 | Passed | 配置与凭据摘要不变，88 条既有 L0/L1 缺失 0、变化 0，资产映射不变。 |
+| 本轮真实推理 / 清空式五 Agent 回归 | Not Run | 本轮为模板、下载与安装验证，保留既有记忆。 |
+
+原始截图、下载校验、容器输出及保留核对由部署仓库的忽略目录保存；浏览器捕获 error 日志为 0。

@@ -182,7 +182,7 @@ const CODEBUDDY_GUARD_BARE_CHAT_RE =
  * 白名单入口 `/v1/messages`、`/responses` 自身不会被误剥（因为它们不匹配 agent
  * 段——agent 段限定为已知名字）。
  */
-const AGENT_PREFIX_RE = /^\/(claude-code|codebuddy|codex|dsh|opencode|pi|workbuddy|cursor|anthropic|openai)(?:\/[^/]+)?(?=\/v1\/|\/chat\/completions$|\/responses(?:\/|$)|\/memories\/|\/realtime\/)/i;
+const AGENT_PREFIX_RE = /^\/(claude-code|codebuddy|codex|dsh|opencode|pi|hermes|openclaw|workbuddy|cursor|anthropic|openai)(?:\/[^/]+)?(?=\/v1\/|\/chat\/completions$|\/responses(?:\/|$)|\/memories\/|\/realtime\/)/i;
 
 /**
  * `/cost-guard` marker 正则：位于 `/{agent}/{spaceId}` 之后的独立 segment。

@@ -19,7 +19,7 @@ import { workbuddyAdapter } from "./workbuddy.js";
 import { dshAdapter } from "./dsh.js";
 import { opencodeAdapter } from "./opencode.js";
 import { piAdapter } from "./pi.js";
-import { defaultAdapter } from "./default.js";
+import { defaultAdapter, hermesAdapter, openclawAdapter } from "./default.js";
 import {
   ANTHROPIC_MESSAGE_SOURCES,
   extractAgentSourceFromPath,
@@ -28,7 +28,7 @@ import {
 export type { AgentAdapter, AgentKind, RequestKind } from "./types.js";
 
 /** Agent prefixes with an explicitly supported OpenAI Chat route. */
-export const OPENAI_PLATFORM_SOURCES = ["codebuddy", "dsh", "opencode", "pi"] as const;
+export const OPENAI_PLATFORM_SOURCES = ["codebuddy", "dsh", "opencode", "pi", "hermes", "openclaw"] as const;
 export type OpenAIPlatformSource = (typeof OPENAI_PLATFORM_SOURCES)[number];
 
 /** `openai` is reserved for documented source-less compatibility routes. */
@@ -80,6 +80,10 @@ export function resolveAgentAdapter(agentSource: string): AgentAdapter {
       return opencodeAdapter;
     case "pi":
       return piAdapter;
+    case "hermes":
+      return hermesAdapter;
+    case "openclaw":
+      return openclawAdapter;
     default:
       return defaultAdapter;
   }

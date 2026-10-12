@@ -12,6 +12,8 @@ export interface ClientAccessConfig {
   reason?: string;
   model?: string | null;
   authentication?: string;
+  compatibility?: string;
+  setupCommands?: string;
 }
 
 export const USER_KEY_PLACEHOLDER = 'sk-mem-<你的 User Key>';
@@ -62,18 +64,19 @@ export function buildClientAccessConfigs(
     });
   }
   const claudeEndpoint = endpoint(base, 'claude-code', instanceId);
-  const codeBuddyEndpoint = endpoint(base, 'codebuddy', instanceId);
+  const codeBuddyEndpoint = `${endpoint(base, 'codebuddy', instanceId, true)}/chat/completions`;
   const workBuddyEndpoint = endpoint(base, 'workbuddy', instanceId);
   const codexEndpoint = endpoint(base, 'codex', instanceId);
   const dshEndpoint = endpoint(base, 'dsh', instanceId);
   const openCodeEndpoint = endpoint(base, 'opencode', instanceId, true);
-  const openClawEndpoint = endpoint(base, 'openclaw', instanceId);
-  const hermesEndpoint = endpoint(base, 'hermes', instanceId);
+  const openClawEndpoint = endpoint(base, 'openclaw', instanceId, true);
+  const hermesEndpoint = endpoint(base, 'hermes', instanceId, true);
 
   return [
     {
       id: 'pi',
       name: 'Pi',
+      compatibility: 'Pi 1.1.0；需要腾讯记忆扩展',
       kind: 'command',
       target: '终端（Bash / Zsh）',
       instructions: '先将源码仓库的 MemoryCore/pi-plugin/index.ts 保存为 ~/.pi/agent/extensions/tdai-memory.ts（或使用已有 Pi 客户端包中的同一插件）。填写业务 User Key、Team ID 和 Agent ID；Task ID 可选。插件自动为每个真实会话生成 pi-<session id>，不要手填固定会话 ID。',
@@ -92,6 +95,7 @@ pi -e "$HOME/.pi/agent/extensions/tdai-memory.ts" --provider tdai --model "$TDAI
     {
       id: 'claude-code',
       name: 'Claude Code',
+      compatibility: '模板基线：Claude Code 2.1.296',
       kind: 'file',
       target: '~/.claude/settings.json',
       content: JSON.stringify(
@@ -113,20 +117,26 @@ pi -e "$HOME/.pi/agent/extensions/tdai-memory.ts" --provider tdai --model "$TDAI
     {
       id: 'codebuddy',
       name: 'CodeBuddy',
+      compatibility: '模板基线：CodeBuddy CLI 2.164.0',
+      instructions: '保存模型文件并填写业务 User Key。url 必须包含完整的 /v1/chat/completions 路径。以下启动命令通过官方 --header 参数绑定 Team/Agent 身份；每次新会话生成新的会话 ID，续聊保留原值。',
       kind: 'file',
       target: '~/.codebuddy/models.json',
+      setupCommands: `export TDAI_TEAM_ID='<team-id>'
+export TDAI_AGENT_ID='<agent-id>'
+export TDAI_CONVERSATION_ID="$(node -e 'process.stdout.write(require("node:crypto").randomUUID())')"
+codebuddy --header "x-team-id: $TDAI_TEAM_ID" "x-agent-id: $TDAI_AGENT_ID" "x-conversation-id: $TDAI_CONVERSATION_ID" --model ${shellQuoted(model)}`,
       content: JSON.stringify(
         {
           models: [
             {
               id: model,
               name: 'proxy-memory-agent',
-              vendor: 'claude',
+              vendor: 'Custom',
               apiKey: USER_KEY_PLACEHOLDER,
               maxInputTokens: 200000,
               url: codeBuddyEndpoint,
               supportsToolCall: true,
-              supportsImages: true,
+              supportsImages: false,
             },
           ],
         },
@@ -137,6 +147,7 @@ pi -e "$HOME/.pi/agent/extensions/tdai-memory.ts" --provider tdai --model "$TDAI
     {
       id: 'workbuddy',
       name: 'WorkBuddy',
+      compatibility: '按仓库接入规范核对；本机无对应镜像，未验证客户端版本',
       kind: 'file',
       target: '~/.workbuddy/models.json',
       content: JSON.stringify(
@@ -160,6 +171,7 @@ pi -e "$HOME/.pi/agent/extensions/tdai-memory.ts" --provider tdai --model "$TDAI
     {
       id: 'codex',
       name: 'Codex CLI',
+      compatibility: '模板基线：Codex CLI 0.162.1',
       kind: 'file',
       target: '~/.codex/config.toml',
       content: `model_provider = "team-proxy"
@@ -181,24 +193,47 @@ stream_idle_timeout_ms = 120000`,
     {
       id: 'dsh',
       name: 'DeepSeek Harness (dsh)',
+      compatibility: '模板基线：DSH 0.2.0-rc.2 / Linux',
       kind: 'file',
-      target: '~/.dsh/settings.yaml + ~/.dsh/.credentials.yaml',
-      content: `# ~/.dsh/settings.yaml
-llm-deepseek:
-  apiKeyEnv: PROXY_USER_KEY
-  baseURL: ${quoted(dshEndpoint)}
-  model: ${quoted(model)}
-  reasoningEffort: high
-
-# ~/.dsh/.credentials.yaml
-PROXY_USER_KEY: ${quoted(USER_KEY_PLACEHOLDER)}
-
-# 启动
-dsh`,
+      target: '~/.dsh/cordis.patch.yml',
+      instructions: '填写 Team/Agent 身份；Task 可留空。供应商使用随 DSH 提供的 llm-pi-ai。每次新会话重新生成 TDAI_CONVERSATION_ID，续聊保持原值。0.2.0-rc.2 使用自定义 tdai 供应商。容器中的 /tmp 需要允许执行原生模块。下方 YAML 和启动命令分别保存、执行。',
+      content: `# ~/.dsh/cordis.patch.yml
+- id: agent-default-model
+  config:
+    provider: tdai
+    model: ${quoted(model)}
+- id: llm-pi-ai
+  config:
+    providers:
+      tdai:
+        displayName: TencentDB Agent Memory
+        apiKeyEnv: TDAI_USER_KEY
+        api: openai-completions
+        baseURL: ${quoted(dshEndpoint)}
+        headers:
+          x-team-id: "<team-id>"
+          x-agent-id: "<agent-id>"
+          x-task-id: ""
+          x-conversation-id: !!js process.env.TDAI_CONVERSATION_ID
+        compat:
+          thinkingFormat: deepseek
+          supportsDeveloperRole: false
+          maxTokensField: max_tokens
+        models:
+          - id: ${quoted(model)}
+            name: ${quoted(model)}`,
+      setupCommands: `# 以下在 Bash 终端执行，不写入 YAML
+# 将业务 Key 保存为仅当前用户可读的 ~/.dsh/tdai-user.key
+# Key 文件内只有一行；chmod 600 ~/.dsh/tdai-user.key
+# 业务 Key 格式：${USER_KEY_PLACEHOLDER}
+export TDAI_USER_KEY="$(cat "$HOME/.dsh/tdai-user.key")"
+export TDAI_CONVERSATION_ID="$(node -e 'process.stdout.write(require("node:crypto").randomUUID())')"
+node --expose-internals "$(readlink -f "$(command -v dsh)")" web`,
     },
     {
       id: 'opencode',
       name: 'OpenCode',
+      compatibility: '模板基线：OpenCode 1.19.0；主模型与辅助模型一致',
       kind: 'file',
       target: '~/.config/opencode/opencode.json',
       content: JSON.stringify(
@@ -227,10 +262,13 @@ dsh`,
     {
       id: 'openclaw',
       name: 'OpenClaw',
+      compatibility: '模板基线：OpenClaw 2026.10.1；Node 24.16.0+（24.x）或 26.1.0+',
+      instructions: '填写身份请求头；每次新对话更换 x-conversation-id，续聊保持原值。将此配置合并到已有文件，保留其他 Agent 设置。',
       kind: 'file',
       target: '~/.openclaw/openclaw.json',
       content: JSON.stringify(
         {
+          agents: { defaults: { model: { primary: `memory-proxy/${model}` } } },
           models: {
             mode: 'merge',
             providers: {
@@ -241,7 +279,7 @@ dsh`,
                 headers: {
                   'x-team-id': '<team-id>',
                   'x-agent-id': '<agent-id>',
-                  'x-task-id': 'no-task',
+                  'x-task-id': '',
                   'x-conversation-id': '<conv-id>',
                 },
                 request: { allowPrivateNetwork: true },
@@ -267,18 +305,26 @@ dsh`,
     {
       id: 'hermes',
       name: 'Hermes',
+      compatibility: '模板基线：Hermes 0.21.6；Python 3.14',
+      instructions: '填写 Team/Agent 身份。session_affinity_header 让客户端自动发送真实会话 ID；旧版本若不支持此字段，不能直接使用该模板。',
       kind: 'file',
       target: '~/.hermes/config.yaml',
       content: `model:
   default: ${quoted(model)}
-  provider: custom
-  base_url: ${quoted(hermesEndpoint)}
-  api_key: ${quoted(USER_KEY_PLACEHOLDER)}
-  extra_headers:
-    x-team-id: "<team-id>"
-    x-agent-id: "<agent-id>"
-    x-task-id: "no-task"
-    x-conversation-id: "<conv-id>"`,
+  provider: tdai
+  api_mode: chat_completions
+providers:
+  tdai:
+    api: ${quoted(hermesEndpoint)}
+    api_key: ${quoted(USER_KEY_PLACEHOLDER)}
+    discover_models: false
+    models:
+      - ${quoted(model)}
+    session_affinity_header: x-conversation-id
+    extra_headers:
+      x-team-id: "<team-id>"
+      x-agent-id: "<agent-id>"
+      x-task-id: ""`,
     },
   ];
 }

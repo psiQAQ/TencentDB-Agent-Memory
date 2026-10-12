@@ -1,4 +1,5 @@
 import { guardSubscriptionResponse, subscriptionResponsesRequest } from "../../chatgpt-subscription.js";
+import { withModelIdentity } from "../../common/model-identity.js";
 /**
  * Codex Responses API handler.
  *
@@ -390,7 +391,7 @@ export async function runCodexPipeline(
   if (isAuxiliary) {
     pipe.info("CODEX_AUX", `auxiliary request → passthrough (path=${path})`);
     // aux 不上报 langfuse（跟 CC/CB 对齐——sidequery/fork 类 aux 不算真对话轮）
-    return forwardToUpstream(c, config, body, traceId, startTime, keyId, modelId, pipe, null);
+    return forwardToUpstream(c, config, body, traceId, startTime, keyId, modelId, pipe, null, null, "auxiliary");
   }
 
   // ── 6. Session ID extraction ───────────────────────────────────────────────
@@ -925,6 +926,7 @@ async function forwardToUpstream(
   pipe: ReturnType<typeof createPipeline>,
   lf: LangfuseTurnContext | null,
   archiveCtx: CodexArchiveCtx | null = null,
+  requestKind: "main" | "auxiliary" = "main",
 ): Promise<Response> {
   // Per-agent upstream override (upstream.agents.codex.url) 优先于全局 url。
   // 对齐 anthropicHandler.ts:1029 的解析姿势。codex 通常需要单独指向支持
@@ -997,6 +999,9 @@ async function forwardToUpstream(
     });
   }
 
+  if (requestKind === "main") {
+    body = withModelIdentity(body, "responses", { client: "codex", upstreamUrl, provider: _upstreamResolve.providerId });
+  }
   pipe.forwardStart(upstreamUrl);
 
   const subscriptionClientTools = body.tools;

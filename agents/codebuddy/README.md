@@ -8,7 +8,8 @@
 
 ## 1. 客户端接入配置
 
-CB 通过**配置文件** `~/.codebuddy/models.json` 配置自定义模型：
+CodeBuddy CLI 2.164.0 通过**配置文件** `~/.codebuddy/models.json` 配置自定义模型。
+`url` 使用完整的 Chat Completions 端点（[官方配置说明](https://www.codebuddy.ai/docs/cli/models)）：
 
 ```json
 {
@@ -16,10 +17,10 @@ CB 通过**配置文件** `~/.codebuddy/models.json` 配置自定义模型：
     {
       "id": "claude-sonnet-4-20250514",
       "name": "proxy-memory-agent",
-      "vendor": "claude",
+      "vendor": "Custom",
       "apiKey": "<业务用户的 sk-mem-... user_key>",
       "maxInputTokens": 200000,
-      "url": "http://127.0.0.1:8096/codebuddy/default",
+      "url": "http://127.0.0.1:8096/codebuddy/default/v1/chat/completions",
       "supportsToolCall": true,
       "supportsImages": true
     }
@@ -32,11 +33,21 @@ CB 通过**配置文件** `~/.codebuddy/models.json` 配置自定义模型：
 - `name` — 在 CodeBuddy 对话框中显示的名称，可自定义
 - `vendor` — UI 展示用（如 `claude`、`openai`），不影响实际请求
 - `apiKey` — 业务用户的 `user_key`（从面板获取，与 CC 的 `ANTHROPIC_AUTH_TOKEN` 相同）
-- `url` — Proxy 地址 + `/codebuddy/<spaceId>`；`default` 是 memory 实例 ID
+- `url` — Proxy 地址 + `/codebuddy/<spaceId>/v1/chat/completions`；`default` 是 memory 实例 ID
 
 配置完成后在 CB 对话框中选择该模型即可。
 
-### ⚠️ 版本限制
+CLI 通过请求头选择有权限的 Team 和 Agent。新会话生成新的会话 ID，续聊保留原值：
+
+```bash
+export TDAI_TEAM_ID='<team-id>'
+export TDAI_AGENT_ID='<agent-id>'
+export TDAI_CONVERSATION_ID="$(node -e 'process.stdout.write(require("node:crypto").randomUUID())')"
+codebuddy --header "x-team-id: $TDAI_TEAM_ID" "x-agent-id: $TDAI_AGENT_ID" \
+  "x-conversation-id: $TDAI_CONVERSATION_ID" --model claude-sonnet-4-20250514
+```
+
+### IDE 版本限制
 
 > CodeBuddy **4.10.2 ~ 4.10.4** 不携带 sessionId，无法完成 Session Init。  
 > **请使用 ≥ 4.10.5 或 ≤ 4.10.1**。

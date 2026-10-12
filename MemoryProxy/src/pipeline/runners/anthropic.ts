@@ -75,6 +75,7 @@ import { stageInstanceUpstreamOverride } from "../stages/instance-upstream-overr
 import { stageResolveTargetFull } from "../stages/resolve-target-full.js";
 import { stageResolveUserId } from "../stages/resolve-user-id.js";
 import { stageForwardWithRetry } from "../stages/forward-with-retry.js";
+import { withModelIdentity } from "../../common/model-identity.js";
 import { matchSystemUserByUserId, hasSystemUsers } from "../../systemUser.js";
 import { handleSystemUserPassthrough } from "../../systemUserPassthrough.js";
 import { TdaiClient, buildTdaiClientForRequest } from "../../tdai/client.js";
@@ -398,6 +399,7 @@ async function forwardWithRetry(
   forwardTimeoutMs: number,
   sessionKeyForDebug?: string,
   rateLimitContext?: { config: ProxyConfig; instanceId?: string },
+  identityClient?: string,
 ): Promise<{ resp: Response; retried: boolean }> {
   let upstreamResp: Response | undefined;
   let forwardFailed = false;
@@ -441,7 +443,9 @@ async function forwardWithRetry(
     pipe, forwardTimeoutMs, sessionKeyForDebug, rateLimitContext,
     protocol: "anthropic",
     timeoutBehavior: "always",
-    buildRetryBody: (orig, _retryModel) => orig, // anthropic 不覆写 model
+    buildRetryBody: (orig, _retryModel) => identityClient ? withModelIdentity(orig, "anthropic", {
+      client: identityClient, upstreamUrl: target.retryTarget?.url ?? target.url,
+    }) : orig, // anthropic keeps the retry request's original model
   });
 }
 
@@ -1108,7 +1112,11 @@ export async function runAnthropicPipeline(
     skipPrepare: costGuardMode === "cheap",
   });
 
-  const { body: upstreamBody, sanitizedCount } = buildUpstreamBody(body, target);
+  const { body: rawUpstreamBody, sanitizedCount } = buildUpstreamBody(body, target);
+  const upstreamBody = requestKind !== "main" ? rawUpstreamBody : withModelIdentity(rawUpstreamBody, "anthropic", {
+    client: agentSource, upstreamUrl: target.url,
+    provider: overrideResult.applied && _earlyConvResolution.kind === "override" ? _earlyConvResolution.row.provider_id : undefined,
+  });
   if (sanitizedCount > 0) {
     pipe.info(
       "FORWARD",
@@ -1142,6 +1150,7 @@ export async function runAnthropicPipeline(
       pipe, forwardTimeoutMs,
       sessionKey,
       rateLimitContext,
+      requestKind === "main" ? agentSource : undefined,
     );
     upstreamResp = result.resp;
     retried = result.retried;

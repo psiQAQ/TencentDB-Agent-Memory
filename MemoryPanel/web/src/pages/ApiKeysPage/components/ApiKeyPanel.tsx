@@ -318,12 +318,17 @@ export default function ApiKeyPanel() {
                     </Copy>}
                   </div>
                   {config.reason ? <Alert type="warning">{config.reason}</Alert> : <>
+                    {config.compatibility && <p>{config.compatibility}</p>}
                     {config.id === 'pi' && clientBaseUrl && auth?.instance_id && config.model &&
                       <PiClientBundle key={auth.instance_id} instanceId={auth.instance_id} baseUrl={clientBaseUrl} model={config.model} />}
                     {config.id === 'pi' && <h4>已有插件：手动配置环境变量</h4>}
                     <p>{config.kind === 'command' ? config.target : `${t('apiKey.endpoint.kind.file')} · ${config.target}`}</p>
                     {config.instructions && <p>{config.instructions}</p>}
                     <pre className="_memory-apikey-endpoint-code">{config.content}</pre>
+                  {config.setupCommands && <>
+                    <Copy text={config.setupCommands}><Button>复制启动命令</Button></Copy>
+                    <pre className="_memory-apikey-endpoint-code">{config.setupCommands}</pre>
+                  </>}
                   </>}
                 </div>
               ))

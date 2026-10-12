@@ -169,7 +169,7 @@ describe("OpenAI upstream header privacy", () => {
   });
 
   it.each(["hermes", "openclaw"])(
-    "rejects the unimplemented %s OpenAI route before upstream work",
+    "forwards the registered %s OpenAI route with isolated server credentials",
     async (source) => {
       const value = config();
       initAuth(value.auth);
@@ -178,8 +178,9 @@ describe("OpenAI upstream header privacy", () => {
         { method: "POST", headers: privateHeaders(), body: requestBody() },
       );
 
-      expect(response.status).toBe(404);
-      expect(upstreamHeaders).toEqual([]);
+      expect(response.status).toBe(200);
+      expect(upstreamHeaders).toHaveLength(1);
+      assertSafe(upstreamHeaders[0]!, "Bearer server-global-key");
     },
   );
 
@@ -293,6 +294,8 @@ describe("OpenAI upstream header privacy", () => {
     "/codebuddy/space-1/v1/moderations",
     "/opencode/space-1/v1/embeddings",
     "/pi/space-1/v1/completions",
+    "/hermes/space-1/v1/embeddings",
+    "/openclaw/space-1/v1/completions",
   ])("uses configured groups or official fallback on the OpenAI auxiliary route %s", async (path) => {
     const value = config();
     initAuth(value.auth);
@@ -307,7 +310,7 @@ describe("OpenAI upstream header privacy", () => {
     assertSafe(upstreamHeaders[0]!, "Bearer server-global-key");
   });
 
-  it.each(["cursor", "openai", "codex", "unknown", "hermes", "openclaw"])(
+  it.each(["cursor", "openai", "codex", "unknown"])(
     "rejects the non-OpenAI %s auxiliary source before auth or body parsing",
     async (source) => {
       const value = config();

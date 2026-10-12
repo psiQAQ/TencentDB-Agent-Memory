@@ -36,7 +36,7 @@ describe('API Key client access configuration', () => {
     ]);
     for (const config of configs) {
       expect(config.content).toContain('runtime-model-v2');
-      expect(config.content).toContain(USER_KEY_PLACEHOLDER);
+      expect(config.content + (config.setupCommands ?? '')).toContain(USER_KEY_PLACEHOLDER);
       expect(config.content).not.toContain('PROXY_UPSTREAM_MODEL 里配的模型');
     }
     expect(configs[1]).toMatchObject({
@@ -66,6 +66,15 @@ describe('API Key client access configuration', () => {
     expect(pi.instructions).toContain('pi-<session id>');
   });
 
+  it('uses a complete Chat endpoint for CodeBuddy CLI custom models', () => {
+    const config = buildClientAccessConfigs('https://memory.example/proxy', 'a', 'deepseek-flash').find((entry) => entry.id === 'codebuddy')!;
+    const model = JSON.parse(config.content).models[0];
+    expect(model.url).toBe('https://memory.example/proxy/codebuddy/a/v1/chat/completions');
+    expect(model.vendor).toBe('Custom');
+    expect(model.supportsImages).toBe(false);
+    expect(config.setupCommands).toContain('--header');
+  });
+
   it('shows explicit unavailable reasons without generating a copyable configuration', () => {
     const statuses = ['unassigned', 'disabled', 'default_missing', 'model_missing', 'unsupported', 'client_credentials'] as const;
     const entries = buildClientAccessEntries('https://memory.example/proxy', 'instance-a', statuses.map((status) => ({
@@ -77,6 +86,30 @@ describe('API Key client access configuration', () => {
       agent_source: 'new-client', display_name: 'New client', protocol: 'new', model_id: 'model-a', credential_kind: 'api_key', status: 'ready',
     }]);
     expect(unknown[0]?.reason).toBe('当前客户端尚无接入模板。');
+  });
+
+  it('matches the tested DSH Cordis adapter, credential reference and per-session headers', () => {
+    const dsh = buildClientAccessConfigs('https://memory.example/proxy', 'a', 'deepseek-flash').find((item) => item.id === 'dsh')!;
+    expect(dsh.target).toBe('~/.dsh/cordis.patch.yml');
+    expect(dsh.compatibility).toContain('0.2.0-rc.2');
+    expect(dsh.content).toContain('- id: llm-pi-ai');
+    expect(dsh.content).toContain('apiKeyEnv: TDAI_USER_KEY');
+    expect(dsh.content).toContain('x-conversation-id: !!js process.env.TDAI_CONVERSATION_ID');
+    expect(dsh.setupCommands).toContain('--expose-internals');
+    expect(dsh.content).not.toContain('export TDAI_USER_KEY');
+    expect(dsh.content).not.toContain('.credentials.yaml');
+  });
+
+  it('selects the OpenClaw model and configures Hermes provider-level headers and session affinity', () => {
+    const configs = buildClientAccessConfigs('https://memory.example/proxy', 'a', 'selected');
+    const claw = JSON.parse(configs.find((item) => item.id === 'openclaw')!.content);
+    expect(claw.agents.defaults.model.primary).toBe('memory-proxy/selected');
+    expect(claw.models.providers['memory-proxy'].baseUrl).toBe('https://memory.example/proxy/openclaw/a/v1');
+    const hermes = configs.find((item) => item.id === 'hermes')!.content;
+    expect(hermes).toContain('providers:\n  tdai:');
+    expect(hermes).toContain('api: "https://memory.example/proxy/hermes/a/v1"');
+    expect(hermes).toContain('session_affinity_header: x-conversation-id');
+    expect(hermes).not.toContain('<conv-id>');
   });
 
   it('uses the protocol-specific endpoint form from each agent document', () => {

@@ -25,6 +25,36 @@ afterEach(() => {
 });
 
 describe("Responses session binding and DSH legacy route", () => {
+  it.each([false, true])("adds backend identity only to a main Codex turn (auxiliary=%s)", async (auxiliary) => {
+    const bodies: Array<Record<string, unknown>> = [];
+    vi.stubGlobal("fetch", vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
+      bodies.push(JSON.parse(String(init?.body)));
+      return Response.json({ id: "response-safe", output: [], usage: {} });
+    }));
+    const config = structuredClone(DEFAULT_CONFIG);
+    config.upstream.url = "https://upstream.invalid/v1";
+    config.upstream.apiKey = "server-key";
+    config.upstream.agents.codex = { url: "https://upstream.invalid/v1" };
+    config.sessionInit.enabled = false;
+    config.injection.enabled = false;
+    config.extraction = { enabled: false, extractors: [] };
+    config.creditReport.url = "";
+    config.log.backend = "noop";
+    const headers: Record<string, string> = {
+      authorization: "Bearer client-key", "content-type": "application/json", "x-conversation-id": "identity-session",
+    };
+    if (auxiliary) headers["x-openai-memgen-request"] = "true";
+    const response = await createApp(config).request("http://proxy/codex/space-1/v1/responses", {
+      method: "POST", headers,
+      body: JSON.stringify({ model: "test-model", stream: false, instructions: "client instructions",
+        input: [{ type: "message", role: "user", content: "hello" }] }),
+    });
+    expect(response.status).toBe(200);
+    expect(bodies).toHaveLength(1);
+    expect(bodies[0].instructions).toContain("client instructions");
+    expect(String(bodies[0].instructions).includes("tdai_model_identity")).toBe(!auxiliary);
+  });
+
   it("prefers the explicit Codex conversation binding over the SDK session", () => {
     expect(extractCodexSessionId(
       { "x-conversation-id": "explicit-session", "x-parent-conversation-id": "parent-session", "session-id": "sdk-session" },

@@ -94,6 +94,7 @@ export function renderTdaiMemoryToolsBlock(
     `    body: {"query": "<text>", "limit": 5}`,
     "    use:  搜索 L1 原子记忆（双路 hybrid: dense vector + BM25），按相关度排序。默认跨当前 Agent 的 self + imported 记忆检索；返回项里的 source_agent_* 表示来源。适合回忆用户偏好、历史结论、规则等。",
     "    returns: {code, data: {items: [...], searched_agents: [...]}} — 命中项在 data.items[]。",
+    "    empty-result: data.items=[] 只表示此查询无命中。先用单个项目名或原文标识符缩短查询重试；仍为空时调用 tdai_atomic_query（limit: 20）核对近期事实，再说明是否找到。不要只搜一次长问题就断言没有记忆。",
     "  </tool>",
     "",
     "  <tool name=\"tdai_atomic_query\">",
@@ -131,6 +132,7 @@ export function renderTdaiMemoryToolsBlock(
     "- 这些是只读工具；要修改 L1/L2/L3 必须用主链路（agent_id 自动归属）。",
     "- 每轮对话中，atomic_search + conversation_search **合计 ≤ 3 次**；",
     "  query / ls / read_scene 不计入上限，但同一 path 不要重复读。",
+    "- 搜索词先用简短的项目名、实体名或原文标识符，不要把整段问题和多个待查字段拼成一个查询。搜索成功但结果为空时，在上述次数限制内缩短查询重试；仍无结果可用 tdai_atomic_query（limit: 20）检查当前 Agent 的近期事实。空搜索结果不代表记忆不存在，回答前区分无命中、无权限和请求失败。",
     "- 失败重试：HTTP 5xx 可一次性 retry；HTTP 4xx 不要重试。",
     "- 所有 curl 必须带：x-api-key（值从 TDAI_MEMORY_USER_KEY 环境变量展开）、" +
       (spaceId ? `x-tdai-service-id: ${spaceId}、` : "x-tdai-service-id（当前 memory 实例，见示例）、") +

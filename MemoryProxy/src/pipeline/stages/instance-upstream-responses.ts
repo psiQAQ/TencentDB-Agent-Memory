@@ -46,6 +46,7 @@ export interface InstanceUpstreamResponsesBlocked {
 }
 
 export interface InstanceUpstreamResponsesResult {
+  providerId?: string;
   subscription?: boolean;
   /** override 应用后的新 upstream URL (无 override 时 = undefined) */
   overrideUrl?: string;
@@ -119,7 +120,7 @@ export async function stageInstanceUpstreamResponses(
       const token = await resolveSubscriptionToken(config.coreSkill, spaceId, { group_id: row.group_id, model_id: row.model_id });
       return { overrideUrl: "https://api.openai.com/v1/responses", effectiveApiKey: token, subscription: true,
         allowClientCredentials: false, headerUpdates: { authorization: `Bearer ${token}`, deleteXApiKey: true },
-        bodyModelOverride: row.model_id, skipCreditReport: true };
+        bodyModelOverride: row.model_id, providerId: row.provider_id, skipCreditReport: true };
     }
     const overrideUrl = resolveInstanceTargetUrl(row, joinUrl(row.base_url, pathForOverride));
     const headerUpdates: NonNullable<InstanceUpstreamResponsesResult["headerUpdates"]> = {};
@@ -133,6 +134,7 @@ export async function stageInstanceUpstreamResponses(
       allowClientCredentials: row.mode === "custom_passthrough",
       headerUpdates,
       bodyModelOverride: row.model_id || undefined,
+      providerId: row.provider_id,
       skipCreditReport: true,
     };
   }

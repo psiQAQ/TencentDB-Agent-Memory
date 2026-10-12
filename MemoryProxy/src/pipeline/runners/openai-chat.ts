@@ -76,6 +76,7 @@ import { stageInstanceUpstreamOverride } from "../stages/instance-upstream-overr
 import { stageResolveTargetFull } from "../stages/resolve-target-full.js";
 import { stageResolveUserId } from "../stages/resolve-user-id.js";
 import { stageForwardWithRetry } from "../stages/forward-with-retry.js";
+import { withModelIdentity } from "../../common/model-identity.js";
 import { resolveAgentStrategy } from "../strategies/agent/index.js";
 import { matchSystemUserByUserId, hasSystemUsers } from "../../systemUser.js";
 import { handleSystemUserPassthrough } from "../../systemUserPassthrough.js";
@@ -342,6 +343,7 @@ async function forwardWithRetry(
   forwardTimeoutMs: number,
   sessionKeyForDebug?: string,
   rateLimitContext?: { config: ProxyConfig; instanceId?: string },
+  identityClient?: string,
 ): Promise<{ resp: Response; retried: boolean }> {
   let upstreamResp: Response | undefined;
   let forwardFailed = false;
@@ -370,7 +372,12 @@ async function forwardWithRetry(
     pipe, forwardTimeoutMs, sessionKeyForDebug, rateLimitContext,
     protocol: "openai",
     timeoutBehavior: "gated",
-    buildRetryBody: (orig, retryModel) => ({ ...orig, model: retryModel }),
+    buildRetryBody: (orig, retryModel) => {
+      const retryBody = { ...orig, model: retryModel };
+      return identityClient ? withModelIdentity(retryBody, "chat", {
+        client: identityClient, upstreamUrl: target.retryTarget?.url ?? target.url,
+      }) : retryBody;
+    },
   });
 }
 
@@ -1171,7 +1178,11 @@ export async function runOpenaiChatPipeline(
     skipPrepare: costGuardMode === "cheap" || !!subscriptionRow,
   });
 
-  const chatBody = buildUpstreamBody(body, target);
+  const rawChatBody = buildUpstreamBody(body, target);
+  const chatBody = isAuxiliary ? rawChatBody : withModelIdentity(rawChatBody, "chat", {
+    client: agentSource, upstreamUrl: target.url,
+    provider: overrideResult.applied && _earlyConvResolution.kind === "override" ? _earlyConvResolution.row.provider_id : undefined,
+  });
   const upstreamBody = subscriptionRow ? chatToResponses(chatBody) : chatBody;
 
   // Inject stream_options.include_usage for OpenAI compat
@@ -1205,6 +1216,7 @@ export async function runOpenaiChatPipeline(
       pipe, forwardTimeoutMs,
       sessionKey,
       rateLimitContext,
+      isAuxiliary ? undefined : agentSource,
     );
     upstreamResp = result.resp;
     retried = result.retried;
