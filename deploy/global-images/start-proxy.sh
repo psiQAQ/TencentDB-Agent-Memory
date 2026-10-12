@@ -199,6 +199,9 @@ CONFIG_GID="$(id -g)"
 
 info "启动 proxy (image=$PROXY_IMAGE, port=$PROXY_PORT)"
 $DOCKER run -d --name "$CONTAINER" \
+  --log-driver json-file \
+  --log-opt max-size=200m \
+  --log-opt max-file=3 \
   --group-add "$CONFIG_GID" \
   --network "$NETWORK" \
   --network-alias proxy \

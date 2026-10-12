@@ -227,6 +227,9 @@ YAML
 
 info "启动 memory-core (image=$MEMORY_CORE_IMAGE, port=$MEMORY_CORE_PORT)"
 $DOCKER run -d --name "$CONTAINER" \
+  --log-driver json-file \
+  --log-opt max-size=200m \
+  --log-opt max-file=3 \
   --network "$NETWORK" \
   --network-alias memory-core \
   -p "${MEMORY_CORE_BIND_HOST:-0.0.0.0}:${MEMORY_CORE_PORT}:8420" \

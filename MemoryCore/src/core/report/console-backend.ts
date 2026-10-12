@@ -23,6 +23,21 @@ import type {
   ObservabilityConfig,
 } from "./types.js";
 
+// ── 控制台日志级别过滤 ──────────────────────────────────────────────
+// internal observability 私有模块缺失时本后端是唯一出口，默认只放行
+// WARN/ERROR，避免高频 INFO（如 skill.worker.suppressed_skip）写满容器日志。
+// 调整为 DEBUG/INFO 可恢复全部输出：TDAI_CONSOLE_LOG_LEVEL=DEBUG
+const LOG_LEVEL_RANK: Record<string, number> = { DEBUG: 0, INFO: 1, WARN: 2, ERROR: 3 };
+function consoleLevelRank(): number {
+  const raw = (process.env.TDAI_CONSOLE_LOG_LEVEL || "WARN").toUpperCase();
+  const rank = LOG_LEVEL_RANK[raw];
+  return rank === undefined ? LOG_LEVEL_RANK.WARN : rank;
+}
+function consoleLevelEnabled(level: string): boolean {
+  const rank = LOG_LEVEL_RANK[level];
+  return rank === undefined ? true : rank >= consoleLevelRank();
+}
+
 const TAG = "[observability][console]";
 
 // ============================
@@ -126,14 +141,17 @@ export class ConsoleLogBackend implements ILogBackend {
   readonly type = "console";
 
   info(eventName: string, attrs: LogAttrs = {}): void {
+    if (!consoleLevelEnabled("INFO")) return;
     console.info(`${TAG}[log][INFO] ${eventName}`, attrs);
   }
 
   warn(eventName: string, attrs: LogAttrs = {}): void {
+    if (!consoleLevelEnabled("WARN")) return;
     console.warn(`${TAG}[log][WARN] ${eventName}`, attrs);
   }
 
   error(eventName: string, attrs: LogAttrs = {}, error?: Error): void {
+    if (!consoleLevelEnabled("ERROR")) return;
     if (error) {
       console.error(`${TAG}[log][ERROR] ${eventName}`, { ...attrs, "error.message": error.message, "error.type": error.name });
     } else {
@@ -142,6 +160,7 @@ export class ConsoleLogBackend implements ILogBackend {
   }
 
   debug(eventName: string, attrs: LogAttrs = {}): void {
+    if (!consoleLevelEnabled("DEBUG")) return;
     console.debug(`${TAG}[log][DEBUG] ${eventName}`, attrs);
   }
 }

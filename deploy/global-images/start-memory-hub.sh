@@ -126,6 +126,9 @@ rm_container_if_exists "$CONTAINER"
 
 info "启动 memory-hub (image=$MEMORY_HUB_IMAGE, panel=$PANEL_PORT knowledge=$KNOWLEDGE_PORT)"
 $DOCKER run -d --name "$CONTAINER" \
+  --log-driver json-file \
+  --log-opt max-size=200m \
+  --log-opt max-file=3 \
   --network "$NETWORK" \
   --network-alias memory-hub \
   --add-host=host.docker.internal:host-gateway \
