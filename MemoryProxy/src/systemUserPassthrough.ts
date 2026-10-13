@@ -348,6 +348,9 @@ async function recordTracesAndUsage(params: {
         traceName: `${modelId} / ${match.name}`,
         userId: attributionKey,
         sessionId: sessionKey,
+        // 统一走 instanceId（mergeInstanceId 负责落进 trace/observation metadata）。
+        // 内部变量仍叫 spaceId（与 CH/credit 命名一致），只有 Langfuse 这层改名。
+        instanceId: spaceId || undefined,
         tags: traceTags,
         traceInput: requestPayload ?? undefined,
         traceOutput: responsePayload ?? undefined,
@@ -355,7 +358,6 @@ async function recordTracesAndUsage(params: {
           stream,
           upstreamUrl,
           systemUser: match.name,
-          spaceId: spaceId || undefined,
         },
         observationMetadata: {
           stream,
@@ -371,6 +373,7 @@ async function recordTracesAndUsage(params: {
           traceName: `${modelId} / ${match.name}`,
           userId: attributionKey,
           sessionId: sessionKey,
+          instanceId: spaceId || undefined,
           tags: traceTags,
           routeTags: [],
           userQuery: "",

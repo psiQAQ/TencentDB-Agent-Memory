@@ -31,6 +31,8 @@ import type { Context } from "hono";
 import type { ProxyConfig } from "../../types.js";
 import { apiKeyToKeyId, extractBearerToken, opikCreateTrace, uuidv7 } from "../../opik.js";
 import { createPipeline, writeLog } from "../../logger.js";
+import { applyMainModel } from "../../mainModel.js";
+import { poolServiceRejection } from "../../pool-service.js";
 import { extractSpaceIdFromPath } from "../../credit-reporter.js";
 import { joinUrl } from "../../guard-adapter.js";
 import {
@@ -76,6 +78,16 @@ import {
 } from "../../langfuse.js";
 import { TdaiClient, buildTdaiClientForRequest } from "../../tdai/client.js";
 import { deriveTdaiIdentity } from "../../tdai/identity.js";
+import {
+  ResponsesAssembler,
+  buildSessionTurnContext,
+  createSessionTurnSeed,
+  parseSseData,
+  responsesReplyFromJson,
+  submitSessionTurn,
+  type PendingSessionTurn,
+  type SessionTurnContext,
+} from "../../session-trace/index.js";
 import type { TdaiIdentity, TdaiMessage } from "../../tdai/types.js";
 import { stageArchive } from "../stages/archive.js";
 import { stageCredit } from "../stages/credit.js";
@@ -95,6 +107,7 @@ import {
 } from "../stages/instance-upstream-responses.js";
 import { buildSafeUpstreamHeaders, MissingUpstreamCredentialError, sameOrigin } from "../../upstream-headers.js";
 import { SessionContextUnavailableError, SessionIdentityConflictError, SessionStoreUnavailableError, sessionStoreKey } from "../../session/store.js";
+import { hasExplicitAgentName, requireWecomIdentity } from "../../wecom-identity-form.js";
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
@@ -309,6 +322,15 @@ export async function runCodexPipeline(
   // codex 的 skill/memory/session_context 从此全丢。TS 2588 一直报警
   // 但被当成"重构遗留基线错误"没人修。
   let body = parseResult.body;
+  let wecomName = "";
+  if (hasExplicitAgentName(path)) {
+    const wecomIdentity = await requireWecomIdentity(config, apiKey, body, "responses");
+    if (wecomIdentity.kind !== "resolved") return wecomIdentity.response;
+    wecomName = wecomIdentity.name;
+  }
+  const poolRejection = poolServiceRejection(config, body.model);
+  if (poolRejection) return c.json(poolRejection, 400);
+  applyMainModel(body);
 
   // ── 3. Extract headers as plain object ─────────────────────────────────────
   const headers: Record<string, string> = {};
@@ -391,7 +413,7 @@ export async function runCodexPipeline(
   if (isAuxiliary) {
     pipe.info("CODEX_AUX", `auxiliary request → passthrough (path=${path})`);
     // aux 不上报 langfuse（跟 CC/CB 对齐——sidequery/fork 类 aux 不算真对话轮）
-    return forwardToUpstream(c, config, body, traceId, startTime, keyId, modelId, pipe, null, null, "auxiliary");
+    return forwardToUpstream(c, config, body, traceId, startTime, keyId, wecomName || keyId, modelId, pipe, null, null, null, "auxiliary");
   }
 
   // ── 6. Session ID extraction ───────────────────────────────────────────────
@@ -399,6 +421,15 @@ export async function runCodexPipeline(
   const sessionKey = sessionId ?? `${keyId}:${traceId}`;
   const agentSource = "codex";
   const isStream = body.stream !== false;
+  const sessionTurnSeed = createSessionTurnSeed(config, {
+    agent: agentSource,
+    path,
+    protocol: "responses",
+    headers,
+    body,
+    sessionId: sessionKey,
+    startedAt: startTime,
+  });
 
   const callerUserKey = apiKey || null;
 
@@ -412,9 +443,12 @@ export async function runCodexPipeline(
   const lf: LangfuseTurnContext = {
     traceId: langfuseTurnTraceId(traceId),
     turnSeq,
-    traceName: `${modelId} / ${keyId}`,
-    userId: keyId,
+    traceName: `${modelId} / ${wecomName || keyId}`,
+    userId: wecomName || keyId,
     sessionId: sessionKey,
+    // 记忆实例 ID（kernel tenant）—— 供 Langfuse 按实例筛选/归集。
+    // 内部仍叫 spaceId（CH/credit 命名）；只有 Langfuse 对外叫 instanceId。
+    instanceId: spaceId || undefined,
     // agent_source tag 标明客户端族群；protocol:responses 区分 codex 的 wire。
     tags: [
       `agent_source:${agentSource}`,
@@ -433,7 +467,10 @@ export async function runCodexPipeline(
   // 计费与 usage 落表照常。
   if (isLegacyProxyPath(path)) {
     pipe.info("CODEX_LEGACY_PROXY", `legacy /proxy prefix → route+compress only (path=${path})`);
-    return forwardToUpstream(c, config, body, traceId, startTime, keyId, modelId, pipe, lf, null);
+    return forwardToUpstream(c, config, body, traceId, startTime, keyId, wecomName || keyId, modelId, pipe, lf, null, {
+      seed: sessionTurnSeed,
+      authUserId: userId,
+    });
   }
 
   // ── 7. Session-init state machine ──────────────────────────────────────────
@@ -689,6 +726,7 @@ export async function runCodexPipeline(
           userId: lf.userId,
           sessionId: lf.sessionId,
           tags: lf.tags,
+          instanceId: lf.instanceId,
         },
       });
       if (memResp) return memResp;
@@ -751,9 +789,14 @@ export async function runCodexPipeline(
         userId: userId || "anonymous",
         spaceId,
         sessionKey,
-        turnSeq: 0,
+        // 必须与 lf.turnSeq 对齐 —— LangfuseInjectionObserver 用 (sessionKey,
+        // turnSeq) 派生 traceId, 跟 LLM generation 共享 trace 才能让"点开主
+        // 对话 trace 看到注入 span"的 UI 期望成立。硬编码 0 的历史写法让每
+        // 条 codex trace 都丢注入段 (CC/workbuddy 都是用本地权威值, 不是 0)。
+        turnSeq: lf.turnSeq,
         requestPath: c.req.path,
-        custom: { session: sessionInfo, userKey: callerUserKey ?? undefined, assetCapabilities },
+        // 合成 body 只抽取 system 文本，消息级注入（selected skill）无处落地。
+        custom: { session: sessionInfo, userKey: callerUserKey ?? undefined, assetCapabilities, messageInjection: false },
       });
 
       // Extract injected content from the synthetic body's system message.
@@ -796,8 +839,33 @@ export async function runCodexPipeline(
     assetCapabilities,
   });
 
+  // ── 10b. Skill selection (proxy 选择 → 客户端加载) ──────────────────────────
+  // 新用户轮次选中 skill → 直接返回 function_call，由客户端执行加载。Responses 协议
+  // 无 thinking 签名约束，upstreamUrl 不参与判定。session-init 刚完成的这一轮不触发。
+  if (!injectionSkipped && !sessionJustRegistered && sessionInfo && Array.isArray(body.input)) {
+    const { tryClientToolDelivery } = await import("../../skill/selection/delivery/client-tool.js");
+    const resp = await tryClientToolDelivery(config, {
+      protocol: "responses",
+      body,
+      messages: body.input,
+      upstreamUrl: "",
+      stream: isStream,
+      model: String(modelId ?? ""),
+      session: sessionInfo as Parameters<typeof tryClientToolDelivery>[1]["session"],
+      conversationId: sessionId,
+      sessionKey,
+      agentSource,
+      skillCapability: assetCapabilities?.skill !== false,
+    });
+    if (resp) return resp;
+  }
+
   // ── 11. Forward to upstream ────────────────────────────────────────────────
-  return forwardToUpstream(c, config, body, traceId, startTime, keyId, modelId, pipe, lf, archiveCtx);
+  return forwardToUpstream(c, config, body, traceId, startTime, keyId, wecomName || keyId, modelId, pipe, lf, archiveCtx, {
+    seed: sessionTurnSeed,
+    sessionInfo,
+    authUserId: userId,
+  });
 }
 
 // ── Archive context (skill/conversation/add + TDAI L0 write) ─────────────────
@@ -922,10 +990,12 @@ async function forwardToUpstream(
   traceId: string,
   startTime: string,
   keyId: string,
+  obsProjectName: string,
   modelId: string,
   pipe: ReturnType<typeof createPipeline>,
   lf: LangfuseTurnContext | null,
   archiveCtx: CodexArchiveCtx | null = null,
+  sessionTurn: PendingSessionTurn | null = null,
   requestKind: "main" | "auxiliary" = "main",
 ): Promise<Response> {
   // Per-agent upstream override (upstream.agents.codex.url) 优先于全局 url。
@@ -995,13 +1065,22 @@ async function forwardToUpstream(
       userQuery: lf.userQuery,
       lf,
       opikTraceId: traceId,
-      opikKeyId: keyId,
+      opikKeyId: obsProjectName,
     });
   }
 
   if (requestKind === "main") {
     body = withModelIdentity(body, "responses", { client: "codex", upstreamUrl, provider: _upstreamResolve.providerId });
   }
+  const sessionTurnCtx = sessionTurn
+    ? buildSessionTurnContext(config, sessionTurn.seed, {
+        spaceId,
+        sessionInfo: sessionTurn.sessionInfo,
+        authUserId: sessionTurn.authUserId,
+        upstreamBody: body,
+      })
+    : null;
+
   pipe.forwardStart(upstreamUrl);
 
   const subscriptionClientTools = body.tools;
@@ -1018,8 +1097,8 @@ async function forwardToUpstream(
     const inputMessages = extractForOpik(body.input);
     forkTraceId = opikCreateTrace(config, {
       traceId,
-      projectName: keyId,
-      name: `${modelId} / ${keyId}`,
+      projectName: obsProjectName,
+      name: `${modelId} / ${obsProjectName}`,
       startTime,
       input: { messages: inputMessages },
       tags: lf?.tags ?? [],
@@ -1161,6 +1240,7 @@ async function forwardToUpstream(
       }
       toolCalls = collectResponsesToolCalls(responseBody.output);
       outputText = collectResponsesOutputText(responseBody);
+      submitSessionTurn(sessionTurnCtx, responsesReplyFromJson(responseBody), modelId);
     } catch {
       // Preserve an unexpected non-JSON response without billing it.
     }
@@ -1268,6 +1348,7 @@ async function forwardToUpstream(
     config,
     requestPath: c.req.path,
     keyId,
+    obsProjectName,
     sessionKey: lf?.sessionId ?? keyId,
     spaceId,
     // Opik trace id —— 必须是 opikCreateTrace 生成的那个 (pipeline 内部
@@ -1278,6 +1359,7 @@ async function forwardToUpstream(
     skipCreditReport,
     preparedStats,
     archiveCtx,
+    sessionTurnCtx,
   });
 
   // CFQ 剥离排在最后：tap 走的是另一条 tee 分支，读到的仍是模型原始输出。
@@ -1329,6 +1411,8 @@ export interface CodexTapContext {
   config?: ProxyConfig;
   requestPath?: string;
   keyId?: string;
+  /** Opik project the turn trace was created in (`wecomName || keyId`). */
+  obsProjectName?: string;
   sessionKey?: string;
   /**
    * Opik trace id —— 由 forwardToUpstream 里的 opikCreateTrace 生成。
@@ -1351,6 +1435,8 @@ export interface CodexTapContext {
    * null 表示当前请求不需要触发归档 (aux / session 未初始化 / bypass)。
    */
   archiveCtx?: CodexArchiveCtx | null;
+  /** Online session trace for this call; null when it is not recorded. */
+  sessionTurnCtx?: SessionTurnContext | null;
 }
 
 /**
@@ -1376,6 +1462,7 @@ export function consumeCodexStream(stream: ReadableStream<Uint8Array>, ctx: Code
     let stopReason: string | undefined;
     let streamCompleted = false;
     let responseCompleted = false;
+    const replyAssembler = ctx.sessionTurnCtx ? new ResponsesAssembler() : null;
     // 5 分钟兜底：客户端断开可能让上游流卡住，这里超时也强制收尾一次。
     const timeoutHandle = setTimeout(() => {
       if (!streamCompleted) {
@@ -1392,6 +1479,10 @@ export function consumeCodexStream(stream: ReadableStream<Uint8Array>, ctx: Code
       if (ctx.requireCompleted && !responseCompleted) {
         pipe.error("CHATGPT_STREAM_INTERRUPTED", "Subscription response did not complete; no successful-turn archive was written");
         return;
+      }
+      if (replyAssembler) {
+        parseSseData(sseBuf).forEach((evt) => replyAssembler.push(evt));
+        submitSessionTurn(ctx.sessionTurnCtx, replyAssembler.result(), modelId);
       }
 
       const endTime = new Date().toISOString();
@@ -1463,6 +1554,7 @@ export function consumeCodexStream(stream: ReadableStream<Uint8Array>, ctx: Code
             traceName: lf.traceName,
             userId: lf.userId,
             sessionId: lf.sessionId,
+            instanceId: lf.instanceId,
             tags: lf.tags,
             traceInput: lf.userQuery || undefined,
             traceOutput: output,
@@ -1499,6 +1591,7 @@ export function consumeCodexStream(stream: ReadableStream<Uint8Array>, ctx: Code
           traceId: ctx.traceId ?? "",
           forkTraceId: ctx.forkTraceId,
           keyId: ctx.keyId ?? "unknown",
+          projectName: ctx.obsProjectName,
           modelId, startTime, endTime,
           inputMessages: [{ role: "user", content: JSON.stringify(inputBody.input ?? []) }],
           outputMessage: output,
@@ -1569,6 +1662,7 @@ export function consumeCodexStream(stream: ReadableStream<Uint8Array>, ctx: Code
           try {
             const evt = JSON.parse(dataStr) as Record<string, unknown>;
             const evtType = evt.type as string | undefined;
+            replyAssembler?.push(evt);
 
             if (evtType === "response.output_text.delta") {
               const delta = evt.delta;

@@ -39,4 +39,12 @@ describe("GitSourceFetcher SSRF validation", () => {
     expect(() => fetcher.validate("https://gitlab.com/example/repo.git")).not.toThrow();
     expect(() => fetcher.validate("https://[2001:4860:4860::8888]/repo.git")).not.toThrow();
   });
+
+  it("accepts public SSH repositories and rejects private SSH destinations", () => {
+    expect(() => fetcher.validate("git@github.com:example/repo.git")).not.toThrow();
+    expect(() => fetcher.validate("ssh://git@github.com:2222/example/repo.git")).not.toThrow();
+    for (const url of ["git@127.0.0.1:repo.git", "ssh://git@10.0.0.1/repo.git", "ssh://git@[::1]/repo.git"]) {
+      expect(() => fetcher.validate(url)).toThrow(/private\/loopback/);
+    }
+  });
 });

@@ -20,6 +20,7 @@ import {
   LifecycleTransactionsRequiredError,
   type IMetadataStore,
 } from "../store/interface.js";
+import { UserSessionDefaultService as UserSessionDefaultServiceCtor } from "./user-session-default-service.js";
 import {
   checkPermission,
   canBindAsset,
@@ -320,6 +321,7 @@ export class MetadataService {
   private readonly quota: MetadataQuotaLimits;
   private readonly memorySystemUser?: MemorySystemUserConfig;
   private _configParams?: import("./config-param-service.js").IConfigParamService;
+  private _userSessionDefault?: import("./user-session-default-service.js").IUserSessionDefaultService;
 
   /**
    * 进程内 LRU 缓存：已确认（在 store 里存在的） chat_memory 资产 id 集合。
@@ -378,6 +380,24 @@ export class MetadataService {
 
   setOperationalIntegrityHooks(hooks: OperationalIntegrityHooks): void {
     this._operationalIntegrityHooks = hooks;
+  }
+
+  // ── UserSessionDefault (v3.3) ──
+  //
+  // 用户级 session 默认 (team, agent, task) 三元组。
+  //
+  // 懒初始化: UserSessionDefaultService 自包含 (只依赖 store + 本 metaService),
+  // 不需要外部装配。首次访问 .userSessionDefault 时才创建 —— 避免构造期触发
+  // 循环 import 执行序问题 (该 service 内部 import { MetadataError } 回本模块)。
+  get userSessionDefault(): import("./user-session-default-service.js").IUserSessionDefaultService {
+    if (!this._userSessionDefault) {
+      this._userSessionDefault = new (UserSessionDefaultServiceCtor as unknown as new (
+        store: IMetadataStore, svc: MetadataService,
+      ) => import("./user-session-default-service.js").IUserSessionDefaultService)(
+        this.store, this,
+      );
+    }
+    return this._userSessionDefault;
   }
 
   /** memory 静态 key 仅用于 auth/verify body，不可作 Header 鉴权。 */

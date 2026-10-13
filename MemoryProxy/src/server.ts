@@ -7,8 +7,10 @@ import { SubscriptionError } from "./chatgpt-subscription.js";
 import { MissingUpstreamCredentialError } from "./upstream-headers.js";
 import { SessionContextUnavailableError, SessionIdentityConflictError, SessionStoreUnavailableError } from "./session/store.js";
 import { log } from "./report/log.js";
-import { runOpenaiChatPipeline as handleChatCompletions } from "./pipeline/runners/openai-chat.js";
-import { runAnthropicPipeline as handleAnthropicMessages } from "./pipeline/runners/anthropic.js";
+import { accessKeyMiddleware } from "./accessKeys.js";
+import { runOpenaiChatPipeline } from "./pipeline/runners/openai-chat.js";
+import { runAnthropicPipeline } from "./pipeline/runners/anthropic.js";
+import { withClientFacingModel } from "./response-model-mask.js";
 import { runUtilityPipeline as handleAuxiliaryEndpoint } from "./pipeline/runners/utility.js";
 import { runDirectPipeline as handleDirectPassthrough } from "./pipeline/runners/direct.js";
 import { runCodexPipeline as handleCodexEndpoint } from "./pipeline/runners/codex.js";
@@ -53,9 +55,14 @@ function bindAuxSpaceRoute(
   if (isAnthropicMessageSource(source)) return source;
   return isOpenAIPlatformSource(source) ? source : undefined;
 }
+const handleChatCompletions = withClientFacingModel(runOpenaiChatPipeline);
+const handleAnthropicMessages = withClientFacingModel(runAnthropicPipeline);
 
 export function createApp(config: ProxyConfig): Hono {
   const app = new Hono();
+
+  const accessKeysFile = process.env.TDAI_PROXY_ACCESS_KEYS_FILE?.trim();
+  if (accessKeysFile) app.use("*", accessKeyMiddleware(accessKeysFile));
 
   app.onError((error, c) => {
     if (error instanceof SubscriptionError) return c.json({ error: { type: "subscription_error", code: error.code, message: error.code } }, error.status);
@@ -441,7 +448,7 @@ export function createApp(config: ProxyConfig): Hono {
   });
 
   // Legacy /proxy/<spaceId>/ prefix — 不带 agent 段，按 path 后缀分派协议。
-  // 这条入口只做路由 / 压缩 / 计费；handler 内见 isLegacyProxyPath，记忆类
+  // 这条入口只做路由 / 压缩 / 计费 / 会话上传（不区分 subagent）；handler 内见 isLegacyProxyPath，记忆类
   // 功能（session-init / mem 命令 / injection / L0 / skill）一律关闭。
   app.post("/proxy/:spaceId/v1/messages", (c) => handleAnthropicMessages(c, config, bindAnthropicSpaceRoute(c.req.path.split("/").filter(Boolean)[0] === "v1" ? "proxy" : c.req.path.split("/").filter(Boolean)[0])));
   app.post("/proxy/:spaceId/v1/messages/count_tokens", (c) => handleAuxiliaryEndpoint(c, config, bindAuxSpaceRoute(c.req.path.split("/").filter(Boolean)[0] === "v1" ? "proxy" : c.req.path.split("/").filter(Boolean)[0], c.req.path.includes("/messages/") ? "anthropic" : "openai")));

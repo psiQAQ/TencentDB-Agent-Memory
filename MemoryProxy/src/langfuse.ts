@@ -140,6 +140,10 @@ export interface LangfuseTurnContext {
   /** trace sessionId（导出时固定脱敏，不可用于关联）。 */
   sessionId: string;
   /**
+   * Instance identity is internal only and is not exported to telemetry.
+   */
+  instanceId?: string;
+  /**
    * trace 级标签导出前只保留 protocol/stream 等固定类别；session 标签固定脱敏，
    * 不可用于跨请求关联。
    */
@@ -185,6 +189,10 @@ export interface LangfuseGenerationReport {
   userId: string;
   /** trace sessionId（导出时固定脱敏，不可用于关联）。 */
   sessionId: string;
+  /**
+   * Internal instance identity; excluded from exported telemetry.
+   */
+  instanceId?: string;
   /** trace 标签。 */
   tags?: string[];
   /**
@@ -375,6 +383,11 @@ export interface LangfuseFailureReport {
   status?: number;
   /** 失败描述（如错误体片段或 "timeout/error"）。 */
   statusMessage: string;
+  /**
+   * 记忆实例 ID —— 不传时继承 `lf.instanceId`（turn 上下文里已有）。
+   * 仅在 lf 未携带实例 ID 时才需要显式传。
+   */
+  instanceId?: string;
   /** 额外标签（如 ["error"]）。 */
   extraTags?: string[];
   /** observation 级 metadata。 */
@@ -404,6 +417,8 @@ export function langfuseReportFailure(report: LangfuseFailureReport): void {
     traceName: lf.traceName,
     userId: lf.userId,
     sessionId: lf.sessionId,
+    // 失败上报同样带实例 ID：lf 上有就继承，调用点显式传的优先。
+    instanceId: report.instanceId ?? lf.instanceId,
     tags: report.extraTags && report.extraTags.length > 0 ? [...lf.tags, ...report.extraTags] : lf.tags,
     // 失败 trace 只记录用户输入摘要，不导出原文或写 trace output。
     traceInput: lf.userQuery || undefined,

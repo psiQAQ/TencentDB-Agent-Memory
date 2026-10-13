@@ -21,6 +21,8 @@ import * as archiveStage from "../pipeline/stages/archive.js";
 import { createPipeline } from "../logger.js";
 import * as recorder from "../tdai/recorder.js";
 import * as skillTrigger from "../skill/handler-glue.js";
+import { buildSessionTurnContext } from "../session-trace/index.js";
+import { sessionUploadQueue } from "../session-trace/upload-queue.js";
 
 type Json = Record<string, unknown>;
 function sse(events: Json[], crlf = false, contentType = true): Response {
@@ -582,6 +584,7 @@ it('reports independent Chat and Responses subscription probe outcomes', async (
   expect(bodies[0]).toMatchObject({ input: [{ type: 'message', role: 'user' }], stream: true, store: false });
 });
 it("archives a subscription turn only after response.completed", async () => {
+  const enqueue = vi.spyOn(sessionUploadQueue, "submit").mockResolvedValue("ok");
   const archive = vi
     .spyOn(archiveStage, "stageArchive")
     .mockResolvedValue(undefined);
@@ -590,6 +593,13 @@ it("archives a subscription turn only after response.completed", async () => {
   const error = vi.spyOn(pipe, "error");
   const context: CodexTapContext = {
     requireCompleted: true,
+    sessionTurnCtx: buildSessionTurnContext(value, {
+      protocol: "responses", startedAt: "2026-10-13T00:00:00.000Z", userQuery: "synthetic",
+      mainSessionId: "synthetic-session", subagent: null,
+    }, {
+      spaceId: "synthetic", authUserId: "synthetic-user", sessionInfo: { team_id: "synthetic-team" },
+      upstreamBody: { input: [{ role: "user", content: "synthetic" }] },
+    }),
     lf: null,
     modelId: "account-model",
     startTime: new Date().toISOString(),
@@ -621,8 +631,10 @@ it("archives a subscription turn only after response.completed", async () => {
     ),
   );
   expect(archive).not.toHaveBeenCalled();
+  expect(enqueue).not.toHaveBeenCalled();
   consumeCodexStream(guardSubscriptionStream(sse([completed]).body!), context);
   await vi.waitFor(() => expect(archive).toHaveBeenCalledTimes(1));
+  expect(enqueue).toHaveBeenCalledOnce();
   expect(archive.mock.calls[0][0]).toMatchObject({
     protocol: "responses",
     assistant: { text: "合成数据完成" },

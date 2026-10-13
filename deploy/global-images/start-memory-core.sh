@@ -30,6 +30,8 @@ MEMORY_CORE_ADMIN_USERNAME="${MEMORY_CORE_ADMIN_USERNAME:-admin}"
 # admin user_key 持久化位置（宿主机侧；volume 数据被清后需一并删掉此文件）
 ADMIN_KEY_FILE="${MEMORY_CORE_ADMIN_KEY_FILE:-$SCRIPT_DIR/.admin-key}"
 
+AUTH_HEADER=(-H "Authorization: Bearer $MEMORY_CORE_GATEWAY_API_KEY")
+
 CONTAINER=tdai-memory-core
 NETWORK=tdai-memory-stack
 
@@ -115,6 +117,38 @@ else
   info "memory-core 元数据后端 = sqlite（容器 volume 内）"
 fi
 
+# ── L3 即时更新决策（默认 current；显式启用才生成 JEV 配置）──────────────
+MEMORY_CORE_PERSONA_TRIGGER_MODE="${MEMORY_CORE_PERSONA_TRIGGER_MODE:-current}"
+JEV_ENV_ARGS=()
+case "$MEMORY_CORE_PERSONA_TRIGGER_MODE" in
+  current)
+    PERSONA_TRIGGER_YAML="    triggerMode: current"
+    ;;
+  jev)
+    require_vars MEMORY_CORE_JEV_ENDPOINT MEMORY_CORE_JEV_MODEL TYPESAFE_API_KEY
+    MEMORY_CORE_JEV_PROVIDER="${MEMORY_CORE_JEV_PROVIDER:-jev}"
+    MEMORY_CORE_JEV_TIMEOUT_MS="${MEMORY_CORE_JEV_TIMEOUT_MS:-3000}"
+    MEMORY_CORE_JEV_DIAGNOSTICS_MODE="${MEMORY_CORE_JEV_DIAGNOSTICS_MODE:-off}"
+    PERSONA_TRIGGER_YAML=$(cat <<YAML
+    triggerMode: jev
+    jev:
+      provider: "${MEMORY_CORE_JEV_PROVIDER}"
+      endpoint: "${MEMORY_CORE_JEV_ENDPOINT}"
+      # Secret 不落盘；Core 启动后从同名环境变量解析。
+      apiKey: "\${TYPESAFE_API_KEY}"
+      model: "${MEMORY_CORE_JEV_MODEL}"
+      timeoutMs: ${MEMORY_CORE_JEV_TIMEOUT_MS}
+      diagnostics:
+        mode: "${MEMORY_CORE_JEV_DIAGNOSTICS_MODE}"
+YAML
+)
+    JEV_ENV_ARGS+=( -e "TYPESAFE_API_KEY=$TYPESAFE_API_KEY" )
+    ;;
+  *)
+    die "MEMORY_CORE_PERSONA_TRIGGER_MODE 仅支持 current 或 jev"
+    ;;
+esac
+
 pull_image "$MEMORY_CORE_IMAGE"
 rm_container_if_exists "$CONTAINER"
 
@@ -186,6 +220,7 @@ memory:
   persona:
     triggerEveryN: 50
     maxScenes: 15
+${PERSONA_TRIGGER_YAML}
   pipeline:
     everyNConversations: 5
     enableWarmup: true
@@ -243,6 +278,7 @@ $DOCKER run -d --name "$CONTAINER" \
   -e TDAI_GATEWAY_API_KEY="$MEMORY_CORE_GATEWAY_API_KEY" \
   -e TDAI_DATA_DIR=/data/tdai-memory \
   -e STORE_MODE="$MEMORY_CORE_STORE_MODE" \
+  ${JEV_ENV_ARGS[@]+"${JEV_ENV_ARGS[@]}"} \
   ${MONGO_ENV_ARGS[@]+"${MONGO_ENV_ARGS[@]}"} \
   "$MEMORY_CORE_IMAGE" >/dev/null
 
@@ -278,7 +314,7 @@ verify_user_key() {
   code=$(/usr/bin/curl -sS -o /dev/null -w "%{http_code}" --max-time 5 \
     -X POST -H "Content-Type: application/json" \
     -H "x-tdai-service-id: default" \
-    ${MEMORY_CORE_GATEWAY_API_KEY:+-H "Authorization: Bearer ${MEMORY_CORE_GATEWAY_API_KEY}"} \
+    "${AUTH_HEADER[@]+"${AUTH_HEADER[@]}"}" \
     "http://localhost:${MEMORY_CORE_PORT}/v3/meta/auth/verify" \
     -d "$(printf '{"user_key":"%s"}' "$key")" 2>/dev/null || echo "000")
   [[ "$code" == "200" ]]
@@ -298,7 +334,7 @@ init_body=$(printf '{"username":"%s","user_key":"%s"}' \
   "$MEMORY_CORE_ADMIN_USERNAME" "$ADMIN_KEY")
 init_resp=$(/usr/bin/curl -sS -o /tmp/init-admin.$$ -w "%{http_code}" \
   -X POST -H "Content-Type: application/json" \
-  ${MEMORY_CORE_GATEWAY_API_KEY:+-H "Authorization: Bearer ${MEMORY_CORE_GATEWAY_API_KEY}"} \
+  "${AUTH_HEADER[@]+"${AUTH_HEADER[@]}"}" \
   -H "x-tdai-service-id: default" \
   "http://localhost:${MEMORY_CORE_PORT}/v3/internal/meta/user/init-admin" \
   -d "$init_body" 2>/dev/null || echo "000")
