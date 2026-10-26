@@ -22,6 +22,7 @@ function sessionConfig(): ProxyConfig {
   config.upstream.agents = {
     opencode: { url: "https://opencode.upstream.invalid/anthropic/v1", apiKey: "opencode-key" },
     pi: { url: "https://pi.upstream.invalid/anthropic/v1", apiKey: "pi-key" },
+    dsh: { url: "https://dsh.upstream.invalid/anthropic/v1", apiKey: "dsh-key" },
   };
   config.sessionInit.enabled = true;
   config.injection.enabled = false;
@@ -92,6 +93,8 @@ describe("Anthropic platform session app flow", () => {
   it.each([
     ["opencode", false],
     ["pi", true],
+    ["dsh", false],
+    ["dsh", true],
   ] as const)("keeps %s session context in top-level system (stream=%s)", async (source, stream) => {
     const config = sessionConfig();
     const fixture = metadata(source);

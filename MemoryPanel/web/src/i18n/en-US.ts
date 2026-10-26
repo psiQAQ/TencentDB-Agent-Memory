@@ -276,6 +276,9 @@ export const enUS = {
   'resources.type.other': 'Other Asset',
   'resources.type.total': 'Total',
 
+  // ===== TabBar =====
+  'tabbar.close': 'Close {{name}}',
+
   // ===== GlobalHeader =====
   'header.guide': 'Guide',
   'header.sync': 'Live Sync',

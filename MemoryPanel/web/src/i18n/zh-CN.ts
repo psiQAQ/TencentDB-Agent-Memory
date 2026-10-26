@@ -271,6 +271,9 @@ export const zhCN = {
   'resources.type.other': '其他 Asset',
   'resources.type.total': '总计',
 
+  // ===== TabBar =====
+  'tabbar.close': '关闭{{name}}',
+
   // ===== GlobalHeader =====
   'header.guide': '使用说明',
   'header.sync': '实时同步',

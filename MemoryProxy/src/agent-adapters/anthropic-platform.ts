@@ -1,5 +1,5 @@
 /** Anthropic Messages platforms with explicit proxy route bindings. */
-export const ANTHROPIC_MESSAGE_SOURCES = ["claude-code", "opencode", "pi"] as const;
+export const ANTHROPIC_MESSAGE_SOURCES = ["claude-code", "opencode", "pi", "dsh"] as const;
 
 export type AnthropicMessageSource = (typeof ANTHROPIC_MESSAGE_SOURCES)[number];
 

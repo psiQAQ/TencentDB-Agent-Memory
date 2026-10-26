@@ -7,7 +7,7 @@ import { sessionStoreKey, SessionStore } from "../session/store.js";
 describe("Anthropic platform session source", () => {
   afterEach(() => vi.restoreAllMocks());
 
-  it.each(["opencode", "pi"])("keeps %s in session storage and Core records", async (source) => {
+  it.each(["opencode", "pi", "dsh"])("keeps %s in session storage and Core records", async (source) => {
     const log = vi.spyOn(console, "log").mockImplementation(() => {});
     const error = vi.spyOn(console, "error").mockImplementation(() => {});
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});

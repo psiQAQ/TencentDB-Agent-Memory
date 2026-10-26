@@ -14,7 +14,7 @@ import { DEFAULT_CONFIG } from "../config.js";
 import { createConfiguredApp as createApp } from "./fixtures/active-profiles.js";
 import type { ProxyConfig } from "../types.js";
 
-const SOURCES = ["claude-code", "opencode", "pi"] as const;
+const SOURCES = ["claude-code", "opencode", "pi", "dsh"] as const;
 
 function configWithAuth(): ProxyConfig {
   const config = structuredClone(DEFAULT_CONFIG);
@@ -71,7 +71,7 @@ describe("route-bound Anthropic count_tokens", () => {
       request(),
     );
 
-    expect(response.status).toBe(200);
+    expect(response.status, await response.clone().text()).toBe(200);
     expect(calls.map((call) => call.url)).toEqual([
       "https://auth.invalid/v3/meta/auth/verify",
       `https://${source}.upstream.invalid/anthropic/v1/messages/count_tokens`,

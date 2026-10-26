@@ -15,7 +15,7 @@ import { createConfiguredApp as createApp } from "./fixtures/active-profiles.js"
 import { _resetSystemUsersForTest, initSystemUsers } from "../systemUser.js";
 import type { ProxyConfig } from "../types.js";
 
-const SOURCES = ["claude-code", "opencode", "pi"] as const;
+const SOURCES = ["claude-code", "opencode", "pi", "dsh"] as const;
 
 function configWithAuth(): ProxyConfig {
   const config = structuredClone(DEFAULT_CONFIG);
@@ -93,14 +93,23 @@ describe("native Anthropic platform routes", () => {
     ["claude-code", "550e8400-e29b-41d4-a716-446655440000"],
     ["opencode", "ses_open_code"],
     ["pi", "urn:uuid:a:b"],
+    ["dsh", "session-dsh-anthropic"],
   ] as const)("binds /%s/<space>/v1/messages to its real source", async (source, sessionId) => {
     const config = configWithAuth();
     initAuth(config.auth);
     const app = createApp(config);
 
+    const request = messagesRequest(sessionId);
+    if (source === "dsh") {
+      const headers = new Headers(request.headers);
+      headers.delete("x-session-id");
+      headers.set("x-deepseek-harness-session-id", sessionId);
+      request.headers = headers;
+    }
+
     const response = await app.request(
       `http://proxy/${source}/space-1/v1/messages`,
-      messagesRequest(sessionId),
+      request,
     );
 
     expect(response.status).toBe(200);
