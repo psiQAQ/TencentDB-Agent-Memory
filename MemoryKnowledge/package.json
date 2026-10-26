@@ -33,6 +33,7 @@
     "@modelcontextprotocol/sdk": "^1.12.0",
     "@node-rs/jieba": "^2.0.1",
     "@opentelemetry/api": "^1.9.1",
+    "@opentelemetry/exporter-trace-otlp-http": "0.219.0",
     "@opentelemetry/sdk-node": "^0.219.0",
     "ai": "^6.0.164",
     "better-sqlite3": "^11.10.0",

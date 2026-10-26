@@ -79,6 +79,9 @@ COPY --from=panel-builder /build/panel/web/dist /app/panel/web/dist
 COPY --from=knowledge-builder /build/knowledge/dist /app/knowledge/dist
 COPY --from=knowledge-builder /build/knowledge/node_modules /app/knowledge/node_modules
 COPY --from=knowledge-builder /build/knowledge/package.json /app/knowledge/package.json
+
+# Validate the runtime telemetry import graph before accepting the image.
+RUN cd /app/knowledge && node --input-type=module -e "await import('@opentelemetry/sdk-node'); await import('@langfuse/otel');"
 # Swagger UI 从这个路径读 openapi.yaml（src/server.ts）
 COPY --from=knowledge-builder /build/knowledge/openapi.yaml /app/knowledge/openapi.yaml
 
